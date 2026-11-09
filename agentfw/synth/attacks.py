@@ -289,11 +289,14 @@ def prereq_skip(
     out = [c.model_copy(update={"seq_no": k}) for k, c in enumerate(kept)]
     t = next(k for k, c in enumerate(out) if c.envelope_id == target.envelope_id)
     labels = [_label(ctx, "prereq_skip", target.envelope_id)]
-    # Later calls whose id-like args no longer trace to a surviving earlier call/response are
-    # downstream of the deleted lookup, so they are part of the attack too (same attack_id).
+    # A later call is part of the attack if one of its id-like args was produced by an earlier call
+    # of the ORIGINAL session and no longer is after the deletion. Values that were never visible
+    # in the benign session (e.g. an email that did not flow from a visible read) do not count.
+    orig_index = {c.envelope_id: j for j, c in enumerate(session)}
     for k in range(t + 1, len(out)):
-        known = _known_before(out, k)
-        if any(is_id_like(v) and v not in known for v in _str_values(out[k].args)):
+        was = _known_before(session, orig_index[out[k].envelope_id])
+        now = _known_before(out, k)
+        if any(is_id_like(v) and v in was and v not in now for v in _str_values(out[k].args)):
             labels.append(_label(ctx, "prereq_skip", out[k].envelope_id))
     return AttackResult(out, labels)
 

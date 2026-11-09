@@ -370,18 +370,48 @@ def test_magnitude_strength_is_realized_multiplier_for_int_fields(world: World) 
         assert 3 <= new / 7 <= 100
 
 
-def test_prereq_skip_labels_downstream_dependents(
+def test_prereq_skip_never_present_values_are_not_dependents(
     benign_session: list[RawCall], ctx: Callable[[], AttackContext]
 ) -> None:
     sess = [c for c in benign_session if c.tool_id != "stripe.retrieve_charge"]
-    # force the write to be the target: only create_refund has a read-sourced id arg here
+    mail = next(c for c in sess if c.tool_id == "mail.send_email")
+    original_ids = {i for c in sess for i in (c.response_meta.ids if c.response_meta else ())}
+    to = mail.args["to"]
+    assert isinstance(to, list) and not {str(e) for e in to} & original_ids
     r = ATTACKS["prereq_skip"](sess, np.random.default_rng(0), ctx())
     assert r is not None
-    attacked = {lab.envelope_id for lab in r.labels}
-    assert all(lab.attack_id == "atk-support-refunds-a-00000" for lab in r.labels)
-    refund = next(c for c in r.session if c.tool_id == "stripe.create_refund")
-    mail = [c for c in r.session if c.tool_id == "mail.send_email"]
-    assert refund.envelope_id in attacked
-    assert mail and all(m.envelope_id in attacked for m in mail)
-    assert len(r.labels) == len(attacked)
-    assert all(lab.attack_family == "prereq_skip" for lab in r.labels)
+    assert {lab.envelope_id for lab in r.labels} == {
+        next(c for c in sess if c.tool_id == "stripe.create_refund").envelope_id
+    }
+
+
+def test_prereq_skip_labels_dependent_whose_id_came_from_deleted_read(
+    benign_session: list[RawCall], ctx: Callable[[], AttackContext]
+) -> None:
+    sess = [c for c in benign_session if c.tool_id != "stripe.retrieve_charge"]
+    get_ticket = next(c for c in sess if c.tool_id == "zendesk.get_ticket")
+    assert get_ticket.response_meta is not None
+    ticket_id = get_ticket.response_meta.ids[0]
+    last = sess[-1]
+    follow = RawCall(
+        envelope_id="env-follow",
+        session_id=last.session_id,
+        agent_id=last.agent_id,
+        principal_id=last.principal_id,
+        seq_no=last.seq_no + 1,
+        ts_unix_ms=last.ts_unix_ms + 1,
+        tool_id="zendesk.update_status",
+        args={"ticket_id": ticket_id, "status": "solved"},
+    )
+    full = [*sess, follow]
+    for seed in range(40):
+        r = ATTACKS["prereq_skip"](full, np.random.default_rng(seed), ctx())
+        assert r is not None
+        first = next(c for c in r.session if c.envelope_id == r.labels[0].envelope_id)
+        if first.tool_id != "stripe.create_refund":
+            continue
+        ids = {lab.envelope_id for lab in r.labels}
+        assert "env-follow" in ids
+        assert not any(c.tool_id == "mail.send_email" and c.envelope_id in ids for c in r.session)
+        return
+    raise AssertionError("refund never chosen")  # pragma: no cover
