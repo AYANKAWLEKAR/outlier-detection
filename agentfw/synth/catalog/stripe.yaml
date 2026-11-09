@@ -4,7 +4,7 @@ stripe.retrieve_charge:
     charge_id: {type: id, prefix: "ch_", source: external}
   produces: [charge.id, charge.amount, charge.customer]
   produced:
-    charge.id: {type: id, prefix: "ch_"}
+    charge.id: {type: id, prefix: "ch_", from_arg: charge_id}
     charge.amount: {type: numeric, shape: money, dist: {family: lognormal, mu: 4.0, sigma: 0.8, round_cents: true}}
     charge.customer: {type: id, prefix: "cus_"}
   response:
@@ -16,7 +16,7 @@ stripe.list_charges:
     limit: {type: numeric, shape: count, dist: {family: constant, value: 10}}
   produces: [charge.ids]
   produced:
-    charge.ids: {type: list_of_id, prefix: "ch_", len_dist: {family: poisson, lam: 4, min: 0}}
+    charge.ids: {type: list_of_id, prefix: "ch_"}
   response:
     item_count: {family: poisson, lam: 4, min: 0}
     produces_ids: [charge.ids]
@@ -46,8 +46,8 @@ stripe.retrieve_customer:
     customer_id: {type: id, prefix: "cus_", source: stripe.retrieve_charge.customer}
   produces: [customer.id, customer.email]
   produced:
-    customer.id: {type: id, prefix: "cus_"}
-    customer.email: {type: email, dist: {family: zipf, vocab_size: 12, s: 1.3}}
+    customer.id: {type: id, prefix: "cus_", from_arg: customer_id}
+    customer.email: {type: email, domain_suffix: ".example", dist: {family: zipf, vocab_size: 12, s: 1.3}}
   response:
     produces_ids: [customer.id]
 stripe.create_payout:

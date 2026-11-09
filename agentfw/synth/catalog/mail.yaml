@@ -3,10 +3,11 @@ mail.send_email:
   args:
     to:
       type: list_of_email
+      domain_suffix: ".example"
       dist: {family: zipf, vocab_size: 12, s: 1.3}
       len_dist: {family: poisson, lam: 1.2, min: 1}
-    subject: {type: freetext}
-    body: {type: freetext}
+    subject: {type: freetext, len_dist: {family: lognormal, mu: 4.0, sigma: 0.6, min: 5}}
+    body: {type: freetext, len_dist: {family: lognormal, mu: 4.0, sigma: 0.6, min: 5}}
   produces: [message.id]
   produced:
     message.id: {type: id, prefix: "msg_"}

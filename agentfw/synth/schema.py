@@ -8,6 +8,22 @@ Conventions the walker (Task 0.5) relies on:
   produced entry whose key ends in ``.<field>``; the entity part is documentation only.
 * ``ResponseSpec.produces_ids`` lists produced entries that are ids to expose in
   ``response_meta.ids``.
+* ``ResponseSpec.item_count`` is the single source of truth for a response's list size: the walker
+  draws it once per call and reuses it as the length of every produced list field (those fields
+  carry no ``len_dist`` of their own; validation rejects one that does).
+* A produced ArgSpec with ``from_arg`` echoes the value of that argument of the same call.
+* Persona ``fields`` precedence. A key is ``<tool>.<arg>`` or ``<tool>.<arg>.<derived>``
+  with derived in ``__domain__``, ``__len__``, ``__host__``, ``__prefix__``.
+  Every key must be reachable:
+  - a ``sample`` binding of that (tool, arg) in one of the persona's tasks uses the override in
+    preference to the catalog dist;
+  - a ``<tool>.<arg>.__domain__`` override (at most one per persona) defines the domain distribution
+    of ALL emails generated for that persona (default: the catalog email dist);
+  - a ``<tool>.<arg>.__len__`` override on a ``list_of_email`` arg bound to a scalar source means
+    the list is ``[bound value]`` plus ``len - 1`` extra persona-generated emails (``len`` drawn
+    from the override).
+* Benign generated email domains follow ``<word><k>.example`` (``ArgSpec.domain_suffix``);
+  attack and novel values use ``.test`` (RFC 2606 only, D-016).
 """
 
 from __future__ import annotations
@@ -16,7 +32,9 @@ from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-Family = Literal["lognormal", "gamma", "poisson", "zipf", "categorical", "constant", "uniform"]
+Family = Literal[
+    "lognormal", "gamma", "poisson", "zipf", "categorical", "constant", "uniform", "bernoulli"
+]
 ArgType = Literal[
     "numeric",
     "categorical",
@@ -37,6 +55,7 @@ _REQUIRED: dict[str, tuple[str, ...]] = {
     "categorical": ("vocab",),
     "constant": ("value",),
     "uniform": ("min", "max"),
+    "bernoulli": ("p",),
 }
 
 
@@ -51,6 +70,7 @@ class DistSpec(_Model):
     shape: float | None = None
     scale: float | None = None
     lam: float | None = None
+    p: float | None = None
     min: float | None = None
     max: float | None = None
     vocab_size: int | None = None
@@ -81,6 +101,8 @@ class ArgSpec(_Model):
     shape: Literal["money", "count"] | None = None
     vocab: list[str] | None = None
     len_dist: DistSpec | None = None
+    from_arg: str | None = None  # produced only: echo this call's argument
+    domain_suffix: str | None = None  # email types: ".example" or ".test"
 
 
 class ResponseSpec(_Model):

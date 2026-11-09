@@ -2,7 +2,7 @@ slack.post_message:
   kind: write
   args:
     channel: {type: categorical, vocab: [support-ops, sales-floor, outreach-log]}
-    text: {type: freetext}
+    text: {type: freetext, len_dist: {family: lognormal, mu: 4.0, sigma: 0.6, min: 5}}
   produces: [message.ts]
   produced:
     message.ts: {type: id, prefix: "ts_"}
@@ -15,7 +15,7 @@ slack.read_channel:
     limit: {type: numeric, shape: count, dist: {family: constant, value: 20}}
   produces: [message.ids]
   produced:
-    message.ids: {type: list_of_id, prefix: "ts_", len_dist: {family: poisson, lam: 12, min: 0}}
+    message.ids: {type: list_of_id, prefix: "ts_"}
   response:
     item_count: {family: poisson, lam: 12, min: 0}
     produces_ids: [message.ids]

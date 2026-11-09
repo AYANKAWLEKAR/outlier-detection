@@ -15,6 +15,7 @@ from agentfw.synth.load import (
     load_tasks,
     validate_world,
 )
+from agentfw.synth.schema import DistSpec, Persona, TaskSpec, ToolSpec
 
 CAT, PER, TASKS = CATALOG_DIR, PERSONAS_DIR, TASKS_DIR
 
@@ -71,10 +72,93 @@ def test_refund_reason_and_small_refund_shape() -> None:
 def test_only_reserved_domains_in_yaml() -> None:
     import re
 
+    import yaml
+
+    suffixes: list[str] = []
     for d in (CAT, PER, TASKS):
         for f in Path(d).glob("*.yaml"):
-            for dom in re.findall(r"@?[\w-]+\.(?:com|org|net|io)\b", f.read_text()):
-                pytest.fail(f"non-reserved domain {dom} in {f}")
+            text = f.read_text()
+            for dom in re.findall(r"@[\w.-]+|[\w-]+\.(?:com|org|net|io|dev|co|edu|gov)\b", text):
+                assert dom.endswith((".example", ".test")), f"{dom} in {f}"
+            if d == CAT:
+                for body in yaml.safe_load(text).values():
+                    for spec in [*body["args"].values(), *body.get("produced", {}).values()]:
+                        if "domain_suffix" in spec:
+                            suffixes.append(spec["domain_suffix"])
+    assert suffixes and all(x in (".example", ".test") for x in suffixes)
+    cat = load_catalog(CAT)
+    for ts in cat.values():
+        for a in [*ts.args.values(), *ts.produced.values()]:
+            if a.type in ("email", "list_of_email"):
+                assert a.domain_suffix in (".example", ".test")
+
+
+def test_echo_len_bool_and_item_count_conventions() -> None:
+    cat = load_catalog(CAT)
+    assert cat["zendesk.get_ticket"].produced["ticket.id"].from_arg == "ticket_id"
+    assert cat["salesforce.get_record"].produced["record.id"].from_arg == "record_id"
+    pub = cat["zendesk.add_comment"].args["public"].dist
+    assert pub is not None and (pub.family, pub.p) == ("bernoulli", 0.3)
+    for name in (
+        "zendesk.list_tickets",
+        "stripe.list_charges",
+        "salesforce.run_soql",
+        "slack.read_channel",
+    ):
+        ts = cat[name]
+        assert ts.response.item_count is not None
+        assert all(a.len_dist is None for a in ts.produced.values())
+        assert "record.count" not in ts.produced
+
+
+def _world() -> tuple[dict[str, ToolSpec], list[Persona], dict[str, TaskSpec]]:
+    return load_catalog(CAT), load_personas(PER), load_tasks(TASKS)
+
+
+def test_unreachable_persona_override_rejected() -> None:
+    cat, ps, ts = _world()
+    p = {q.agent_id: q for q in ps}["support-refunds-a"]
+    dist = p.fields["stripe.create_refund.amount"]
+    p2 = p.model_copy(update={"fields": {**p.fields, "stripe.retrieve_charge.charge_id": dist}})
+    with pytest.raises(WorldError, match=r"unreachable.*stripe\.retrieve_charge\.charge_id"):
+        validate_world(cat, [p2], ts)
+
+
+def test_two_domain_overrides_rejected() -> None:
+    cat, ps, ts = _world()
+    p = {q.agent_id: q for q in ps}["support-refunds-a"]
+    d = p.fields["mail.send_email.to.__domain__"]
+    p2 = p.model_copy(update={"fields": {**p.fields, "zendesk.get_ticket.ticket_id.__domain__": d}})
+    with pytest.raises(WorldError, match="__domain__"):
+        validate_world(cat, [p2], ts)
+
+
+def test_bad_from_arg_rejected() -> None:
+    cat, ps, ts = _world()
+    cat["zendesk.get_ticket"].produced["ticket.id"].from_arg = "nope"
+    with pytest.raises(WorldError, match="from_arg"):
+        validate_world(cat, ps, ts)
+
+
+def test_freetext_without_len_dist_rejected() -> None:
+    cat, ps, ts = _world()
+    cat["mail.send_email"].args["subject"].len_dist = None
+    with pytest.raises(WorldError, match=r"mail\.send_email\.subject.*len_dist"):
+        validate_world(cat, ps, ts)
+
+
+def test_bool_without_bernoulli_rejected() -> None:
+    cat, ps, ts = _world()
+    cat["zendesk.add_comment"].args["public"].dist = None
+    with pytest.raises(WorldError, match="bernoulli"):
+        validate_world(cat, ps, ts)
+
+
+def test_produced_list_with_own_len_dist_on_item_count_tool_rejected() -> None:
+    cat, ps, ts = _world()
+    cat["zendesk.list_tickets"].produced["ticket.ids"].len_dist = DistSpec(family="poisson", lam=3)
+    with pytest.raises(WorldError, match=r"ticket\.ids.*item_count"):
+        validate_world(cat, ps, ts)
 
 
 def test_validate_world_reports_unknown_tool_and_bad_source(tmp_path: Path) -> None:
@@ -97,13 +181,20 @@ def test_validate_world_reports_unknown_tool_and_bad_source(tmp_path: Path) -> N
 def test_derived_suffix_keys_accepted_and_bad_arg_rejected() -> None:
     cat, ts = load_catalog(CAT), load_tasks(TASKS)
     p = {q.agent_id: q for q in load_personas(PER)}["support-refunds-a"]
-    for suf in ("__domain__", "__len__", "__host__", "__prefix__"):
+    for suf in ("__domain__", "__len__"):
         p2 = p.model_copy(
             update={
                 "fields": {f"mail.send_email.to.{suf}": p.fields["stripe.create_refund.amount"]}
             }
         )
         validate_world(cat, [p2], ts)
+    p4 = p.model_copy(
+        update={"fields": {"mail.send_email.to.__host__": p.fields["stripe.create_refund.amount"]}}
+    )
+    with pytest.raises(
+        WorldError, match="unreachable"
+    ):  # known derived suffix, but nothing consumes it
+        validate_world(cat, [p4], ts)
     p3 = p.model_copy(
         update={"fields": {"mail.send_email.zzz": p.fields["stripe.create_refund.amount"]}}
     )

@@ -7,10 +7,9 @@ salesforce.run_soql:
         - "SELECT Id FROM Opportunity WHERE StageName = 'Open'"
         - "SELECT Id FROM Contact WHERE Region = 'West'"
         - "SELECT Id FROM Account WHERE Tier = 'A'"
-  produces: [record.ids, record.count]
+  produces: [record.ids]
   produced:
-    record.ids: {type: list_of_id, prefix: "006", len_dist: {family: gamma, shape: 2.0, scale: 5.0, min: 1}}
-    record.count: {type: numeric, shape: count, dist: {family: gamma, shape: 2.0, scale: 5.0, min: 1}}
+    record.ids: {type: list_of_id, prefix: "006"}
   response:
     item_count: {family: gamma, shape: 2.0, scale: 5.0, min: 1}
     produces_ids: [record.ids]
@@ -21,8 +20,8 @@ salesforce.get_record:
     record_id: {type: id, prefix: "006", source: external}
   produces: [record.id, record.email, record.amount, record.owner]
   produced:
-    record.id: {type: id, prefix: "006"}
-    record.email: {type: email, dist: {family: zipf, vocab_size: 12, s: 1.3}}
+    record.id: {type: id, prefix: "006", from_arg: record_id}
+    record.email: {type: email, domain_suffix: ".example", dist: {family: zipf, vocab_size: 12, s: 1.3}}
     record.amount: {type: numeric, shape: money, dist: {family: lognormal, mu: 9.0, sigma: 0.8, round_cents: true}}
     record.owner: {type: id, prefix: "005"}
   response:
@@ -39,7 +38,7 @@ salesforce.update_record:
       dist: {family: lognormal, mu: 9.0, sigma: 0.8, round_cents: true}
   produces: [record.id]
   produced:
-    record.id: {type: id, prefix: "006"}
+    record.id: {type: id, prefix: "006", from_arg: record_id}
   response:
     produces_ids: [record.id]
 salesforce.mass_update:
@@ -47,7 +46,7 @@ salesforce.mass_update:
   args:
     object: {type: categorical, vocab: [Opportunity, Contact, Account]}
     record_ids: {type: list_of_id, prefix: "006", source: salesforce.run_soql.ids}
-    field_updates: {type: freetext_map}
+    field_updates: {type: freetext_map, len_dist: {family: lognormal, mu: 4.0, sigma: 0.6, min: 5}}
   produces: [job.id]
   produced:
     job.id: {type: id, prefix: "750"}
@@ -57,7 +56,7 @@ salesforce.create_task:
   kind: write
   args:
     record_id: {type: id, prefix: "006", source: salesforce.get_record.id}
-    subject: {type: freetext}
+    subject: {type: freetext, len_dist: {family: lognormal, mu: 4.0, sigma: 0.6, min: 5}}
     due_in_days: {type: numeric, shape: count, dist: {family: poisson, lam: 3, min: 1}}
   produces: [task.id]
   produced:
