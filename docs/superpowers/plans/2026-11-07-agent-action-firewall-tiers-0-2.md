@@ -351,7 +351,7 @@ def test_validate_world_reports_unknown_tool_and_bad_source(tmp_path: Path) -> N
 ```
 
 - [ ] **Step 2: Run the tests.** Expected: FAIL.
-- [ ] **Step 3: Implement** the models, loaders and YAML. `small_refund` follows §4.4: `zendesk.get_ticket(ticket_id=ext:tickets)` as `ticket` → `stripe.retrieve_charge(charge_id=ticket.charge_id)` with `skippable: true` → `stripe.create_refund(charge_id=ticket.charge_id, amount=frac:charge.amount:0.2:1.0, reason=sample)` → `mail.send_email(to=ticket.customer_email, subject=sample, body=sample)`.
+- [ ] **Step 3: Implement** the models, loaders and YAML. `small_refund` follows §4.4: `zendesk.get_ticket(ticket_id=ext:tickets)` as `ticket` → `stripe.retrieve_charge(charge_id=ticket.charge_id)` with `skippable: true` → `stripe.create_refund(charge_id=ticket.charge_id, amount=sample, reason=sample)` (ruling R1: refund amounts follow the persona override so §4.7's KS check holds; `frac:` stays available for other tasks) → `mail.send_email(to=ticket.customer_email, subject=sample, body=sample)`.
 - [ ] **Step 4: Run `./scripts/gate.sh`.** Expected: green.
 - [ ] **Step 5: Commit** `git commit -am "feat(synth): catalog, persona and task-grammar schema with 3 personas"`
 
@@ -392,7 +392,6 @@ def test_skip_lookup_rate_matches_branch(world) -> None:
                   for _ in range(10_000))
     assert abs(skipped / 10_000 - 0.05) < 0.01
 
-def test_refund_never_exceeds_charge(world) -> None: ...
 def test_retry_duplicates_args_and_abandon_truncates(world) -> None: ...
 ```
 
@@ -410,7 +409,7 @@ def test_retry_duplicates_args_and_abandon_truncates(world) -> None: ...
 - Produces:
   - `sampler.stable_hash(s: str) -> int` (xxhash64)
   - `sampler.sample_persona(persona, catalog, tasks, *, days: int, global_seed: int, start_ms: int, max_sessions: int | None = None) -> list[list[RawCall]]` (sessions, in time order). Session starts come from a Poisson process inside `working_hours`. In-session gaps are lognormal seconds. `seq_no` runs 0..n−1. `envelope_id = new_ulid(ts, rng)`. `principal_id = f"{agent_id}-principal"`.
-  - `generate.GenerateConfig(BaseModel)`: `seed: int`, `personas_dir: Path`, `tasks_dir: Path`, `catalog_dir: Path`, `days: int`, `start_ms: int = 1_767_225_600_000`, `max_sessions: int | None`, `attack_rate: float = 0.015`, `warmup_sessions: int = 30`, `families: list[str]`, `control_rate: float = 0.005`
+  - `generate.GenerateConfig(BaseModel)` (ruling R3: `max_sessions` is a **total** cap split evenly across personas in sorted `agent_id` order, remainder to the first): `seed: int`, `personas_dir: Path`, `tasks_dir: Path`, `catalog_dir: Path`, `days: int`, `start_ms: int = 1_767_225_600_000`, `max_sessions: int | None`, `attack_rate: float = 0.015`, `warmup_sessions: int = 30`, `families: list[str]`, `control_rate: float = 0.005`
   - `generate.Manifest(BaseModel)`: `config`, `files: dict[str, str]` (sha256), `counts: dict[str, int]`
   - `generate.generate(cfg, out_dir: Path) -> Manifest` writes `traces.jsonl` (one `RawCall` per line, orjson `OPT_SORT_KEYS`, sorted by `(ts, session_id, seq_no)`), `labels.jsonl` (one `Label` per envelope) and `manifest.json`
   - CLI: `python -m agentfw.synth.generate --seed 0 --days 30 --out traces/dev [--personas DIR] [--max-sessions N] [--families a,b]`
@@ -604,7 +603,7 @@ def test_drift_delay_counts_sessions_and_misses() -> None: ...
 ### Task 0.11: Report and run CLI
 
 **Files:**
-- Create: `agentfw/bench/report.py`, `agentfw/bench/run.py`, `tests/bench/test_report.py`, `tests/conftest.py` (session fixture `tiny_dataset`: seed 0, 3 personas, 5 days, 3 families)
+- Create: `agentfw/bench/report.py`, `agentfw/bench/run.py`, `tests/bench/test_report.py`, `tests/conftest.py` (session fixture `tiny_dataset`: seed 0, 3 personas, 5 days, 3 families, `attack_rate=0.15` per ruling R2)
 
 **Interfaces:**
 - Produces:
@@ -627,7 +626,7 @@ def test_drift_delay_counts_sessions_and_misses() -> None: ...
 
 **Interfaces:**
 - Produces:
-  - `ci_regress.CI_DATASET = GenerateConfig(seed=0, 3 personas, days=60, max_sessions=200, families=[current families])`
+  - `ci_regress.CI_DATASET = GenerateConfig(seed=0, 3 personas, days=60, max_sessions=200, attack_rate=0.15, families=[current families])` (ruling R2: 1.5% would leave ~2 attacks in 200 sessions)
   - `ci_regress.compare(current: Mapping[str, float], baseline: Mapping[str, float]) -> list[str]` (failure messages; AUPRC drop > 0.01 or FPR@95 per-agent rise > 0.002)
   - `ci_regress.main() -> int`: runs every detector named in `baseline_metrics.json`, prints its report, returns 1 on any failure. `--write-baseline` rewrites the file.
   - `scripts/update_golden.py --detector NAME` rewrites `tests/golden/<name>.sha256`
