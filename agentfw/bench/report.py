@@ -1,0 +1,259 @@
+"""``report.json`` / ``report.md`` assembly (spec 5.6).
+
+The report is a plain JSON-ready dict: NaN and +-inf serialize as ``null``, dataclasses become
+dicts, tuples become lists. :func:`render_markdown` consumes that same dict, so the markdown can
+only show what the JSON shows.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import math
+import subprocess
+from collections.abc import Mapping
+from pathlib import Path
+from typing import Any
+
+from pydantic import BaseModel
+
+from agentfw.bench.metrics import Metrics
+from agentfw.bench.replay import SplitSpec
+
+__all__ = [
+    "README_END",
+    "README_START",
+    "RunMeta",
+    "build_report",
+    "render_markdown",
+    "update_readme",
+]
+
+README_START = "<!-- report:start -->"
+README_END = "<!-- report:end -->"
+
+AGENT_SPLIT_NOTE = (
+    "Split is by agent: per-agent thresholds fall back to the pooled train ECDF for held-out "
+    "agents (they have no train-split benign scores of their own)."
+)
+
+
+class RunMeta(BaseModel):
+    git_sha: str
+    seed: int
+    dataset_sha: str  # sha256 of traces.jsonl, taken from the dataset manifest's ``files``
+    detector: str
+    detector_config: dict[str, Any]
+    split: SplitSpec
+    created_unix: int
+
+
+def git_sha() -> str:
+    """``git rev-parse HEAD`` or ``"nogit"``."""
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True, check=True, timeout=10
+        )
+        return out.stdout.strip() or "nogit"
+    except (OSError, subprocess.SubprocessError):
+        return "nogit"
+
+
+def _jsonable(x: Any) -> Any:
+    if isinstance(x, BaseModel):
+        return _jsonable(x.model_dump(mode="python"))
+    if dataclasses.is_dataclass(x) and not isinstance(x, type):
+        return {f.name: _jsonable(getattr(x, f.name)) for f in dataclasses.fields(x)}
+    if isinstance(x, Mapping):
+        return {str(k): _jsonable(v) for k, v in x.items()}
+    if isinstance(x, list | tuple):
+        return [_jsonable(v) for v in x]
+    if isinstance(x, float):
+        return x if math.isfinite(x) else None
+    return x
+
+
+def _headline(m: Metrics, warm_only: bool) -> dict[str, Any]:
+    return {
+        "auprc": m.auprc,
+        "auprc_ci": m.auprc_ci,
+        "fpr95_global": m.fpr95_global,
+        "recall_at_global_thr": m.recall_at_global_thr,
+        "fpr95_per_agent": m.fpr95_per_agent,
+        "fpr95_per_agent_ci": m.fpr95_per_agent_ci,
+        # A per-agent FPR is only meaningful at the recall it was achieved at.
+        "per_agent_recall": m.per_agent_recall,
+        "per_agent_alpha": m.per_agent_alpha,
+        "warm_only": warm_only,
+        "n_rows": m.n_rows,
+        "n_attack_rows": m.n_attack_rows,
+    }
+
+
+def build_report(
+    all_: Metrics, warm: Metrics, meta: RunMeta, extras: Mapping[str, object] | None = None
+) -> dict[str, object]:
+    """Assemble the report. ``all`` / ``warm`` are the all-rows and warm-only metric sets.
+
+    Per-family, control, cold-start, drift and latency come from the all-rows metrics (the warm-only
+    cold-start table would be empty by construction); ``extras["state_bytes"]`` is lifted to the
+    top level.
+    """
+    ex = dict(extras or {})
+    notes = list(ex.pop("notes", []) or [])  # type: ignore[call-overload]
+    if meta.split.kind == "agent" and AGENT_SPLIT_NOTE not in notes:
+        notes.append(AGENT_SPLIT_NOTE)
+    ex["notes"] = notes
+    state_bytes = ex.pop("state_bytes", None)
+    report: dict[str, object] = {
+        "headline": {"all": _headline(all_, False), "warm": _headline(warm, True)},
+        "per_family": {
+            "mode": all_.breakdown_mode,
+            "envelope": all_.per_family_envelope,
+            "attack": all_.per_family_attack,
+            "warm_envelope": warm.per_family_envelope,
+            "warm_attack": warm.per_family_attack,
+        },
+        "control_fpr": {"all": all_.control_fpr, "warm": warm.control_fpr},
+        "cold_start": all_.cold_start,
+        "drift": all_.drift,
+        "latency": {"p50_us": all_.latency_p50_us, "p99_us": all_.latency_p99_us},
+        "state_bytes": state_bytes,
+        "meta": meta,
+        "extras": ex,
+    }
+    out = _jsonable(report)
+    assert isinstance(out, dict)
+    return out
+
+
+# --- markdown -----------------------------------------------------------------------------------
+
+
+def _f(x: object, nd: int = 3) -> str:
+    return "n/a" if not isinstance(x, int | float) else f"{x:.{nd}f}"
+
+
+def _ci(x: object) -> str:
+    if isinstance(x, list) and len(x) == 2:
+        return f"[{_f(x[0])}, {_f(x[1])}]"
+    return "n/a"
+
+
+def _row(cells: list[str]) -> str:
+    return "| " + " | ".join(cells) + " |"
+
+
+def _sep(n: int) -> str:
+    return "|" + "|".join(["---"] * n) + "|"
+
+
+def _dict(x: object) -> dict[str, Any]:
+    assert isinstance(x, dict)
+    return x
+
+
+def render_markdown(report: Mapping[str, object]) -> str:
+    meta = _dict(report["meta"])
+    head = _dict(report["headline"])
+    lines: list[str] = [
+        "### Benchmark report",
+        "",
+        f"Detector `{meta['detector']}`, split `{_dict(meta['split'])['kind']}`, "
+        f"seed {meta['seed']}, git `{str(meta['git_sha'])[:10]}`, "
+        f"dataset `{str(meta['dataset_sha'])[:12]}`.",
+        "",
+        "#### Headline",
+        "",
+        _row(["Metric", "All rows", "Warm only"]),
+        _sep(3),
+    ]
+    a, w = _dict(head["all"]), _dict(head["warm"])
+    for label, key, fmt in [
+        ("AUPRC", "auprc", _f),
+        ("AUPRC 95% CI", "auprc_ci", _ci),
+        ("FPR@95% recall (global)", "fpr95_global", _f),
+        ("FPR@95% recall (per-agent)", "fpr95_per_agent", _f),
+        ("per-agent recall achieved", "per_agent_recall", _f),
+        ("FPR@95 per-agent 95% CI", "fpr95_per_agent_ci", _ci),
+        ("test rows", "n_rows", lambda v: str(v)),
+        ("test attack rows", "n_attack_rows", lambda v: str(v)),
+    ]:
+        lines.append(_row([label, fmt(a[key]), fmt(w[key])]))
+    lines += [
+        "",
+        "Per-agent FPR is only meaningful at its achieved recall (shown above).",
+    ]
+    for n in _dict(report["extras"]).get("notes", []) or []:
+        lines += ["", f"Note: {n}"]
+
+    pf = _dict(report["per_family"])
+    lines += [
+        "",
+        "#### Per-family recall",
+        "",
+        f"Thresholds: `{pf['mode']}`. Cells are recall (detected/total).",
+        "",
+        _row(["Family", "Bucket", "Envelope recall", "Attack recall"]),
+        _sep(4),
+    ]
+    env, atk = _dict(pf["envelope"]), _dict(pf["attack"])
+    for fam in sorted(env):
+        for bucket, cell in env[fam].items():
+            ac = _dict(atk.get(fam, {})).get(bucket)
+
+            def fmt_cell(c: Any) -> str:
+                return (
+                    "n/a" if c is None else f"{_f(c['recall'])} ({c['n_detected']}/{c['n_total']})"
+                )
+
+            lines.append(_row([fam, bucket, fmt_cell(cell), fmt_cell(ac)]))
+
+    ctrl = _dict(report["control_fpr"])
+    lines += [
+        "",
+        f"Control (benign-unusual) FPR: {_f(ctrl['all'])} all, {_f(ctrl['warm'])} warm.",
+        "",
+    ]
+
+    lines += [
+        "#### Cold start",
+        "",
+        _row(["n_key_obs", "Recall", "FPR", "Attacks", "Benign"]),
+        _sep(5),
+    ]
+    for c in report["cold_start"]:  # type: ignore[attr-defined]
+        hi = "inf" if c["hi"] is None else f"{c['hi']:g}"
+        lines.append(
+            _row(
+                [
+                    f"[{c['lo']:g}, {hi})",
+                    _f(c["recall"]),
+                    _f(c["fpr"]),
+                    str(c["n_attack"]),
+                    str(c["n_benign"]),
+                ]
+            )
+        )
+    d = _dict(report["drift"])
+    lat = _dict(report["latency"])
+    lines += [
+        "",
+        f"Drift delay (sessions): median {_f(d['median'], 1)}, p90 {_f(d['p90'], 1)}, "
+        f"miss rate {_f(d['miss_rate'])}, n={d['n']}.",
+        "",
+        f"Latency: p50 {_f(lat['p50_us'], 1)} us, p99 {_f(lat['p99_us'], 1)} us; "
+        f"detector state {report['state_bytes']} bytes.",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def update_readme(readme: Path, md: str) -> None:
+    """Replace the text between the report markers; idempotent. Raises if markers are missing."""
+    text = readme.read_text()
+    s = text.find(README_START)
+    e = text.find(README_END)
+    if s < 0 or e < s:
+        raise ValueError(f"{readme} lacks {README_START} ... {README_END} markers")
+    new = f"{text[: s + len(README_START)]}\n{md.strip()}\n{text[e:]}"
+    readme.write_text(new)
