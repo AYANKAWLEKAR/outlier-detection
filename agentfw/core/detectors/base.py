@@ -11,6 +11,7 @@ from agentfw.core.schema_infer import TypeView
 
 if TYPE_CHECKING:
     from agentfw.core.detectors.magnitude import MagRecord
+    from agentfw.core.detectors.novelty import NoveltyRecord
 
 __all__ = ["PriorSource", "SubDetector", "iter_fields", "signed_log1p", "squash"]
 
@@ -31,6 +32,8 @@ class PriorSource(Protocol):
     """Cross-agent pooled priors (§6.10); implemented by ``PooledPriors`` (Task 1.10)."""
 
     def magnitude_ref(self, tool: str, path: str, direction: str) -> MagRecord | None: ...
+
+    def novelty_ref(self, tool: str, path: str) -> NoveltyRecord | None: ...
 
 
 def squash(z: float, z0: float, tau: float) -> float:
