@@ -38,8 +38,7 @@ def test_run_writes_three_files(out_dir: Path) -> None:
 def test_report_has_top_level_keys_and_headline(out_dir: Path) -> None:
     rep = orjson.loads((out_dir / "report.json").read_bytes())
     assert set(rep) >= TOP_KEYS
-    for k in ("all", "warm"):
-        h = rep["headline"][k]
+    for h in (rep["headline"], rep["headline_all"]):
         for f in (
             "auprc",
             "auprc_ci",
@@ -50,8 +49,8 @@ def test_report_has_top_level_keys_and_headline(out_dir: Path) -> None:
             "warm_only",
         ):
             assert f in h
-    assert rep["headline"]["all"]["warm_only"] is False
-    assert rep["headline"]["warm"]["warm_only"] is True
+    assert rep["headline"]["warm_only"] is True
+    assert rep["headline_all"]["warm_only"] is False
     assert rep["meta"]["detector"] == "static_threshold"
     assert len(rep["meta"]["dataset_sha"]) == 64
     assert rep["meta"]["split"]["kind"] == "time"
@@ -95,7 +94,7 @@ def test_report_json_is_strict_json_with_nan_as_null() -> None:
     rep = build_report(m, m, meta)
     raw = orjson.dumps(rep)  # must not raise
     assert b"NaN" not in raw
-    assert orjson.loads(raw)["headline"]["all"]["auprc"] is None
+    assert orjson.loads(raw)["headline"]["auprc"] is None
     assert render_markdown(rep)  # NaN-safe rendering
 
 
@@ -131,3 +130,19 @@ def test_update_readme_requires_markers(tmp_path: Path) -> None:
     readme.write_text("no markers\n")
     with pytest.raises(ValueError):
         update_readme(readme, "x")
+
+
+def test_cli_end_to_end_update_readme(
+    tiny_dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentfw.bench.run import main
+
+    (tmp_path / "README.md").write_text("hi\n<!-- report:start -->\nOLDMARK\n<!-- report:end -->\n")
+    monkeypatch.chdir(tmp_path)
+    args = ["--traces", str(tiny_dataset), "--detector", "random", "--out", "o", "--n-boot", "5"]
+    main([*args, "--update-readme"])
+    first = (tmp_path / "README.md").read_text()
+    assert "FPR@95" in first and "OLDMARK" not in first
+    main([*args, "--update-readme"])
+    assert (tmp_path / "README.md").read_text() == first
+    assert (tmp_path / "o" / "report.json").is_file()

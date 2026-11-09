@@ -105,7 +105,8 @@ def build_report(
     ex["notes"] = notes
     state_bytes = ex.pop("state_bytes", None)
     report: dict[str, object] = {
-        "headline": {"all": _headline(all_, False), "warm": _headline(warm, True)},
+        "headline": _headline(warm, True),
+        "headline_all": _headline(all_, False),
         "per_family": {
             "mode": all_.breakdown_mode,
             "envelope": all_.per_family_envelope,
@@ -164,10 +165,10 @@ def render_markdown(report: Mapping[str, object]) -> str:
         "",
         "#### Headline",
         "",
-        _row(["Metric", "All rows", "Warm only"]),
+        _row(["Metric", "All rows", "Warm only (headline)"]),
         _sep(3),
     ]
-    a, w = _dict(head["all"]), _dict(head["warm"])
+    a, w = _dict(report["headline_all"]), head
     for label, key, fmt in [
         ("AUPRC", "auprc", _f),
         ("AUPRC 95% CI", "auprc_ci", _ci),
