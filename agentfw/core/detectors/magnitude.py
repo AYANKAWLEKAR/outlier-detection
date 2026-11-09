@@ -11,9 +11,16 @@ Cold keys (``n < mag_cold_n``) score against the pooled prior (§6.10) with its 
 ``prior_iqr_inflate`` and ``prior_used=True``; with no usable prior they score 0.0 with
 ``evidence["cold"] = True``.
 
-Response metadata (§2.3): the previous call's ``item_count`` is scored on the next call under
-field ``__resp__.item_count`` against ``m:{agent}:{prev_tool}:__resp__.item_count``; ``update``
-pushes the envelope's own ``response_meta.item_count`` into ``m:{agent}:{tool}:...``.
+Response metadata (§2.3): the previous call's ``item_count`` (``e.prev_response``) is scored on
+the next call under field ``__resp__.item_count`` against
+``m:{agent}:{prev_tool}:__resp__.item_count``, and ``update`` pushes that *same* ``prev_response``
+count into the same key. Score and update of the response signal therefore happen on one
+envelope (call k+1), so a blocked k+1 never moves the response baseline ("score before
+update"). The envelope's own ``response_meta.item_count`` is never pushed directly; as a
+consequence a session's last response is never learned (accepted trade-off).
+
+Every score's evidence carries ``n`` (0 when no record exists), ``direction`` and
+``prior_used``, including cold and non-finite scores.
 
 ``score`` only reads the store; ``update`` pushes finite values only (never NaN/±inf).
 """
@@ -44,14 +51,16 @@ Direction = Literal["up", "both"]
 RESP_FIELD = "__resp__.item_count"
 NAME = "magnitude"
 
-_UP_NAME = re.compile(r"(?i)amount|count|qty|total|len")
+_UP_NAME = re.compile(r"(?i)(^|_)(amount|count|qty|total|len)")
 _UP_HINTS = frozenset({"money", "count"})
 _IQR_TO_SIGMA = 1.349
 _MAX = sys.float_info.max
 
 
 def direction_for(path: str, hints: Mapping[str, str]) -> Direction:
-    """``up`` for money/count-hinted fields or a last segment naming an amount, else ``both``."""
+    """``up`` for money/count-hinted fields, or when a keyword (amount, count, qty, total, len)
+    starts the last path segment or follows an ``_`` in it (``item_count``, ``__len__``,
+    ``total_amount``; not ``account``, ``discount``, ``calendar``); else ``both``."""
     if hints.get(path) in _UP_HINTS:
         return "up"
     return "up" if _UP_NAME.search(path.rsplit(".", 1)[-1]) else "both"
@@ -128,6 +137,7 @@ class _Ref:
     rec: MagRecord | None  # None: cold with no usable prior
     direction: Direction
     prior_used: bool
+    n: int  # observations behind the ref (0 when no record exists)
     inflate: float = 1.0
 
 
@@ -162,19 +172,25 @@ class MagnitudeDetector:
             direction = rec.direction
         else:
             direction = direction_for(path, self._field_hints(tool))
-        if rec is not None and rec.n >= self._cfg.mag_cold_n:
-            return _Ref(rec, direction, prior_used=False)
+        n = rec.n if rec is not None else 0
+        if rec is not None and n >= self._cfg.mag_cold_n:
+            return _Ref(rec, direction, prior_used=False, n=n)
         if self._priors is not None:
             prior = self._priors.magnitude_ref(tool, path, direction)
             if prior is not None and prior.n >= self._cfg.mag_cold_n:
-                return _Ref(prior, direction, prior_used=True, inflate=self._cfg.prior_iqr_inflate)
-        return _Ref(None, direction, prior_used=False)
+                inflate = self._cfg.prior_iqr_inflate
+                return _Ref(prior, direction, prior_used=True, n=prior.n, inflate=inflate)
+        return _Ref(None, direction, prior_used=False, n=n)
+
+    @staticmethod
+    def _base_evidence(ref: _Ref) -> dict[str, object]:
+        return {"n": ref.n, "direction": ref.direction, "prior_used": ref.prior_used}
 
     def _score_value(self, ref: _Ref, x: float) -> tuple[float, dict[str, object]]:
         """Score one finite value against ``ref``; pure."""
         rec = ref.rec
         if rec is None:
-            return 0.0, {"cold": True, "direction": ref.direction, "prior_used": False}
+            return 0.0, {"cold": True, **self._base_evidence(ref)}
         cfg = self._cfg
         y = signed_log1p(x)
         q25, q50, q75 = rec.q.quantile(0.25), rec.q.quantile(0.5), rec.q.quantile(0.75)
@@ -187,9 +203,7 @@ class MagnitudeDetector:
             "percentile": rec.q.percentile_of(y),
             "median_raw": _unlog(q50),
             "iqr_raw": _clamp(_unlog(q75) - _unlog(q25)),
-            "n": rec.n,
-            "direction": ref.direction,
-            "prior_used": ref.prior_used,
+            **self._base_evidence(ref),
         }
 
     def _score_values(
@@ -201,7 +215,8 @@ class MagnitudeDetector:
             if x is None or math.isnan(x):
                 continue
             if math.isinf(x):
-                return DetectorScore(NAME, field_name, 1.0, {"non_finite": True, **extra})
+                ev = {"non_finite": True, **self._base_evidence(ref), **extra}
+                return DetectorScore(NAME, field_name, 1.0, ev)
             xs.append(x)
         if not xs:
             return None
@@ -248,6 +263,6 @@ class MagnitudeDetector:
         for path, values in iter_fields(e):
             if types(path) is FieldType.NUMERIC:
                 self._push(agent, tool, path, values)
-        rm = e.response_meta
-        if rm is not None and rm.item_count is not None:
-            self._push(agent, tool, RESP_FIELD, (rm.item_count,))
+        prev = e.prev_response  # same value score() saw; never this call's own response
+        if prev is not None and prev.item_count is not None:
+            self._push(agent, prev.tool_id, RESP_FIELD, (prev.item_count,))

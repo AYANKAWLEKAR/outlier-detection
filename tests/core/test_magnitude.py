@@ -116,14 +116,32 @@ def test_iter_fields_flat_then_derived() -> None:
     assert paths == [*e.flat_args, *e.derived]
 
 
-def test_direction_for() -> None:
-    assert direction_for("amount", {}) == "up"
-    assert direction_for("meta.item_count", {}) == "up"
-    assert direction_for("lines.__len__", {}) == "up"
-    assert direction_for("Total", {}) == "up"
-    assert direction_for("latitude", {}) == "both"
+@pytest.mark.parametrize(
+    "path",
+    [
+        "amount",
+        "meta.item_count",
+        "lines.__len__",
+        "Total",
+        "total_amount",
+        "QTY",
+        "x.amount_cents",
+    ],
+)
+def test_direction_up_on_segment_boundary(path: str) -> None:
+    assert direction_for(path, {}) == "up"
+
+
+@pytest.mark.parametrize(
+    "path", ["latitude", "account", "discount", "calendar", "meta.account_id", "x.recount"]
+)
+def test_direction_both_when_keyword_not_at_segment_start(path: str) -> None:
+    assert direction_for(path, {}) == "both"
+
+
+def test_direction_hints_override_name() -> None:
     assert direction_for("latitude", {"latitude": "money"}) == "up"
-    assert direction_for("x", {"x": "count"}) == "up"
+    assert direction_for("discount", {"discount": "count"}) == "up"
 
 
 # --- scoring --------------------------------------------------------------------------------
@@ -191,8 +209,19 @@ def test_cold_without_prior_scores_zero() -> None:
     assert isinstance(rec, MagRecord) and rec.n == 11
     scores = scores_for(t, {"amount": 1e9})
     assert [s.score for s in scores] == [0.0]
-    assert scores[0].evidence["cold"] is True
-    assert scores[0].evidence["prior_used"] is False
+    ev = scores[0].evidence
+    assert ev["cold"] is True and ev["prior_used"] is False
+    assert ev["n"] == 11 and ev["direction"] == "up"
+
+
+def test_cold_without_record_evidence_has_n_zero() -> None:
+    t = build([])
+    for _ in range(10):  # warm the type only; no record exists yet
+        t.ti.observe(AGENT, TOOL, "amount", (5.0,))
+    assert t.store.get(key_mag(AGENT, TOOL, "amount")) is None
+    (s,) = scores_for(t, {"amount": 5.0})
+    assert s.score == 0.0
+    assert dict(s.evidence) == {"cold": True, "n": 0, "direction": "up", "prior_used": False}
 
 
 class _FakePriors:
@@ -240,6 +269,8 @@ def test_non_finite_values() -> None:
     for bad in (float("inf"), float("-inf"), "1e999", 10**400):
         (s,) = scores_for(t, {"amount": bad})
         assert s.score == 1.0 and s.evidence["non_finite"] is True
+        assert s.evidence["n"] == n0 and s.evidence["direction"] == "up"
+        assert s.evidence["prior_used"] is False
         _learn(t, make_env(agent_id=AGENT, tool_id=TOOL, args={"amount": bad}))
     _learn(t, make_env(agent_id=AGENT, tool_id=TOOL, args={"amount": float("nan")}))
     assert rec.n == n0  # neither NaN nor inf is ever pushed
@@ -282,40 +313,111 @@ def test_mag_record_roundtrip(trained_mag: Trained) -> None:
 # --- response metadata (§2.3) ---------------------------------------------------------------
 
 
-def test_response_item_count_scored_on_next_call() -> None:
+SF = "salesforce.query"
+RESP_KEY = key_mag(AGENT, SF, "__resp__.item_count")
+
+
+def _step(t: Trained, e: ActionEnvelope, *, allowed: bool) -> list[DetectorScore]:
+    """Engine order: score first; fold in (types + detector) only for allowed outcomes."""
+    scores = t.det.score(e, t.view(e.tool_id))
+    if allowed:
+        _learn(t, e)
+    return scores
+
+
+def _resp_score(scores: list[DetectorScore]) -> DetectorScore:
+    (s,) = [s for s in scores if s.field == "__resp__.item_count"]
+    return s
+
+
+def _train_session() -> tuple[Trained, SessionTracker]:
+    """One session of 200 allowed SOQL queries, each returning 10-30 rows."""
     store = DictStore()
     cfg = EngineConfig()
     t = Trained(MagnitudeDetector(store, cfg), TypeInference(store, cfg), store)
+    tracker = SessionTracker()
     rng = np.random.default_rng(4)
-    for c in rng.integers(10, 31, 200):
-        q = make_env(
+    for i, c in enumerate(rng.integers(10, 31, 200)):
+        e = make_env(
+            tracker=tracker,
             agent_id=AGENT,
-            tool_id="salesforce.query",
+            tool_id=SF,
+            seq_no=i,
             args={"soql": "select id"},
             response_meta={"item_count": int(c)},
         )
-        _learn(t, q)
-    rec = store.get(key_mag(AGENT, "salesforce.query", "__resp__.item_count"))
-    assert isinstance(rec, MagRecord) and rec.n == 200 and rec.direction == "up"
+        _step(t, e, allowed=True)
+        tracker.observe(e)
+    return t, tracker
 
-    def next_call_score(item_count: int) -> DetectorScore:
-        tracker = SessionTracker()
-        tracker.observe(
+
+def test_response_item_count_learned_from_prev_response_on_next_call() -> None:
+    t, _ = _train_session()
+    rec = t.store.get(RESP_KEY)
+    # Each count is pushed by the next call's update; a session's last response is never learned.
+    assert isinstance(rec, MagRecord) and rec.n == 199 and rec.direction == "up"
+
+
+def test_update_ignores_own_response_meta() -> None:
+    t = build([])
+    e = make_env(agent_id=AGENT, tool_id=SF, args={}, response_meta={"item_count": 7})
+    assert e.prev_response is None
+    t.det.update(e, t.view(SF))
+    assert t.store.get(RESP_KEY) is None
+
+
+def test_response_item_count_scored_on_next_call() -> None:
+    t, tracker = _train_session()
+    rec = t.store.get(RESP_KEY)
+    assert isinstance(rec, MagRecord)
+
+    def next_call(item_count: int) -> DetectorScore:
+        tr = SessionTracker()
+        tr.observe(
             make_env(
+                session_id="s2",
                 agent_id=AGENT,
-                tool_id="salesforce.query",
+                tool_id=SF,
                 args={"soql": "select id"},
                 response_meta={"item_count": item_count},
             )
         )
-        e = make_env(tracker=tracker, agent_id=AGENT, tool_id="gmail.send_email", args={})
+        e = make_env(session_id="s2", tracker=tr, agent_id=AGENT, tool_id="gmail.send_email")
         assert e.prev_response is not None
-        (s,) = t.det.score(e, t.view("gmail.send_email"))
-        return s
+        return _resp_score(t.det.score(e, t.view("gmail.send_email")))
 
-    typical = next_call_score(20)
-    assert typical.field == "__resp__.item_count" and typical.score < 0.1
-    spike = next_call_score(20 * 50)
+    typical = next_call(20)
+    assert typical.score < 0.1
+    spike = next_call(20 * 50)
     assert spike.detector == "magnitude" and spike.field == "__resp__.item_count"
+    assert spike.score > 0.9 and spike.evidence["tool"] == SF
+
+
+def test_blocked_next_call_never_moves_response_baseline() -> None:
+    t, tracker = _train_session()
+    rec = t.store.get(RESP_KEY)
+    assert isinstance(rec, MagRecord)
+    n_before = rec.n
+
+    # k: an allowed query whose response is 50x the usual row count.
+    k = make_env(
+        tracker=tracker,
+        agent_id=AGENT,
+        tool_id=SF,
+        seq_no=200,
+        args={"soql": "select id"},
+        response_meta={"item_count": 1000},
+    )
+    _step(t, k, allowed=True)  # pushes the *previous* (normal) count, not k's own 1000
+    tracker.observe(k)
+    assert rec.n == n_before + 1
+    snapshot = orjson.dumps(rec.to_dict())
+
+    # k+1: carries k's response; (a) it scores high, (b) blocked, so nothing is pushed.
+    k1 = make_env(tracker=tracker, agent_id=AGENT, tool_id="gmail.send_email", seq_no=201)
+    assert k1.prev_response is not None and k1.prev_response.item_count == 1000
+    spike = _resp_score(_step(t, k1, allowed=False))
     assert spike.score > 0.9
-    assert spike.evidence["tool"] == "salesforce.query"
+    assert rec.n == n_before + 1
+    assert orjson.dumps(rec.to_dict()) == snapshot
+    assert rec.q.quantile(1.0) < signed_log1p(1000)  # 1000 never entered the baseline
