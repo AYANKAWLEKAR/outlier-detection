@@ -9,7 +9,7 @@ estimate in the lazily allocated ``evicted`` sketch is > 0 (D-011). Seen scores 
 over its values. Evidence: ``p_unseen``, ``n_total``, ``n_distinct``, ``value_hash`` (xxhash64 hex),
 ``prior_used``; the raw value is added only for non-ID types.
 
-Cold keys (``n_total < novelty_full_n``) may consult the pooled prior (§6.10) via
+Cold keys (``n_total < mag_cold_n``, ruling NV1) may consult the pooled prior (§6.10) via
 ``PriorSource.novelty_ref``: a value is then seen if either record has it, and an unseen value is
 scored with the prior's counts times ``prior_novelty_discount`` (D-012). With no prior the
 behaviour is exactly the formula above.
@@ -109,10 +109,9 @@ class NoveltyDetector:
     def _prior(self, rec: NoveltyRecord | None, tool: str, path: str) -> NoveltyRecord | None:
         """Pooled prior for a cold key (the 1.10 plug-in point); None when not applicable."""
         own_n = rec.n_total if rec is not None else 0
-        if self._priors is None or own_n >= self._cfg.novelty_full_n:
+        if self._priors is None or own_n >= self._cfg.mag_cold_n:
             return None
-        prior = self._priors.novelty_ref(tool, path)
-        return prior if prior is not None and prior.n_total > own_n else None
+        return self._priors.novelty_ref(tool, path)
 
     def _score_path(
         self,

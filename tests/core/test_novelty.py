@@ -235,3 +235,18 @@ def test_cold_key_uses_pooled_prior_with_discount() -> None:
 def test_no_prior_matches_plain_formula(nov: NoveltyDetector) -> None:
     [s] = [s for s in scores(nov, {"currency": "jpy"}) if s.field == "currency"]
     assert s.evidence["prior_used"] is False
+
+
+@pytest.mark.parametrize(("n", "prior_used"), [(29, True), (30, False)])
+def test_prior_boundary_is_mag_cold_n(n: int, prior_used: bool) -> None:
+    pooled = NoveltyRecord()
+    for v in ("usd", "eur", "gbp"):
+        pooled.seen[v] = 1000
+    pooled.n_total, pooled.n_distinct = 3000, 3
+    det = NoveltyDetector(DictStore(), EngineConfig(), priors=_Prior(pooled))
+    feed(det, "currency", ["usd"] * n)
+    [s] = [s for s in scores(det, {"currency": "jpy"}) if s.field == "currency"]
+    assert s.evidence["prior_used"] is prior_used
+    # own record: no singletons, n/full_n warm factor; prior: full warm x 0.67
+    expected = 0.67 if prior_used else n / 200
+    assert s.score == pytest.approx(expected)
