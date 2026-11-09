@@ -3,3 +3,13 @@
 __pycache__/
 *.pyc
 .env
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.hypothesis/
+.benchmarks/
+sandbox_data/
+dataset/
+results/
+traces/
+runs/
