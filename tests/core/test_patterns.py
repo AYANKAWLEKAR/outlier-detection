@@ -53,3 +53,11 @@ def test_try_number() -> None:
     assert try_number("abc") is None
     assert try_number("nan") is None
     assert try_number(None) is None
+
+
+def test_try_number_huge_int_does_not_overflow() -> None:
+    # Review Focus 2: float(10**400) raises OverflowError; ints too large for float map to +/-inf.
+    assert try_number(10**400) == float("inf")
+    assert try_number(-(10**400)) == float("-inf")
+    assert try_number("1" + "0" * 400) == float("inf")
+    assert try_number("1e999") == float("inf")

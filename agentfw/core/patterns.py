@@ -64,10 +64,20 @@ def url_host(s: str) -> str | None:
 
 
 def try_number(v: object) -> float | None:
+    """Parse ``v`` as a number, or ``None``. Never raises.
+
+    Bools are not numbers. Ints too large for a float saturate to ``+/-inf`` (as does
+    ``"1e999"``); callers treat non-finite values separately.
+    """
     if isinstance(v, bool):
         return None
-    if isinstance(v, int | float):
-        return float(v)
+    if isinstance(v, int):
+        try:
+            return float(v)
+        except OverflowError:  # int too large for a float: saturate to +/-inf
+            return float("inf") if v > 0 else float("-inf")
+    if isinstance(v, float):
+        return v
     if isinstance(v, str) and _NUMERIC.match(v.strip()):
         return float(v)
     return None
