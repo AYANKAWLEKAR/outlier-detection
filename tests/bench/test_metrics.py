@@ -10,10 +10,10 @@ from typing import Any
 import numpy as np
 import orjson
 import pytest
+from numpy.typing import NDArray
 from sklearn.metrics import average_precision_score  # type: ignore[import-untyped]
 
 from agentfw.bench.metrics import (
-    ALPHA_GRID,
     STRENGTH_BUCKETS,
     auprc,
     benign_fpr,
@@ -242,6 +242,16 @@ def test_top_reason_share() -> None:
     assert math.isnan(top_reason_share(rows, "magnitude_spike", "magnitude", 0.95))
 
 
+def test_top_reason_share_skips_null_and_non_numeric_scores() -> None:
+    bad = '[{"detector": "a", "score": null}, {"detector": "b", "score": "x"}, '
+    rows = [
+        _atk(0.9, attack_id="a1", per_detector_json=bad + '{"detector": "c", "score": 0.4}]'),
+        _atk(0.9, attack_id="a2", per_detector_json='[{"detector": "a", "score": null}]'),
+    ]
+    assert top_reason_share(rows, "magnitude_spike", "c", 0.5) == 0.5
+    assert top_reason_share(rows, "magnitude_spike", "a", 0.5) == 0.0
+
+
 # --- cold start, drift, latency -----------------------------------------------------------------
 
 
@@ -337,28 +347,93 @@ def _linear_agent() -> list[ScoreRow]:
     ]
 
 
+def _g(train: NDArray[np.float64], score: float) -> float:
+    """Exceedance fraction: the smallest alpha at which ``score`` is flagged."""
+    return float(np.sum(train > score) / train.size)
+
+
+_LIN = np.linspace(0.0, 1.0, 10_001)
+
+
 def test_per_agent_picks_smallest_alpha_meeting_target() -> None:
-    res = per_agent_fpr_at_recall(_linear_agent(), recall=0.75, alphas=(0.0, 0.05, 0.1, 0.2, 0.5))
-    assert res.alpha == 0.1  # highest thresholds meeting the target (D-007)
-    assert res.recall == 0.75 and res.fpr == 0.25
-    assert res.thresholds["A"] == pytest.approx(0.9)
+    res = per_agent_fpr_at_recall(_linear_agent(), recall=0.75)
+    # third-highest attack (0.91) sets the operating point: highest thresholds meeting the target
+    assert res.alpha == _g(_LIN, 0.91) and res.alpha == pytest.approx(0.09, abs=2e-4)
+    assert res.recall == 0.75 and res.fpr == 0.25  # only the 0.92 benign is flagged
+    assert res.thresholds["A"] == float(_LIN[_LIN <= 0.91].max())
 
 
-def test_per_agent_reports_best_achievable_when_target_unreachable() -> None:
-    res = per_agent_fpr_at_recall(_linear_agent(), recall=1.0, alphas=(0.0, 0.05, 0.1, 0.2))
-    assert res.recall == 0.75 and res.alpha == 0.1 and res.fpr == 0.25
+def test_per_agent_alpha_can_exceed_half() -> None:
+    res = per_agent_fpr_at_recall([*_linear_agent(), _atk(0.2)], recall=1.0)
+    assert res.alpha == _g(_LIN, 0.2) and res.alpha == pytest.approx(0.8, abs=2e-4)
+    assert res.recall == 1.0 and res.fpr == 0.75
+
+
+def test_per_agent_unreachable_target_gives_nan_fpr() -> None:
+    train = np.linspace(0.5, 1.0, 501)
+    rows = [
+        *[_row(split="train", fused_score=v) for v in train],
+        _row(fused_score=0.7),
+        _atk(0.9),
+        _atk(0.4),  # below every train benign score: never flagged, even at alpha = 1
+    ]
+    res = per_agent_fpr_at_recall(rows, recall=1.0)
+    assert math.isnan(res.fpr)
+    assert res.recall == 0.5 and res.alpha == _g(train, 0.9)  # best achievable point
 
 
 def test_per_agent_unseen_agent_uses_pooled_train_quantile() -> None:
     rows = [*_linear_agent(), _atk(0.95, agent_id="C"), _row(agent_id="C", fused_score=0.3)]
-    res = per_agent_fpr_at_recall(rows, recall=0.75, alphas=(0.0, 0.05, 0.1, 0.2, 0.5))
-    assert res.thresholds["C"] == pytest.approx(res.thresholds["A"])
+    res = per_agent_fpr_at_recall(rows, recall=0.75)
+    assert res.thresholds["C"] == res.thresholds["A"]
 
 
-def test_alpha_grid_is_fine_and_sorted() -> None:
-    assert ALPHA_GRID[0] == 0.0 and ALPHA_GRID[-1] == pytest.approx(0.5)
-    assert min(a for a in ALPHA_GRID if a > 0) == pytest.approx(1e-4)
-    assert list(ALPHA_GRID) == sorted(set(ALPHA_GRID)) and len(ALPHA_GRID) >= 100
+def _random_rows(n: int = 20_000, seed: int = 0) -> list[ScoreRow]:
+    rng = np.random.default_rng(seed)
+    return [
+        _row(
+            agent_id="ABCD"[i % 4],
+            split="train" if i < 0.7 * n else "test",
+            fused_score=float(rng.random()),
+            label="attack" if rng.random() < 0.05 else "benign",
+        )
+        for i in range(n)
+    ]
+
+
+def test_per_agent_random_scores_cost_about_target_fpr() -> None:
+    # Uninformative scores: any operating point with recall >= 0.95 flags ~95% of benigns.
+    # ~300 test attacks -> sd of the 0.95 order statistic ~ sqrt(.95*.05/300) ~ 0.013, so a 0.05
+    # tolerance is ~4 sd. A grid capped at alpha = 0.5 would report ~0.5 here.
+    m = compute_all(_random_rows(), warm_only=False, n_boot=5)
+    assert m.per_agent_recall >= 0.95
+    assert abs(m.fpr95_per_agent - 0.95) < 0.05
+    assert abs(m.fpr95_global - 0.95) < 0.05
+
+
+def test_compute_all_unreachable_per_agent_is_nan_with_nan_ci() -> None:
+    train = np.linspace(0.5, 1.0, 501)
+    rows = [
+        *[_row(split="train", fused_score=v) for v in train],
+        _row(fused_score=0.7),
+        _atk(0.9),
+        _atk(0.4),
+    ]
+    m = compute_all(rows, warm_only=False, n_boot=20)
+    assert math.isnan(m.fpr95_per_agent)
+    assert all(math.isnan(v) for v in m.fpr95_per_agent_ci)
+    assert m.per_agent_recall == 0.5
+
+
+def test_recall_target_must_be_in_unit_interval() -> None:
+    s = np.array([0.9, 0.1])
+    y = np.array([1, 0], bool)
+    assert fpr_at_recall(s, y, 1.0) == (0.9, 0.0)
+    for bad in (0.0, -0.1, 1.5, math.nan):
+        with pytest.raises(ValueError):
+            fpr_at_recall(s, y, bad)
+        with pytest.raises(ValueError):
+            per_agent_fpr_at_recall(_linear_agent()[-6:], recall=bad)
 
 
 # --- bootstrap ----------------------------------------------------------------------------------
@@ -451,6 +526,7 @@ def test_compute_all_test_split_warm_filter_and_fields() -> None:
     assert warm.thr95_global == pytest.approx(0.3) and warm.recall_at_global_thr == 1.0
     assert warm.fpr95_global == pytest.approx(0.5)
     assert warm.fpr95_per_agent == 0.0 and warm.per_agent_alpha == 0.0
+    assert warm.per_agent_recall == 1.0 and warm.breakdown_mode == "per_agent"
     assert warm.fpr95_per_agent_ci[0] == 0.0 <= warm.fpr95_per_agent_ci[1] < 0.1
     assert set(warm.per_family_envelope) == {"magnitude_spike"}  # train-split family excluded
     assert warm.per_family_attack["magnitude_spike"]["all"].recall == 1.0
@@ -461,8 +537,16 @@ def test_compute_all_test_split_warm_filter_and_fields() -> None:
     assert all_m.cold_start[0].fpr == 1.0 and warm.cold_start[0].n_benign == 0
 
 
-def test_compute_all_prefers_row_thresholds_when_present() -> None:
-    m = compute_all(_dataset(row_thr=0.95), warm_only=True, n_boot=10)
-    assert m.per_family_envelope["magnitude_spike"]["all"].recall == 0.0
-    m2 = compute_all(_dataset(row_thr=None), warm_only=True, n_boot=10)
-    assert m2.per_family_envelope["magnitude_spike"]["all"].recall == 1.0
+def test_compute_all_breakdown_threshold_modes() -> None:
+    rows = _dataset(row_thr=0.95)  # every attack (0.3 / 0.8) is below its row threshold
+    row = compute_all(rows, warm_only=True, breakdown_thresholds="row", n_boot=10)
+    per_agent = compute_all(rows, warm_only=True, n_boot=10)
+    assert row.breakdown_mode == "row" and per_agent.breakdown_mode == "per_agent"
+    assert row.per_family_envelope["magnitude_spike"]["all"].recall == 0.0
+    assert per_agent.per_family_envelope["magnitude_spike"]["all"].recall == 1.0
+    # "row" never silently switches mode: rows without a threshold are simply not flagged
+    none = compute_all(
+        _dataset(row_thr=None), warm_only=True, breakdown_thresholds="row", n_boot=10
+    )
+    assert none.breakdown_mode == "row"
+    assert none.per_family_attack["magnitude_spike"]["all"].recall == 0.0

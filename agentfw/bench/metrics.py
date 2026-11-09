@@ -33,7 +33,6 @@ from numpy.typing import NDArray
 from agentfw.bench.replay import ScoreRow
 
 __all__ = [
-    "ALPHA_GRID",
     "BOOTSTRAP_N",
     "COLD_START_BUCKETS",
     "RECALL_TARGET",
@@ -62,10 +61,6 @@ RECALL_TARGET = 0.95
 BOOTSTRAP_N = 1000
 _EPS = 1e-12
 
-#: Per-agent calibration grid: ``0.0`` (threshold = max train benign score) followed by 200
-#: geometrically spaced values from ``1e-4`` to ``0.5`` (~54 points per decade), ascending.
-ALPHA_GRID: tuple[float, ...] = (0.0, *(float(a) for a in np.geomspace(1e-4, 0.5, 200)))
-
 #: Strength bucket edges per family (D-009). Bucket ``"lo-hi"`` is ``[lo, hi)`` except the last,
 #: which is ``[lo, hi]``. Strengths below the first edge are clamped into the first bucket and
 #: strengths above the last edge into the last bucket (realized strengths can fall a hair outside
@@ -88,6 +83,7 @@ COLD_START_BUCKETS: tuple[tuple[float, float], ...] = (
 )
 
 Thresholds = float | Mapping[str, float] | Literal["row"]
+BreakdownMode = Literal["per_agent", "row"]
 
 FloatArray = NDArray[np.float64]
 BoolArray = NDArray[np.bool_]
@@ -136,6 +132,8 @@ class Metrics:
     fpr95_per_agent: float
     fpr95_per_agent_ci: tuple[float, float]
     per_agent_alpha: float
+    per_agent_recall: float
+    breakdown_mode: str
     per_family_envelope: dict[str, dict[str, RecallCell]]
     per_family_attack: dict[str, dict[str, RecallCell]]
     control_fpr: float
@@ -148,6 +146,11 @@ class Metrics:
 
 
 # --- helpers ------------------------------------------------------------------------------------
+
+
+def _check_recall(recall: float) -> None:
+    if not 0.0 < recall <= 1.0:  # also rejects NaN
+        raise ValueError(f"recall target must be in (0, 1], got {recall!r}")
 
 
 def _rate(num: int, den: int) -> float:
@@ -212,8 +215,10 @@ def fpr_at_recall(
 ) -> tuple[float, float]:
     """D-007: the **highest** threshold whose recall >= ``recall``; returns ``(threshold, fpr)``.
 
-    ``(nan, nan)`` without positives; the FPR is NaN without negatives.
+    ``(nan, nan)`` without positives; the FPR is NaN without negatives. Raises ``ValueError``
+    unless ``0 < recall <= 1``.
     """
+    _check_recall(recall)
     s, yy = _clean(scores, y)
     n_pos = int(yy.sum())
     n_neg = int(yy.size - n_pos)
@@ -306,13 +311,15 @@ def recall_by_family(
 
 
 def _top_detector(per_detector_json: str) -> str | None:
-    items = orjson.loads(per_detector_json)
+    """Detector with the highest numeric score; null / non-numeric / NaN scores are skipped."""
     best: str | None = None
     best_score = -math.inf
-    for item in items:  # first in list order wins ties
-        score = float(item["score"])
-        if score > best_score:
-            best, best_score = str(item["detector"]), score
+    for item in orjson.loads(per_detector_json):  # first in list order wins ties
+        score = item.get("score")
+        if isinstance(score, bool) or not isinstance(score, int | float) or math.isnan(score):
+            continue
+        if best is None or score > best_score:
+            best, best_score = str(item.get("detector")), float(score)
     return best
 
 
@@ -396,65 +403,90 @@ def latency_summary(rows: Sequence[ScoreRow]) -> tuple[float, float]:
 # --- per-agent calibration ----------------------------------------------------------------------
 
 
+def _exceedance(train_sorted: FloatArray, scores: FloatArray) -> FloatArray:
+    """Smallest alpha at which each score is flagged against one agent's train-benign ECDF.
+
+    With ``q_p`` the inverted-CDF quantile (smallest train value ``b`` with ``F(b) >= p``),
+    ``score >= q_{1-alpha}`` iff ``score >= min(train)`` and ``alpha >= #(train > score) / n``.
+    Scores below every train value are never flagged (``+inf``), even at ``alpha = 1``.
+    """
+    n = train_sorted.size
+    above = n - np.searchsorted(train_sorted, scores, side="right")
+    out = above / n
+    out[scores < train_sorted[0]] = math.inf
+    return out
+
+
+def _threshold_at(train_sorted: FloatArray, alpha: float) -> float:
+    """``q_{1-alpha}``: the smallest train value ``b`` with ``#(train > b) / n <= alpha``.
+
+    Flagging ``score >= q_{1-alpha}`` reproduces ``_exceedance(score) <= alpha`` exactly.
+    """
+    g = _exceedance(train_sorted, train_sorted)
+    return float(train_sorted[int(np.argmax(g <= alpha + _EPS))])
+
+
 def per_agent_fpr_at_recall(
     rows: Sequence[ScoreRow],
     recall: float = RECALL_TARGET,
-    alphas: Sequence[float] = ALPHA_GRID,
 ) -> PerAgentResult:
-    """Per-agent operating point: one ``alpha`` shared by all agents (spec 5.4, D-007).
+    """Per-agent operating point: one ``alpha`` shared by all agents (spec 5.4, D-007, D-021).
 
-    Each agent's threshold is the ``1 - alpha`` quantile (numpy ``linear``) of that agent's
+    Each agent's threshold is the ``1 - alpha`` inverted-CDF quantile of that agent's
     **train-split benign** scores; an agent with no train benign rows (e.g. a held-out agent in the
-    by-agent split) uses the pooled train benign quantile. Recall and FPR are pooled over the
-    **test** split. Thresholds fall as ``alpha`` grows, so recall and FPR are non-decreasing in
-    ``alpha``; the operating point is the **smallest** ``alpha`` (highest thresholds) whose test
-    recall >= ``recall`` -- the D-007 reading (a larger alpha only adds false positives). If no
-    alpha reaches the target, the smallest alpha with the best achievable recall is reported.
-    ``thresholds`` holds every agent's threshold at the chosen alpha. All-NaN result when there
-    are no train benign rows or no test attack rows.
+    by-agent split) uses the pooled train-benign ECDF. Recall and FPR are pooled over the **test**
+    split. Exact, no grid: every test row gets its flag-alpha (:func:`_exceedance`), and the
+    operating point is the **smallest** candidate alpha in ``[0, 1]`` (highest thresholds) whose
+    test recall >= ``recall``. ``thresholds`` holds every agent's score threshold at that alpha.
+
+    If the target is unreachable even at ``alpha = 1`` (attacks scoring below every train-benign
+    score of their agent are never flagged), ``fpr`` is NaN while ``alpha`` / ``recall`` /
+    ``thresholds`` describe the best achievable point (smallest alpha with maximal recall); if no
+    test attack is flaggable at all, ``alpha`` is NaN, ``recall`` 0 and ``thresholds`` empty.
+    All-NaN result when there are no train benign rows or no test attack rows.
     """
+    _check_recall(recall)
     valid = _valid(rows)
-    a = np.unique(np.asarray(alphas, dtype=np.float64))
     train_by_agent: dict[str, list[float]] = defaultdict(list)
     for r in valid:
         if r.split == "train" and not _is_attack(r):
             train_by_agent[r.agent_id].append(r.fused_score)
     test = [r for r in valid if r.split == "test"]
-    pooled = list(chain.from_iterable(train_by_agent.values()))
-    n_atk = sum(_is_attack(r) for r in test)
-    if not pooled or n_atk == 0 or a.size == 0:
+    pooled = np.sort(np.asarray(list(chain.from_iterable(train_by_agent.values()))))
+    is_atk = np.asarray([_is_attack(r) for r in test], dtype=np.bool_)
+    n_atk = int(is_atk.sum())
+    if pooled.size == 0 or n_atk == 0:
         return PerAgentResult(math.nan, math.nan, math.nan, {})
 
-    q = 1.0 - a
-    pooled_thr = np.quantile(np.asarray(pooled), q)
-    thr: dict[str, FloatArray] = {}
+    train: dict[str, FloatArray] = {}
     for agent in sorted({r.agent_id for r in valid}):
         own = train_by_agent.get(agent)
-        t = np.quantile(np.asarray(own), q) if own else pooled_thr
-        thr[agent] = np.minimum.accumulate(t)  # guard monotonicity against rounding
+        train[agent] = np.sort(np.asarray(own)) if own else pooled
 
-    # For each test row, the first alpha index at which it is flagged (len(a) = never).
-    first = np.empty(len(test), dtype=np.int64)
+    flag_alpha = np.empty(len(test), dtype=np.float64)
     by_agent: dict[str, list[int]] = defaultdict(list)
     for i, r in enumerate(test):
         by_agent[r.agent_id].append(i)
     scores = np.asarray([r.fused_score for r in test], dtype=np.float64)
     for agent, idx in by_agent.items():
         ix = np.asarray(idx)
-        # -thr is non-decreasing; first j with thr[j] <= score.
-        first[ix] = np.searchsorted(-thr[agent], -scores[ix], side="left")
-    is_atk = np.asarray([_is_attack(r) for r in test], dtype=np.bool_)
-    n_ben = int(is_atk.size - n_atk)
-    m = a.size
-    rec = np.cumsum(np.bincount(first[is_atk], minlength=m + 1)[:m]) / n_atk
-    fp = np.cumsum(np.bincount(first[~is_atk], minlength=m + 1)[:m])
+        flag_alpha[ix] = _exceedance(train[agent], scores[ix])
+
+    atk_alpha = np.sort(flag_alpha[is_atk])
+    cand = np.unique(atk_alpha[np.isfinite(atk_alpha)])
+    if cand.size == 0:
+        return PerAgentResult(math.nan, math.nan, 0.0, {})
+    rec = np.searchsorted(atk_alpha, cand + _EPS, side="right") / n_atk
     meets = rec >= recall - _EPS
     j = int(np.argmax(meets)) if meets.any() else int(np.argmax(rec))
+    alpha = float(cand[j])
+    ben_alpha = flag_alpha[~is_atk]
+    fpr = _rate(int(np.sum(ben_alpha <= alpha + _EPS)), ben_alpha.size) if meets.any() else math.nan
     return PerAgentResult(
-        alpha=float(a[j]),
-        fpr=_rate(int(fp[j]), n_ben),
+        alpha=alpha,
+        fpr=fpr,
         recall=float(rec[j]),
-        thresholds={agent: float(t[j]) for agent, t in thr.items()},
+        thresholds={agent: _threshold_at(t, alpha) for agent, t in train.items()},
     )
 
 
@@ -514,6 +546,7 @@ def compute_all(
     rows: Sequence[ScoreRow],
     *,
     warm_only: bool,
+    breakdown_thresholds: BreakdownMode = "per_agent",
     n_boot: int = BOOTSTRAP_N,
     seed: int = 0,
 ) -> Metrics:
@@ -522,9 +555,12 @@ def compute_all(
     ``warm_only`` keeps only ``is_warm`` rows -- for evaluation *and* for the train-split per-agent
     calibration, so thresholds are fit on the population they are judged on. The per-agent CI
     resamples sessions over train and test rows together, so it includes calibration variance.
-    Thresholded breakdowns (family recall, control FPR, cold start, drift) use ``"row"``
-    thresholds when every evaluated test row carries one (the engine's live threshold), otherwise
-    the per-agent thresholds chosen by :func:`per_agent_fpr_at_recall`.
+    Thresholded breakdowns (family recall, control FPR, cold start, drift) use
+    ``breakdown_thresholds``: ``"per_agent"`` (default) = the per-agent thresholds chosen by
+    :func:`per_agent_fpr_at_recall`; ``"row"`` = each row's own live engine threshold (rows without
+    one are never flagged). The mode is recorded in ``Metrics.breakdown_mode``; it is never chosen
+    automatically. When the per-agent target is unreachable, ``fpr95_per_agent`` and its CI are
+    NaN and ``per_agent_recall`` reports the best achievable recall.
     """
     pool = [r for r in _valid(rows) if r.is_warm or not warm_only]
     test = [r for r in pool if r.split == "test"]
@@ -535,8 +571,12 @@ def compute_all(
     recall_g = _rate(int(np.sum(s[y] >= thr_g)), n_atk)
 
     pa = per_agent_fpr_at_recall(pool, RECALL_TARGET)
-    use_row = bool(test) and all(r.threshold is not None for r in test)
-    thresholds: Thresholds = "row" if use_row else pa.thresholds
+    thresholds: Thresholds = "row" if breakdown_thresholds == "row" else pa.thresholds
+    pa_ci = (
+        (math.nan, math.nan)
+        if math.isnan(pa.fpr)
+        else bootstrap_ci(pool, _per_agent_fpr, n=n_boot, seed=seed)
+    )
 
     p50, p99 = latency_summary(test)
     return Metrics(
@@ -546,8 +586,10 @@ def compute_all(
         fpr95_global=fpr_g,
         recall_at_global_thr=recall_g,
         fpr95_per_agent=pa.fpr,
-        fpr95_per_agent_ci=bootstrap_ci(pool, _per_agent_fpr, n=n_boot, seed=seed),
+        fpr95_per_agent_ci=pa_ci,
         per_agent_alpha=pa.alpha,
+        per_agent_recall=pa.recall,
+        breakdown_mode=breakdown_thresholds,
         per_family_envelope=recall_by_family(test, thresholds, "envelope"),
         per_family_attack=recall_by_family(test, thresholds, "attack"),
         control_fpr=control_fpr(test, thresholds),
