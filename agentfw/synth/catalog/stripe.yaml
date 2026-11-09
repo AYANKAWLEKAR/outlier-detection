@@ -1,0 +1,66 @@
+stripe.retrieve_charge:
+  kind: read
+  args:
+    charge_id: {type: id, prefix: "ch_", source: external}
+  produces: [charge.id, charge.amount, charge.customer]
+  produced:
+    charge.id: {type: id, prefix: "ch_"}
+    charge.amount: {type: numeric, shape: money, dist: {family: lognormal, mu: 4.0, sigma: 0.8, round_cents: true}}
+    charge.customer: {type: id, prefix: "cus_"}
+  response:
+    produces_ids: [charge.id, charge.customer]
+stripe.list_charges:
+  kind: read
+  args:
+    customer_id: {type: id, prefix: "cus_", source: external}
+    limit: {type: numeric, shape: count, dist: {family: constant, value: 10}}
+  produces: [charge.ids]
+  produced:
+    charge.ids: {type: list_of_id, prefix: "ch_", len_dist: {family: poisson, lam: 4, min: 0}}
+  response:
+    item_count: {family: poisson, lam: 4, min: 0}
+    produces_ids: [charge.ids]
+stripe.create_refund:
+  kind: write
+  args:
+    charge_id: {type: id, prefix: "ch_", source: stripe.retrieve_charge.id}
+    amount:
+      type: numeric
+      shape: money
+      dist: {family: lognormal, mu: 3.4, sigma: 0.9, round_cents: true}
+    reason:
+      type: categorical
+      vocab: [duplicate, fraudulent, requested_by_customer, manager_approved]
+      dist:
+        family: categorical
+        vocab: [duplicate, fraudulent, requested_by_customer, manager_approved]
+        weights: [0.2, 0.1, 0.69, 0.01]
+  produces: [refund.id]
+  produced:
+    refund.id: {type: id, prefix: "re_"}
+  response:
+    produces_ids: [refund.id]
+stripe.retrieve_customer:
+  kind: read
+  args:
+    customer_id: {type: id, prefix: "cus_", source: stripe.retrieve_charge.customer}
+  produces: [customer.id, customer.email]
+  produced:
+    customer.id: {type: id, prefix: "cus_"}
+    customer.email: {type: email, dist: {family: zipf, vocab_size: 12, s: 1.3}}
+  response:
+    produces_ids: [customer.id]
+stripe.create_payout:
+  kind: write
+  args:
+    amount:
+      type: numeric
+      shape: money
+      dist: {family: lognormal, mu: 8.0, sigma: 0.6, round_cents: true}
+    currency: {type: categorical, vocab: [usd, eur, gbp]}
+    destination: {type: id, prefix: "ba_", source: external}
+  produces: [payout.id]
+  produced:
+    payout.id: {type: id, prefix: "po_"}
+  response:
+    produces_ids: [payout.id]

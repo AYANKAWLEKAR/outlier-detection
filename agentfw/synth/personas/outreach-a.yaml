@@ -1,0 +1,20 @@
+agent_id: outreach-a
+tools:
+  - salesforce.get_record
+  - mail.send_email
+  - slack.read_channel
+  - slack.post_message
+session_rate: {family: poisson, lam: 15}
+tasks:
+  - {name: cold_outreach, weight: 0.8}
+  - {name: channel_digest, weight: 0.2}
+fields:
+  mail.send_email.to.__domain__: {family: zipf, vocab_size: 40, s: 1.1}
+  mail.send_email.to.__len__: {family: poisson, lam: 2.5, min: 1}
+drift: null
+noise: {skip_lookup: 0.05, retry: 0.03, abandon: 0.02, arg_dropout: 0.02}
+id_pools:
+  contacts: {prefix: "006", size: 8000, s: 1.05}
+id_flow_rate: 1.0
+working_hours: [9, 17]
+quarter_end_days: []

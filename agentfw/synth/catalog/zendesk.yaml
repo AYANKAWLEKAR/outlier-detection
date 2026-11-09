@@ -1,0 +1,44 @@
+zendesk.get_ticket:
+  kind: read
+  args:
+    ticket_id: {type: id, prefix: "tk_", source: external}
+  produces: [ticket.id, ticket.charge_id, ticket.customer_email, ticket.status]
+  produced:
+    ticket.id: {type: id, prefix: "tk_"}
+    ticket.charge_id: {type: id, prefix: "ch_"}
+    ticket.customer_email: {type: email, dist: {family: zipf, vocab_size: 12, s: 1.3}}
+    ticket.status: {type: categorical, vocab: [open, pending, solved]}
+  response:
+    produces_ids: [ticket.id, ticket.charge_id]
+zendesk.list_tickets:
+  kind: read
+  args:
+    status: {type: categorical, vocab: [open, pending, solved]}
+    limit: {type: numeric, shape: count, dist: {family: constant, value: 25}}
+  produces: [ticket.ids]
+  produced:
+    ticket.ids: {type: list_of_id, prefix: "tk_", len_dist: {family: poisson, lam: 8, min: 0}}
+  response:
+    item_count: {family: poisson, lam: 8, min: 0}
+    produces_ids: [ticket.ids]
+zendesk.add_comment:
+  kind: write
+  args:
+    ticket_id: {type: id, prefix: "tk_", source: zendesk.get_ticket.id}
+    body: {type: freetext}
+    public: {type: bool}
+  produces: [comment.id]
+  produced:
+    comment.id: {type: id, prefix: "cm_"}
+  response:
+    produces_ids: [comment.id]
+zendesk.update_status:
+  kind: write
+  args:
+    ticket_id: {type: id, prefix: "tk_", source: zendesk.get_ticket.id}
+    status: {type: categorical, vocab: [open, pending, solved]}
+  produces: [ticket.id]
+  produced:
+    ticket.id: {type: id, prefix: "tk_"}
+  response:
+    produces_ids: [ticket.id]

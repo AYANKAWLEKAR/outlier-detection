@@ -1,0 +1,26 @@
+agent_id: sales-ops-a
+tools:
+  - salesforce.run_soql
+  - salesforce.get_record
+  - salesforce.update_record
+  - salesforce.mass_update
+  - salesforce.create_task
+  - mail.send_email
+  - slack.post_message
+session_rate: {family: poisson, lam: 25}
+tasks:
+  - {name: pipeline_review, weight: 0.45}
+  - {name: reprice_opportunity, weight: 0.3}
+  - {name: bulk_stage_update, weight: 0.15}
+  - {name: log_followup, weight: 0.1}
+fields:
+  salesforce.update_record.amount: {family: lognormal, mu: 9.2, sigma: 0.6, round_cents: true}
+  mail.send_email.to.__domain__: {family: zipf, vocab_size: 8, s: 1.5}
+  mail.send_email.to.__len__: {family: poisson, lam: 1.5, min: 1}
+drift: null
+noise: {skip_lookup: 0.05, retry: 0.03, abandon: 0.02, arg_dropout: 0.02}
+id_pools:
+  opportunities: {prefix: "006", size: 3000, s: 1.2}
+id_flow_rate: 1.0
+working_hours: [7, 19]
+quarter_end_days: [28, 29, 30, 31]

@@ -1,0 +1,21 @@
+slack.post_message:
+  kind: write
+  args:
+    channel: {type: categorical, vocab: [support-ops, sales-floor, outreach-log]}
+    text: {type: freetext}
+  produces: [message.ts]
+  produced:
+    message.ts: {type: id, prefix: "ts_"}
+  response:
+    produces_ids: [message.ts]
+slack.read_channel:
+  kind: read
+  args:
+    channel: {type: categorical, vocab: [support-ops, sales-floor, outreach-log]}
+    limit: {type: numeric, shape: count, dist: {family: constant, value: 20}}
+  produces: [message.ids]
+  produced:
+    message.ids: {type: list_of_id, prefix: "ts_", len_dist: {family: poisson, lam: 12, min: 0}}
+  response:
+    item_count: {family: poisson, lam: 12, min: 0}
+    produces_ids: [message.ids]

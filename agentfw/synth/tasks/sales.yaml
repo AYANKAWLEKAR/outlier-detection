@@ -1,0 +1,21 @@
+pipeline_review:
+  repeat: {family: poisson, lam: 3, min: 1}
+  steps:
+    - {tool: salesforce.run_soql, as: q, args: {query: sample}}
+    - {tool: salesforce.get_record, as: rec, args: {object: sample, record_id: "ext:opportunities"}}
+    - {tool: salesforce.create_task, optional_prob: 0.4, args: {record_id: rec.id, subject: sample, due_in_days: sample}}
+reprice_opportunity:
+  steps:
+    - {tool: salesforce.get_record, as: rec, args: {object: sample, record_id: "ext:opportunities"}}
+    - tool: salesforce.update_record
+      args: {object: sample, record_id: rec.id, field: sample, amount: "frac:rec.amount:0.8:1.2"}
+bulk_stage_update:
+  steps:
+    - {tool: salesforce.run_soql, as: q, args: {query: sample}}
+    - {tool: salesforce.mass_update, args: {object: sample, record_ids: q.ids, field_updates: sample}}
+    - {tool: slack.post_message, optional_prob: 0.5, args: {channel: sample, text: sample}}
+log_followup:
+  steps:
+    - {tool: salesforce.get_record, as: rec, args: {object: sample, record_id: "ext:opportunities"}}
+    - {tool: salesforce.create_task, args: {record_id: rec.id, subject: sample, due_in_days: sample}}
+    - {tool: mail.send_email, optional_prob: 0.5, args: {to: rec.email, subject: sample, body: sample}}

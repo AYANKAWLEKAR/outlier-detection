@@ -1,0 +1,14 @@
+mail.send_email:
+  kind: write
+  args:
+    to:
+      type: list_of_email
+      dist: {family: zipf, vocab_size: 12, s: 1.3}
+      len_dist: {family: poisson, lam: 1.2, min: 1}
+    subject: {type: freetext}
+    body: {type: freetext}
+  produces: [message.id]
+  produced:
+    message.id: {type: id, prefix: "msg_"}
+  response:
+    produces_ids: [message.id]

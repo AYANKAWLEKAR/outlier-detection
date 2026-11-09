@@ -1,0 +1,9 @@
+cold_outreach:
+  repeat: {family: poisson, lam: 4, min: 1}
+  steps:
+    - {tool: salesforce.get_record, as: contact, args: {object: sample, record_id: "ext:contacts"}}
+    - {tool: mail.send_email, args: {to: contact.email, subject: sample, body: sample}}
+channel_digest:
+  steps:
+    - {tool: slack.read_channel, args: {channel: sample, limit: sample}}
+    - {tool: slack.post_message, args: {channel: sample, text: sample}}
