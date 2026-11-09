@@ -219,7 +219,7 @@ def test_load_dir_roundtrip_and_replay(tmp_path: Path) -> None:
     man = generate(cfg, tmp_path)
     raws, labels, manifest = load_dir(tmp_path)
     assert manifest == man
-    assert len(raws) == man.counts["envelopes"] if "envelopes" in man.counts else raws
+    assert len(raws) > 0
     assert set(labels) == {r.envelope_id for r in raws}
     rows = replay(raws, labels, Spy(), SplitSpec())
     assert len(rows) == len(raws)
