@@ -11,3 +11,4 @@ jobs:
       - run: uv python install 3.12
       - run: uv sync --all-groups
       - run: scripts/gate.sh
+      - run: uv run python -m agentfw.bench.ci_regress

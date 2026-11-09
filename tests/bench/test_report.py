@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from pathlib import Path
 
 import orjson
@@ -144,5 +145,7 @@ def test_cli_end_to_end_update_readme(
     first = (tmp_path / "README.md").read_text()
     assert "FPR@95" in first and "OLDMARK" not in first
     main([*args, "--update-readme"])
-    assert (tmp_path / "README.md").read_text() == first
+    # wall-clock latency is measured per run, so mask it before comparing the two renderings
+    mask = re.compile(r"p50 [\d.]+ us, p99 [\d.]+ us")
+    assert mask.sub("", (tmp_path / "README.md").read_text()) == mask.sub("", first)
     assert (tmp_path / "o" / "report.json").is_file()
