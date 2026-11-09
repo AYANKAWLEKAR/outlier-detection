@@ -52,6 +52,8 @@ def sample_persona(
     max_sessions: int | None = None,
 ) -> list[list[RawCall]]:
     """Sessions for one persona in time order (each a list of calls with seq_no 0..n-1)."""
+    if max_sessions is not None and max_sessions <= 0:
+        return []
     rng = persona_rng(global_seed, persona.agent_id)
     pools = {
         name: IdPool(spec.prefix, spec.size, spec.s, rng)

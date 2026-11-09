@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 import orjson
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agentfw.core.envelope import Label, RawCall
 from agentfw.synth.load import (
@@ -37,9 +37,9 @@ class GenerateConfig(BaseModel):
     personas_dir: Path
     tasks_dir: Path
     catalog_dir: Path
-    days: int
+    days: int = Field(ge=0)
     start_ms: int = 1_767_225_600_000
-    max_sessions: int | None = None  # TOTAL cap across personas (ruling R3)
+    max_sessions: int | None = Field(default=None, ge=0)  # TOTAL cap across personas (ruling R3)
     attack_rate: float = 0.015
     warmup_sessions: int = 30
     families: list[str] = []

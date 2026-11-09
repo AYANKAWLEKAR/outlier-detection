@@ -110,3 +110,24 @@ def test_cli_main(tmp_path: Path) -> None:
     m = orjson.loads((out / "manifest.json").read_bytes())
     assert m["counts"]["sessions"] == 6
     assert m["config"]["seed"] == 0
+
+
+def test_cap_smaller_than_persona_count(tmp_path: Path) -> None:
+    m = generate(cfg(max_sessions=2, days=30), tmp_path)
+    assert m.counts["sessions"] == 2
+    per = {str(t["agent_id"]) for t in _read(tmp_path / "traces.jsonl")}
+    assert per == {"outreach-a", "sales-ops-a"}
+
+
+def test_zero_cap_emits_nothing(tmp_path: Path) -> None:
+    m = generate(cfg(max_sessions=0), tmp_path)
+    assert m.counts["sessions"] == 0
+    assert (tmp_path / "traces.jsonl").read_bytes() == b""
+    assert (tmp_path / "labels.jsonl").read_bytes() == b""
+
+
+def test_negative_values_rejected() -> None:
+    with pytest.raises(ValueError):
+        cfg(days=-1)
+    with pytest.raises(ValueError):
+        cfg(max_sessions=-1)
