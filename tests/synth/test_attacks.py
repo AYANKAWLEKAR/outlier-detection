@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -13,8 +14,10 @@ from agentfw.core.patterns import email_domain, is_id_like
 from agentfw.synth.attacks import (
     ATTACKS,
     AttackContext,
+    applicable,
     eligible,
     fabricate_id,
+    inject,
     mutate_replace,
     mutate_scale,
     novel_value,
@@ -124,8 +127,9 @@ def test_prereq_skip_removes_lookup_and_fabricates(
     benign_session: list[RawCall], ctx: Callable[[], AttackContext]
 ) -> None:
     r = ATTACKS["prereq_skip"](benign_session, np.random.default_rng(0), ctx())
-    assert r is not None and len(r.labels) == 1
+    assert r is not None and len(r.labels) >= 1  # target write first, then dependents
     write = next(c for c in r.session if c.envelope_id == r.labels[0].envelope_id)
+    assert write.tool_id == "stripe.create_refund"
     earlier = [c for c in r.session if c.seq_no < write.seq_no]
     earlier_ids = {i for c in earlier for i in (c.response_meta.ids if c.response_meta else ())}
     assert write.args["charge_id"] not in earlier_ids
@@ -280,3 +284,104 @@ def test_generate_with_attacks_is_deterministic(tmp_path: Path) -> None:
 def test_unknown_family_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="unknown attack family"):
         generate(_cfg(days=2, families=["bogus"]), tmp_path)
+
+
+def test_family_choice_not_skewed(tmp_path: Path) -> None:
+    # Per-session applicability legitimately favours novel_target (nearly every session has an
+    # email/categorical write arg) but magnitude_spike must not be starved.
+    generate(_cfg(days=120), tmp_path)
+    labels = [Label.model_validate(x) for x in _rows(tmp_path / "labels.jsonl")]
+    fam = {
+        lab.attack_id: lab.attack_family
+        for lab in labels
+        if lab.attack_id is not None and lab.attack_family is not None
+    }
+    counts = {f: sum(1 for v in fam.values() if v == f) for f in FAMILIES}
+    total = sum(counts.values())
+    assert total > 60
+    for n in counts.values():
+        assert 0.10 <= n / total <= 0.60, counts
+
+
+def test_family_choice_uniform_when_all_apply(
+    benign_session: list[RawCall], ctx: Callable[[], AttackContext]
+) -> None:
+    assert all(applicable(f, benign_session, ctx()) for f in FAMILIES)
+    n = 900
+    out, labels = inject(
+        {PERSONA: [benign_session] * n},
+        _cfg(attack_rate=1.0, warmup_sessions=0),
+        np.random.default_rng(5),
+        lambda agent, aid, ps, idx: replace(ctx(), attack_id=aid),
+    )
+    assert len(out[PERSONA]) == n
+    per = {f: len({lab.attack_id for lab in labels if lab.attack_family == f}) for f in FAMILIES}
+    assert sum(per.values()) == n
+    expected = n / 3
+    chi2 = sum((c - expected) ** 2 / expected for c in per.values())
+    assert chi2 < 13.8, per  # chi-square, 2 dof, p = 0.001
+
+
+def test_applicable_matches_attack_fns(
+    benign_session: list[RawCall], ctx: Callable[[], AttackContext]
+) -> None:
+    for name, fn in ATTACKS.items():
+        got = fn(benign_session, np.random.default_rng(0), ctx())
+        assert applicable(name, benign_session, ctx()) == (got is not None)
+    reads = [c for c in benign_session if c.tool_id.startswith("zendesk.get")]
+    for name in ATTACKS:
+        assert not applicable(name, reads, ctx())
+
+
+def test_session_with_no_applicable_family_stays_benign(
+    world: World, benign_session: list[RawCall], ctx: Callable[[], AttackContext]
+) -> None:
+    reads = [c for c in benign_session if c.tool_id.startswith("zendesk.get")]
+    cfg = _cfg(attack_rate=1.0, warmup_sessions=0)
+    out, labels = inject(
+        {PERSONA: [reads, reads]},
+        cfg,
+        np.random.default_rng(0),
+        lambda agent, aid, ps, idx: ctx(),
+    )
+    assert labels == [] and out == {PERSONA: [reads, reads]}
+
+
+def test_magnitude_strength_is_realized_multiplier_for_int_fields(world: World) -> None:
+    call = RawCall(
+        envelope_id="e1",
+        session_id="s",
+        agent_id="sales-ops-a",
+        principal_id="p",
+        seq_no=0,
+        ts_unix_ms=1,
+        tool_id="salesforce.create_task",
+        args={"record_id": "006ABCDEFGHIJKLM", "subject": "hi", "due_in_days": 7},
+    )
+    sctx = AttackContext(
+        world.catalog, world.persona("sales-ops-a"), {}, "atk-x-00000", [[call]], 0
+    )
+    for seed in range(30):
+        r = ATTACKS["magnitude_spike"]([call], np.random.default_rng(seed), sctx)
+        assert r is not None
+        new = r.session[0].args["due_in_days"]
+        assert isinstance(new, int)
+        assert r.labels[0].strength == new / 7
+        assert 3 <= new / 7 <= 100
+
+
+def test_prereq_skip_labels_downstream_dependents(
+    benign_session: list[RawCall], ctx: Callable[[], AttackContext]
+) -> None:
+    sess = [c for c in benign_session if c.tool_id != "stripe.retrieve_charge"]
+    # force the write to be the target: only create_refund has a read-sourced id arg here
+    r = ATTACKS["prereq_skip"](sess, np.random.default_rng(0), ctx())
+    assert r is not None
+    attacked = {lab.envelope_id for lab in r.labels}
+    assert all(lab.attack_id == "atk-support-refunds-a-00000" for lab in r.labels)
+    refund = next(c for c in r.session if c.tool_id == "stripe.create_refund")
+    mail = [c for c in r.session if c.tool_id == "mail.send_email"]
+    assert refund.envelope_id in attacked
+    assert mail and all(m.envelope_id in attacked for m in mail)
+    assert len(r.labels) == len(attacked)
+    assert all(lab.attack_family == "prereq_skip" for lab in r.labels)

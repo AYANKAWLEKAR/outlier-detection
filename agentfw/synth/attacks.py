@@ -20,13 +20,14 @@ non-attacked session, are unaffected by the attack rate.
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
 from agentfw.core.envelope import JsonValue, Label, RawCall
+from agentfw.core.patterns import is_id_like
 from agentfw.synth.dists import IdPool, new_id
 from agentfw.synth.schema import ArgSpec, Catalog, Persona
 
@@ -38,6 +39,7 @@ __all__ = [
     "AttackContext",
     "AttackFn",
     "AttackResult",
+    "applicable",
     "eligible",
     "fabricate_id",
     "inject",
@@ -174,6 +176,7 @@ def eligible(family: str, persona: Persona, catalog: Catalog) -> bool:
 
 
 # --- families -----------------------------------------------------------------------------------
+# Each family has a pure candidate finder (no RNG) shared by ``applicable`` and the mutation.
 
 
 def _is_num(v: object) -> bool:
@@ -195,47 +198,82 @@ def _replace_call(session: list[RawCall], i: int, new: RawCall) -> list[RawCall]
     return [*session[:i], new, *session[i + 1 :]]
 
 
-def magnitude_spike(
-    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
-) -> AttackResult | None:
-    cands = [
+def _kind(ctx: AttackContext, c: RawCall) -> str | None:
+    spec = ctx.catalog.get(c.tool_id)
+    return spec.kind if spec is not None else None
+
+
+def _magnitude_cands(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, str]]:
+    return [
         (i, name)
         for i, c in enumerate(session)
-        if c.tool_id in ctx.catalog and ctx.catalog[c.tool_id].kind == "write"
+        if _kind(ctx, c) == "write"
         for name, a in ctx.catalog[c.tool_id].args.items()
         if _is_money_count(name, a) and _is_num(c.args.get(name)) and float(c.args[name]) > 0  # type: ignore[arg-type]
     ]
+
+
+def magnitude_spike(
+    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+) -> AttackResult | None:
+    cands = _magnitude_cands(session, ctx)
     if not cands:
         return None
     i, name = cands[int(rng.integers(len(cands)))]
     m = float(np.clip(np.exp(rng.uniform(np.log(M_MIN), np.log(M_MAX))), M_MIN, M_MAX))
     new = mutate_scale(session[i], name, m)
+    old_v, new_v = float(session[i].args[name]), float(new.args[name])  # type: ignore[arg-type]
     return AttackResult(
-        _replace_call(session, i, new), [_label(ctx, "magnitude_spike", new.envelope_id, m)]
+        _replace_call(session, i, new),
+        [_label(ctx, "magnitude_spike", new.envelope_id, new_v / old_v)],  # realized multiplier
     )
+
+
+def _str_values(v: object) -> Iterator[str]:
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, list):
+        for x in v:
+            yield from _str_values(x)
+    elif isinstance(v, dict):
+        for x in v.values():
+            yield from _str_values(x)
+
+
+def _prereq_cands(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, list[str]]]:
+    cands: list[tuple[int, list[str]]] = []
+    for i, c in enumerate(session):
+        if _kind(ctx, c) != "write":
+            continue
+        read_ids = {
+            x
+            for e in session[:i]
+            if _kind(ctx, e) == "read"
+            for x in (e.response_meta.ids if e.response_meta else ())
+        }
+        names = [
+            n
+            for n, a in ctx.catalog[c.tool_id].args.items()
+            if _flows_from_read(a, ctx.catalog) and c.args.get(n) in read_ids
+        ]
+        if names:
+            cands.append((i, names))
+    return cands
+
+
+def _known_before(calls: list[RawCall], upto: int) -> set[str]:
+    known: set[str] = set()
+    for e in calls[:upto]:
+        known.update(_str_values(e.args))
+        if e.response_meta:
+            known.update(e.response_meta.ids)
+    return known
 
 
 def prereq_skip(
     session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
 ) -> AttackResult | None:
-    cands: list[tuple[int, list[str]]] = []
-    for i, c in enumerate(session):
-        spec = ctx.catalog.get(c.tool_id)
-        if spec is None or spec.kind != "write":
-            continue
-        read_ids = {
-            x
-            for e in session[:i]
-            if ctx.catalog.get(e.tool_id) is not None and ctx.catalog[e.tool_id].kind == "read"
-            for x in (e.response_meta.ids if e.response_meta else ())
-        }
-        names = [
-            n
-            for n, a in spec.args.items()
-            if _flows_from_read(a, ctx.catalog) and c.args.get(n) in read_ids
-        ]
-        if names:
-            cands.append((i, names))
+    cands = _prereq_cands(session, ctx)
     if not cands:
         return None
     i, names = cands[int(rng.integers(len(cands)))]
@@ -245,38 +283,51 @@ def prereq_skip(
         target = mutate_replace(target, n, fabricate_id(spec.args[n].prefix or "nx_", rng))
     kept: list[RawCall] = []
     for j, c in enumerate(session):
-        if (
-            j < i
-            and ctx.catalog.get(c.tool_id) is not None
-            and ctx.catalog[c.tool_id].kind == "read"
-        ):
+        if j < i and _kind(ctx, c) == "read":
             continue
         kept.append(target if j == i else c)
     out = [c.model_copy(update={"seq_no": k}) for k, c in enumerate(kept)]
-    return AttackResult(out, [_label(ctx, "prereq_skip", target.envelope_id)])
+    t = next(k for k, c in enumerate(out) if c.envelope_id == target.envelope_id)
+    labels = [_label(ctx, "prereq_skip", target.envelope_id)]
+    # Later calls whose id-like args no longer trace to a surviving earlier call/response are
+    # downstream of the deleted lookup, so they are part of the attack too (same attack_id).
+    for k in range(t + 1, len(out)):
+        known = _known_before(out, k)
+        if any(is_id_like(v) and v not in known for v in _str_values(out[k].args)):
+            labels.append(_label(ctx, "prereq_skip", out[k].envelope_id))
+    return AttackResult(out, labels)
 
 
-def novel_target(
-    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
-) -> AttackResult | None:
+def _novel_cands(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, str, str]]:
+    """``(call index, arg name, kind)``; a list_of_email candidate is resolved to an index later."""
     cands: list[tuple[int, str, str]] = []
     for i, c in enumerate(session):
-        spec = ctx.catalog.get(c.tool_id)
-        if spec is None or spec.kind != "write":
+        if _kind(ctx, c) != "write":
             continue
-        for name, a in spec.args.items():
+        for name, a in ctx.catalog[c.tool_id].args.items():
             kind, v = _novel_kind(a), c.args.get(name)
             if kind is None or v is None:
                 continue
             if a.type == "list_of_email":
                 if isinstance(v, list) and v:
-                    cands.append((i, f"{name}.{int(rng.integers(len(v)))}", kind))
+                    cands.append((i, name, kind))
             elif isinstance(v, str):
                 cands.append((i, name, kind))
+    return cands
+
+
+def novel_target(
+    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+) -> AttackResult | None:
+    cands = _novel_cands(session, ctx)
     if not cands:
         return None
-    i, path, kind = cands[int(rng.integers(len(cands)))]
-    a = ctx.catalog[session[i].tool_id].args[path.split(".")[0]]
+    i, name, kind = cands[int(rng.integers(len(cands)))]
+    a = ctx.catalog[session[i].tool_id].args[name]
+    path = name
+    if a.type == "list_of_email":
+        n = len(session[i].args[name])  # type: ignore[arg-type]
+        path = f"{name}.{int(rng.integers(n))}"
     value = novel_value(kind, rng, a.prefix)  # type: ignore[arg-type]
     while kind == "categorical" and value in (_vocab(a) or []):
         value = novel_value("categorical", rng)  # pragma: no cover - x- prefix never collides
@@ -292,6 +343,17 @@ ATTACKS: dict[str, AttackFn] = {
     "novel_target": novel_target,
 }
 
+_CANDS: dict[str, Callable[[list[RawCall], AttackContext], Sequence[object]]] = {
+    "magnitude_spike": _magnitude_cands,
+    "prereq_skip": _prereq_cands,
+    "novel_target": _novel_cands,
+}
+
+
+def applicable(family: str, session: list[RawCall], ctx: AttackContext) -> bool:
+    """Pure check: would ``family`` find something to mutate in ``session``?"""
+    return bool(_CANDS[family](session, ctx))
+
 
 # --- schedule -----------------------------------------------------------------------------------
 
@@ -302,15 +364,16 @@ def inject(
     rng: np.random.Generator,
     ctx_factory: CtxFactory,
 ) -> tuple[dict[str, list[list[RawCall]]], list[Label]]:
-    """Attack eligible persona sessions with probability ``cfg.attack_rate`` (after warmup).
+    """Attack persona sessions with probability ``cfg.attack_rate`` (after warmup).
 
     ``ctx_factory(agent_id, attack_id, persona_sessions, session_index)`` builds the context (it
     knows the catalog, personas and pools). Personas are visited in sorted ``agent_id`` order and
     sessions in time order; only ``rng`` (the attack stream) is ever drawn from. The family is
-    uniform over the persona's eligible families; if it does not apply to the drawn session the
-    remaining ones are tried in random order, and the session stays benign if none applies.
+    uniform over the families applicable to THAT session (persona-eligible and with something to
+    mutate); a session where none applies stays benign.
     """
-    unknown = sorted(set(cfg.families) - set(ATTACKS))
+    families = list(dict.fromkeys(cfg.families))
+    unknown = sorted(set(families) - set(ATTACKS))
     if unknown:
         raise ValueError(f"unknown attack family: {unknown}")
     out: dict[str, list[list[RawCall]]] = {}
@@ -321,15 +384,18 @@ def inject(
         for idx in range(cfg.warmup_sessions, len(sessions)):
             if rng.random() >= cfg.attack_rate:
                 continue
-            probe = ctx_factory(agent, "", sessions, idx)
-            fams = [f for f in cfg.families if eligible(f, probe.persona, probe.catalog)]
-            for k in rng.permutation(len(fams)):
-                ctx = ctx_factory(agent, f"atk-{agent}-{n_attacks:05d}", sessions, idx)
-                res = ATTACKS[fams[int(k)]](sessions[idx], rng, ctx)
-                if res is not None:
-                    sessions[idx] = res.session
-                    labels += res.labels
-                    n_attacks += 1
-                    break
+            ctx = ctx_factory(agent, f"atk-{agent}-{n_attacks:05d}", sessions, idx)
+            fams = [
+                f
+                for f in families
+                if eligible(f, ctx.persona, ctx.catalog) and applicable(f, sessions[idx], ctx)
+            ]
+            if not fams:
+                continue
+            res = ATTACKS[fams[int(rng.integers(len(fams)))]](sessions[idx], rng, ctx)
+            if res is not None:  # always true: applicable() guaranteed a candidate
+                sessions[idx] = res.session
+                labels += res.labels
+                n_attacks += 1
         out[agent] = sessions
     return out, labels
