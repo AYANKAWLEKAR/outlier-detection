@@ -225,3 +225,20 @@ def test_freetext_content_never_stored(ti: TypeInference) -> None:
     assert rec is not None
     blob = orjson.dumps(rec.to_dict())
     assert b"secret" not in blob
+
+
+def test_huge_int_observe_does_not_raise(ti: TypeInference) -> None:
+    for _ in range(12):
+        ti.observe("a", "t", "g", (10**5000, -(10**5000)))
+    assert ti.type_of("a", "t", "g") is FieldType.NUMERIC
+
+
+def test_huge_int_end_to_end_through_normalizer(ti: TypeInference) -> None:
+    from agentfw.core.normalize import SessionTracker, normalize
+    from tests.factories import make_raw
+
+    for _ in range(12):
+        env = normalize(make_raw(args={"n": 10**5000, "l": [10**5000]}), SessionTracker())
+        for path, vals in {**env.flat_args, **env.derived}.items():
+            ti.observe("a", "t", path, vals)
+    assert ti.type_of("a", "t", "n") is FieldType.NUMERIC

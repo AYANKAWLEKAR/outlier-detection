@@ -44,6 +44,7 @@ from agentfw.core.state import DictStore, key_type, register_record
 __all__ = ["TypeChange", "TypeInference", "TypeRecord", "TypeView"]
 
 _DISTINCT_CAP = 1024
+_BIGINT = "<bigint>"  # bounded stand-in for ints too large to stringify
 _BOOL_STRINGS = frozenset({"true", "false", "0", "1"})
 _NUMERIC_FRAC = 0.95
 _ID_FRAC = 0.9
@@ -144,7 +145,12 @@ def _is_boolish(v: Scalar) -> bool:
 def _render(v: Scalar) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
-    return v if isinstance(v, str) else repr(v)
+    if isinstance(v, str):
+        return v
+    try:
+        return repr(v)
+    except ValueError:  # int beyond the interpreter's 4300-digit str limit
+        return _BIGINT
 
 
 def _classify(
