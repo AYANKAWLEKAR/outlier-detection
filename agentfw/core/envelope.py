@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 if TYPE_CHECKING:
-    from agentfw.core.sketch.bloom import BloomFilter  # type: ignore[import-untyped,unused-ignore]  # Task 0.3: remove ignore
+    from agentfw.core.sketch.bloom import BloomFilter
 
 __all__ = [
     "ActionEnvelope",
