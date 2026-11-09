@@ -98,11 +98,6 @@ def test_max_sessions_total_cap_split_in_sorted_order(tmp_path: Path) -> None:
     }
 
 
-def test_families_not_yet_supported(tmp_path: Path) -> None:
-    with pytest.raises(NotImplementedError):
-        generate(cfg(families=["magnitude_spike"]), tmp_path)
-
-
 def test_cli_main(tmp_path: Path) -> None:
     out = tmp_path / "o"
     rc = main(["--seed", "0", "--days", "1", "--out", str(out), "--max-sessions", "6"])

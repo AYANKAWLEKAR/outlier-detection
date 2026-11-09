@@ -18,6 +18,8 @@ import orjson
 from pydantic import BaseModel, Field
 
 from agentfw.core.envelope import Label, RawCall
+from agentfw.synth.attacks import AttackContext, inject
+from agentfw.synth.dists import IdPool
 from agentfw.synth.load import (
     CATALOG_DIR,
     PERSONAS_DIR,
@@ -28,6 +30,7 @@ from agentfw.synth.load import (
     validate_world,
 )
 from agentfw.synth.sampler import sample_persona, stable_hash
+from agentfw.synth.schema import Catalog, Persona
 
 __all__ = ["GenerateConfig", "Manifest", "generate", "main"]
 
@@ -66,12 +69,28 @@ def attack_rng(seed: int) -> np.random.Generator:
 
 
 def _inject_attacks(
-    cfg: GenerateConfig, sessions: list[list[RawCall]]
-) -> tuple[list[list[RawCall]], dict[str, Label]]:
-    """Seam for Task 0.7: mutate benign sessions and return labels for attacked envelopes."""
-    if cfg.families:
-        raise NotImplementedError("attack families are wired in Task 0.7")
-    return sessions, {}
+    cfg: GenerateConfig,
+    catalog: Catalog,
+    personas: list[Persona],
+    by_persona: dict[str, list[list[RawCall]]],
+) -> tuple[dict[str, list[list[RawCall]]], dict[str, Label]]:
+    """Mutate benign sessions per ``cfg.families``; returns attack labels by envelope id."""
+    if not cfg.families:
+        return by_persona, {}
+    by_id = {p.agent_id: p for p in personas}
+
+    def ctx_factory(
+        agent: str, attack_id: str, persona_sessions: Sequence[list[RawCall]], idx: int
+    ) -> AttackContext:
+        p = by_id[agent]
+        pool_rng = np.random.default_rng([cfg.seed, stable_hash(f"attack-pools:{agent}")])
+        pools = {
+            n: IdPool(sp.prefix, sp.size, sp.s, pool_rng) for n, sp in sorted(p.id_pools.items())
+        }
+        return AttackContext(catalog, p, pools, attack_id, persona_sessions, idx)
+
+    out, labels = inject(by_persona, cfg, attack_rng(cfg.seed), ctx_factory)
+    return out, {lab.envelope_id: lab for lab in labels}
 
 
 def _jsonl(rows: list[dict[str, object]]) -> bytes:
@@ -82,9 +101,9 @@ def generate(cfg: GenerateConfig, out_dir: Path) -> Manifest:
     catalog, tasks = load_catalog(cfg.catalog_dir), load_tasks(cfg.tasks_dir)
     personas = sorted(load_personas(cfg.personas_dir), key=lambda p: p.agent_id)
     validate_world(catalog, personas, tasks)
-    sessions: list[list[RawCall]] = []
+    by_persona: dict[str, list[list[RawCall]]] = {}
     for p, cap in zip(personas, _split_cap(cfg.max_sessions, len(personas)), strict=True):
-        sessions += sample_persona(
+        by_persona[p.agent_id] = sample_persona(
             p,
             catalog,
             tasks,
@@ -93,7 +112,8 @@ def generate(cfg: GenerateConfig, out_dir: Path) -> Manifest:
             start_ms=cfg.start_ms,
             max_sessions=cap,
         )
-    sessions, attack_labels = _inject_attacks(cfg, sessions)
+    by_persona, attack_labels = _inject_attacks(cfg, catalog, personas, by_persona)
+    sessions = [s for a in sorted(by_persona) for s in by_persona[a]]
     raws = sorted(
         (c for s in sessions for c in s), key=lambda c: (c.ts_unix_ms, c.session_id, c.seq_no)
     )
