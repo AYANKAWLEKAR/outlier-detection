@@ -6,8 +6,9 @@ Scored paths: CATEGORICAL and ID typed paths, plus the derived ``__domain__`` / 
 A value is *seen* when it is in the record's LRU (``novelty_lru`` entries) or its count-min
 estimate in the lazily allocated ``evicted`` sketch is > 0 (D-011). Seen scores 0; unseen scores
 ``(1 - n_singletons / n_total) * min(1, n_total / novelty_full_n)``; a path's score is the max
-over its values. Evidence: ``p_unseen``, ``n_total``, ``n_distinct``, ``value_hash`` (xxhash64 hex),
-``prior_used``; the raw value is added only for non-ID types.
+over its values. Evidence: ``p_unseen`` (= n_singletons / n_total of the record used),
+``unseen_score`` (the unseen formula), ``n_total``, ``n_distinct``, ``value_hash`` (xxhash64
+hex), ``prior_used``; the raw value is added only for non-ID types.
 
 Cold keys (``n_total < mag_cold_n``, ruling NV1) may consult the pooled prior (§6.10) via
 ``PriorSource.novelty_ref``: a value is then seen if either record has it, and an unseen value is
@@ -144,7 +145,8 @@ class NoveltyDetector:
             return None
         s, v = best
         ev: dict[str, object] = {
-            "p_unseen": s_unseen,
+            "p_unseen": n_single / n_total if n_total > 0 else 0.0,
+            "unseen_score": s_unseen,
             "n_total": n_total,
             "n_distinct": n_distinct,
             "value_hash": _vhash(v),
@@ -172,14 +174,14 @@ class NoveltyDetector:
         count = rec.seen.get(v)
         if count is not None:
             if count == 1:
-                rec.n_singletons -= 1
+                rec.n_singletons = max(0, rec.n_singletons - 1)
             rec.seen[v] = count + 1
             rec.seen.move_to_end(v)
             return
         est = rec.evicted.estimate(v) if rec.evicted is not None else 0
         if est > 0:  # evicted earlier: already counted in n_distinct
             if est == 1:
-                rec.n_singletons -= 1
+                rec.n_singletons = max(0, rec.n_singletons - 1)
             rec.seen[v] = est + 1
         else:
             rec.seen[v] = 1

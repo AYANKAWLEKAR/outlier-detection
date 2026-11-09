@@ -102,16 +102,22 @@ def test_singleton_decrements_on_second_sighting(nov: NoveltyDetector) -> None:
 
 
 def test_new_address_known_domain_vs_new_domain(nov: NoveltyDetector) -> None:
-    people = ["ann", "bob", "cy", "di"]
-    for i in range(300):
-        nov.update(env({"to": [f"{people[i % 4]}@acme.example"]}), CAT)
+    for i in range(300):  # 300 distinct addresses, one domain
+        nov.update(env({"to": [f"user{i}@acme.example"]}), CAT)
     known = {s.field: s for s in scores(nov, {"to": ["eve@acme.example"]})}
-    # new address on a known domain: the address is a singleton-free vocab, so it is "novel" by
-    # the formula only via to[]; the domain is not novel at all.
+    assert known["to[]"].score < 0.05  # singleton-heavy address field: new address is normal
     assert known["to[].__domain__"].score == 0.0
     other = {s.field: s for s in scores(nov, {"to": ["eve@evil.example"]})}
     assert other["to[].__domain__"].score == pytest.approx(1.0)
-    assert other["to[].__domain__"].score > known["to[].__domain__"].score
+    assert other["to[]"].score < 0.05
+
+
+def test_p_unseen_is_good_turing_singleton_fraction(nov: NoveltyDetector) -> None:
+    feed(nov, "currency", ["usd"] * 98 + ["eur", "gbp"])  # n=100, 2 singletons
+    [s] = [s for s in scores(nov, {"currency": "jpy"}) if s.field == "currency"]
+    assert s.evidence["p_unseen"] == pytest.approx(0.02)
+    assert s.evidence["unseen_score"] == pytest.approx(0.98 * 0.5)
+    assert s.score == pytest.approx(0.49)
 
 
 def test_case_variant_domain_not_novel(nov: NoveltyDetector) -> None:
