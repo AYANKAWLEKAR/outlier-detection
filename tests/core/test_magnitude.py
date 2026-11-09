@@ -126,6 +126,7 @@ def test_iter_fields_flat_then_derived() -> None:
         "total_amount",
         "QTY",
         "x.amount_cents",
+        "body.__strlen__",
     ],
 )
 def test_direction_up_on_segment_boundary(path: str) -> None:

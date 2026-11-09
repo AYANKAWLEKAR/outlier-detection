@@ -51,7 +51,7 @@ Direction = Literal["up", "both"]
 RESP_FIELD = "__resp__.item_count"
 NAME = "magnitude"
 
-_UP_NAME = re.compile(r"(?i)(^|_)(amount|count|qty|total|len)")
+_UP_NAME = re.compile(r"(?i)(^|_)(amount|count|qty|total|len|strlen)")
 _UP_HINTS = frozenset({"money", "count"})
 _IQR_TO_SIGMA = 1.349
 _MAX = sys.float_info.max
@@ -59,7 +59,7 @@ _MAX = sys.float_info.max
 
 def direction_for(path: str, hints: Mapping[str, str]) -> Direction:
     """``up`` for money/count-hinted fields, or when a keyword (amount, count, qty, total, len)
-    starts the last path segment or follows an ``_`` in it (``item_count``, ``__len__``,
+    (or strlen) starts the last path segment or follows an ``_`` in it (``item_count``, ``__len__``,
     ``total_amount``; not ``account``, ``discount``, ``calendar``); else ``both``."""
     if hints.get(path) in _UP_HINTS:
         return "up"
