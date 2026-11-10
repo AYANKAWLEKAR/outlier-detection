@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import SecretStr
 
+from agentfw.core.patterns import is_id_like
 from agentfw.sandbox.config import SandboxConfig
 from agentfw.sandbox.seed.company import build_company
 from agentfw.sandbox.seed.zendesk_seed import seed_zendesk
@@ -86,9 +87,9 @@ async def test_update_status_moves_between_lists(server) -> None:  # type: ignor
     ],
 )
 async def test_unknown_ticket_is_error(server, tool, args) -> None:  # type: ignore[no-untyped-def]
-    err, msg = await call(server, tool, ticket_id="tkt-9999", **args)
+    err, msg = await call(server, tool, ticket_id="tk_NOSUCHTICKET", **args)
     assert err
-    assert "tkt-9999" in msg
+    assert "tk_NOSUCHTICKET" in msg
 
 
 async def test_invalid_status_is_error(server) -> None:  # type: ignore[no-untyped-def]
@@ -131,3 +132,16 @@ async def test_live_backend_uses_file_db_under_data_dir(tmp_path: Path) -> None:
     assert not err
     # A second backend on the same file sees the write (durable, unlike the fake).
     assert LiveZendeskBackend(cfg).get_ticket(FIRST.key)["comments"][0]["body"] == "persisted"
+
+
+async def test_all_ids_returned_are_id_like(server) -> None:  # type: ignore[no-untyped-def]
+    _, res = await call(server, "list_tickets", limit=100)
+    assert res["data"]
+    for t in res["data"]:
+        assert t["id"].startswith("tk_") and len(t["id"]) >= 13
+        assert t["id"][3:] == t["id"][3:].upper()
+        assert is_id_like(t["id"])
+        assert is_id_like(t["customer_id"])
+        assert is_id_like(t["charge_id"])
+    assert len({k.key for k in COMPANY.tickets}) == len(COMPANY.tickets)
+    assert all(is_id_like(k.key) for k in COMPANY.tickets)

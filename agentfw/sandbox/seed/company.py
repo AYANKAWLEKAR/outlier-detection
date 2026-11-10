@@ -95,6 +95,15 @@ def _word(rng: np.random.Generator, syllables: int) -> str:
     return "".join(parts)
 
 
+_ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+
+def _ticket_key(seed: int, index: int) -> str:
+    """Zendesk-style id `tk_` + 10 uppercase alnum chars; deterministic and unique per index."""
+    rng = np.random.default_rng([seed, 2002, index])
+    return "tk_" + "".join(_ALNUM[int(i)] for i in rng.integers(0, len(_ALNUM), size=10))
+
+
 def build_company(seed: int, n_customers: int = 80) -> Company:
     rng = np.random.default_rng([seed, 2001])
     customers: list[Customer] = []
@@ -168,7 +177,7 @@ def build_company(seed: int, n_customers: int = 80) -> Company:
         subject = str(rng.choice(_SUBJECTS))
         tickets.append(
             Ticket(
-                f"tkt-{t:04d}",
+                _ticket_key(seed, t),
                 ch.customer_key,
                 customer_by_key[ch.customer_key].email,
                 ch.key,
