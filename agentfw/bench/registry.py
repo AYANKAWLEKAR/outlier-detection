@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
+from agentfw.bench.baselines.isolation_forest import IsolationForestBaseline
+from agentfw.bench.baselines.llm_judge import LlmJudge
 from agentfw.bench.baselines.random_ import RandomDetector
 from agentfw.bench.baselines.static_threshold import StaticThreshold
 from agentfw.bench.protocol import Detector
@@ -31,6 +33,8 @@ def _engine(
 DETECTORS: dict[str, Callable[..., Detector]] = {
     "random": RandomDetector,
     "static_threshold": StaticThreshold,
+    "isolation_forest": IsolationForestBaseline,
+    "llm_judge": LlmJudge,
     "engine": _engine(),
     **{f"engine-no-{d}": _engine(ALL_DETECTORS - {d}) for d in DETECTOR_ORDER},
     **{f"engine-only-{d}": _engine(frozenset({d})) for d in DETECTOR_ORDER},

@@ -11,7 +11,7 @@ import numpy as np
 import orjson
 import pytest
 from numpy.typing import NDArray
-from sklearn.metrics import average_precision_score  # type: ignore[import-untyped]
+from sklearn.metrics import average_precision_score
 
 from agentfw.bench.metrics import (
     STRENGTH_BUCKETS,
