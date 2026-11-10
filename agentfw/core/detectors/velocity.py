@@ -57,7 +57,7 @@ from agentfw.core.envelope import ActionEnvelope, DetectorScore
 from agentfw.core.hints import ToolHint
 from agentfw.core.patterns import try_number
 from agentfw.core.schema_infer import TypeView
-from agentfw.core.state import DictStore, key_vel, register_record
+from agentfw.core.state import StateStore, key_vel, register_record
 from agentfw.core.stats.p2 import P2Quantiles
 
 __all__ = ["NAME", "VelocityDetector", "VelocityRecord"]
@@ -188,7 +188,7 @@ class VelocityDetector:
 
     def __init__(
         self,
-        store: DictStore,
+        store: StateStore,
         cfg: EngineConfig,
         hints: Mapping[str, ToolHint] = MappingProxyType({}),
     ) -> None:

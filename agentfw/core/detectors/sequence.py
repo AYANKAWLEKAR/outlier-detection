@@ -36,7 +36,7 @@ from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType
 from agentfw.core.hints import ToolHint
 from agentfw.core.schema_infer import TypeView
 from agentfw.core.state import (
-    DictStore,
+    StateStore,
     key_flow,
     key_kind,
     key_prereq,
@@ -175,7 +175,7 @@ class SequenceDetector:
 
     def __init__(
         self,
-        store: DictStore,
+        store: StateStore,
         cfg: EngineConfig,
         hints: Mapping[str, ToolHint] = MappingProxyType({}),
     ) -> None:

@@ -50,14 +50,15 @@ def test_golden_static_threshold() -> None:
 
 def test_baseline_file_shape() -> None:
     data = json.loads(BASELINE_PATH.read_text())
-    assert "static_threshold" in data
+    assert {"static_threshold", "engine"} <= set(data)
     for v in data.values():
         assert set(v) == {"auprc", "fpr95"}
 
 
 def test_main_passes_on_committed_baseline(capsys: pytest.CaptureFixture[str]) -> None:
     assert main([]) == 0
-    assert "static_threshold" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "static_threshold" in out and "engine" in out
 
 
 def test_main_fails_on_regression(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -72,4 +73,7 @@ def test_write_baseline(tmp_path: Path) -> None:
     path.write_text(json.dumps({"static_threshold": {"auprc": 0.0, "fpr95": 0.0}}))
     assert main(["--baseline", str(path), "--write-baseline"]) == 0
     assert main(["--baseline", str(path)]) == 0
-    assert json.loads(path.read_text()) == json.loads(BASELINE_PATH.read_text())
+    # Only detectors already in the file are rewritten (here: static_threshold).
+    written = json.loads(path.read_text())
+    assert set(written) == {"static_threshold"}
+    assert written["static_threshold"] == json.loads(BASELINE_PATH.read_text())["static_threshold"]

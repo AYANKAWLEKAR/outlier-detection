@@ -6,7 +6,13 @@ import sys
 import pytest
 
 from agentfw.core.detectors import base, magnitude, velocity
-from agentfw.core.detectors.base import IQR_TO_SIGMA, clamp_finite, signed_expm1, signed_log1p
+from agentfw.core.detectors.base import (
+    IQR_TO_SIGMA,
+    clamp_finite,
+    signed_expm1,
+    signed_log1p,
+    value_key,
+)
 
 MAX = sys.float_info.max
 
@@ -37,3 +43,18 @@ def test_detectors_share_the_base_helpers() -> None:
         for dup in ("_clamp", "_unlog", "_IQR_TO_SIGMA", "_MAX"):
             assert not hasattr(mod, dup), f"{mod.__name__}.{dup}"
     assert base.IQR_TO_SIGMA == IQR_TO_SIGMA
+
+
+def test_value_key_short_values_are_str() -> None:
+    assert value_key("usd", 40) == "usd"
+    assert value_key(True, 40) == "True"
+    assert value_key(12, 40) == "12"
+
+
+def test_value_key_hashes_long_and_unstringifiable_values() -> None:
+    long_host = "a" * 40 + ".example"
+    k = value_key(long_host, 40)
+    assert k.startswith("#") and len(k) < 40 and k == value_key(long_host, 40)
+    big = 10**5000  # str() refuses: beyond the interpreter's str-digit limit
+    assert value_key(big, 40) == value_key(10**5000, 40) != value_key(big + 1, 40)
+    assert value_key(10**400, 40).startswith("#")

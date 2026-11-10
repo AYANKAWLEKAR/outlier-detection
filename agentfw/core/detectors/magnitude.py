@@ -48,7 +48,7 @@ from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType, Scal
 from agentfw.core.hints import ToolHint
 from agentfw.core.patterns import try_number
 from agentfw.core.schema_infer import TypeView
-from agentfw.core.state import DictStore, key_mag, register_record
+from agentfw.core.state import StateStore, key_mag, register_record
 from agentfw.core.stats.ewma import Ewma
 from agentfw.core.stats.p2 import P2Quantiles
 
@@ -144,7 +144,7 @@ class MagnitudeDetector:
 
     def __init__(
         self,
-        store: DictStore,
+        store: StateStore,
         cfg: EngineConfig,
         priors: PriorSource | None = None,
         hints: Mapping[str, ToolHint] = MappingProxyType({}),

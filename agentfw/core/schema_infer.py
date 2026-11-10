@@ -39,7 +39,7 @@ import xxhash
 from agentfw.core.config import EngineConfig
 from agentfw.core.envelope import FieldType, Scalar
 from agentfw.core.patterns import is_id_like, try_number
-from agentfw.core.state import DictStore, key_type, register_record
+from agentfw.core.state import StateStore, key_type, register_record
 
 __all__ = ["TypeChange", "TypeInference", "TypeRecord", "TypeView"]
 
@@ -173,7 +173,7 @@ def _classify(
 
 
 class TypeInference:
-    def __init__(self, store: DictStore, cfg: EngineConfig) -> None:
+    def __init__(self, store: StateStore, cfg: EngineConfig) -> None:
         self._store = store
         self._cfg = cfg
 

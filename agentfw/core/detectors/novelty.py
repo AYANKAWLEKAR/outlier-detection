@@ -1,7 +1,9 @@
 """Novelty detector: Good-Turing unseen-mass per (agent, tool, path) (spec §6.5).
 
 Scored paths: CATEGORICAL and ID typed paths, plus the derived ``__domain__`` / ``__host__`` /
-``__prefix__`` paths (categorical by construction). Values are keyed by ``str(v)``.
+``__prefix__`` paths (categorical by construction). Values are keyed by
+``base.value_key(v, freetext_min_len)``: ``str(v)``, hashed when it is that long or longer (so a
+long derived host or a 400-digit int is never stored) or when ``str`` refuses a huge int.
 
 A value is *seen* when it is in the record's LRU (``novelty_lru`` entries) or its count-min
 estimate in the lazily allocated ``evicted`` sketch is > 0 (D-011). Seen scores 0; unseen scores
@@ -29,11 +31,11 @@ from typing import Any, ClassVar, Self
 import xxhash
 
 from agentfw.core.config import EngineConfig
-from agentfw.core.detectors.base import PriorSource, iter_fields
+from agentfw.core.detectors.base import PriorSource, iter_fields, value_key
 from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType, Scalar
 from agentfw.core.schema_infer import TypeView
 from agentfw.core.sketch.cms import CountMinSketch
-from agentfw.core.state import DictStore, key_nov, register_record
+from agentfw.core.state import StateStore, key_nov, register_record
 
 __all__ = ["NAME", "NoveltyDetector", "NoveltyRecord"]
 
@@ -122,7 +124,7 @@ class NoveltyDetector:
     name: str = NAME
 
     def __init__(
-        self, store: DictStore, cfg: EngineConfig, priors: PriorSource | None = None
+        self, store: StateStore, cfg: EngineConfig, priors: PriorSource | None = None
     ) -> None:
         self._store = store
         self._cfg = cfg
@@ -161,7 +163,7 @@ class NoveltyDetector:
         for raw in values:
             if raw is None:
                 continue
-            v = str(raw)
+            v = value_key(raw, self._cfg.freetext_min_len)
             seen = (rec is not None and rec.is_seen(v)) or (prior is not None and prior.is_seen(v))
             s = 0.0 if seen else s_unseen
             if best is None or s > best[0]:
@@ -206,4 +208,4 @@ class NoveltyDetector:
                 if rec is None:
                     rec = NoveltyRecord()
                     self._store.put(key, rec)
-                rec.push(str(raw), self._cfg)
+                rec.push(value_key(raw, self._cfg.freetext_min_len), self._cfg)

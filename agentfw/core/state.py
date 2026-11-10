@@ -131,7 +131,12 @@ def _unesc(seg: str) -> str:
 
 
 def _key(*segs: str) -> str:
-    return ":".join(_esc(s) for s in segs)
+    key = ":".join(segs)
+    # Hot path (every scored field builds keys): segments almost never need escaping, so join
+    # once and escape per segment only when a separator or escape char is present.
+    if "%" not in key and key.count(":") == len(segs) - 1:
+        return key
+    return ":".join([_esc(s) for s in segs])
 
 
 def split_key(key: str) -> list[str]:

@@ -20,13 +20,13 @@ from __future__ import annotations
 from agentfw.core.config import EngineConfig
 from agentfw.core.detectors.magnitude import MagRecord, direction_for
 from agentfw.core.detectors.novelty import NoveltyRecord
-from agentfw.core.state import DictStore, key_prior_mag, key_prior_nov
+from agentfw.core.state import StateStore, key_prior_mag, key_prior_nov
 
 __all__ = ["PooledPriors"]
 
 
 class PooledPriors:
-    def __init__(self, store: DictStore, cfg: EngineConfig) -> None:
+    def __init__(self, store: StateStore, cfg: EngineConfig) -> None:
         self._store = store
         self._cfg = cfg
 

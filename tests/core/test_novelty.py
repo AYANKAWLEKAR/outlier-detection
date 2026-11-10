@@ -256,3 +256,12 @@ def test_prior_boundary_is_mag_cold_n(n: int, prior_used: bool) -> None:
     # own record: no singletons, n/full_n warm factor; prior: full warm x 0.67
     expected = 0.67 if prior_used else n / 200
     assert s.score == pytest.approx(expected)
+
+
+def test_int_beyond_str_digit_limit_does_not_raise(nov: NoveltyDetector) -> None:
+    """Review Focus 3 (found by the engine's hypothesis test): ``str(10**5000)`` raises."""
+    huge, other = 10**5000, 10**5000 + 1
+    feed(nov, "currency", ["usd"] * 30 + [huge])
+    assert score(nov, "currency", huge) == 0.0  # seen: equal huge ints share one key
+    assert score(nov, "currency", other) > 0.0  # a different huge int is unseen
+    assert all(len(v) < 40 for v in nov._store.get(key_nov(AGENT, TOOL, "currency")).seen)  # type: ignore[union-attr]

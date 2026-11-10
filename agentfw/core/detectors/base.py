@@ -7,6 +7,8 @@ import sys
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Protocol
 
+import xxhash
+
 from agentfw.core.envelope import ActionEnvelope, DetectorScore, Scalar
 from agentfw.core.schema_infer import TypeView
 
@@ -23,6 +25,7 @@ __all__ = [
     "signed_expm1",
     "signed_log1p",
     "squash",
+    "value_key",
 ]
 
 IQR_TO_SIGMA = 1.349  # IQR of a standard normal: robust scale = IQR / 1.349
@@ -74,6 +77,20 @@ def signed_expm1(y: float) -> float:
 def clamp_finite(v: float) -> float:
     """Clamp ``v`` into ``[-float max, float max]`` (maps ``±inf`` to the extremes)."""
     return max(-_MAX, min(_MAX, v))
+
+
+def value_key(v: Scalar, max_len: int) -> str:
+    """Categorical key of a value: ``str(v)``, or ``#<xxh64 hex>`` of it when that is ``max_len``
+    or more characters (long content is never stored). An int beyond the interpreter's
+    str-digit limit, which ``str`` refuses, is keyed by its (always hashed) hex form. Equal
+    values keep equal keys."""
+    try:
+        s = str(v)
+    except ValueError:  # int beyond the str-digit limit; hex conversion has no limit
+        s = hex(v) if isinstance(v, int) else repr(type(v))
+    if len(s) >= max_len:
+        return "#" + xxhash.xxh64_hexdigest(s.encode("utf-8", "surrogatepass"))
+    return s
 
 
 def iter_fields(e: ActionEnvelope) -> Iterator[tuple[str, tuple[Scalar, ...]]]:
