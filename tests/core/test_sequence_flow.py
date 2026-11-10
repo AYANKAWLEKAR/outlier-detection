@@ -283,14 +283,30 @@ def test_records_roundtrip_and_json_finite(seq: SequenceDetector) -> None:
 
 def test_item_count_via_prev_response_marks_read(seq: SequenceDetector) -> None:
     """Pre-response envelopes (no own response_meta): the count arrives on the next call."""
-    first = call(SessionTracker(), "sq2", 0, READ, {"charge_id": "ch_3SQTWO001"})
-    assert first.response_meta is None
-    seq.update(first, TYPES)
-    assert seq.is_write(AGENT, READ)  # nothing known yet
-    nxt = call(SessionTracker(), "sq2", 1, WRITE, {"charge_id": "ch_3SQTWO001"})
-    nxt = dataclasses.replace(nxt, prev_response=PrevResponse(READ, 3))
-    seq.update(nxt, TYPES)
+    read2 = "s.lookup_charge"  # control: identical history, but no item_count is ever seen
+
+    def seen_then(tool: str, i: int) -> ActionEnvelope:
+        cid = f"ch_3SQ{i:06d}"  # id is already in the session when `tool` uses it
+        tr = SessionTracker()
+        tr.observe(call(tr, f"sq2-{tool}-{i}", 0, "s.seed", {"charge_id": cid}))
+        e = call(tr, f"sq2-{tool}-{i}", 1, tool, {"charge_id": cid})
+        assert e.response_meta is None
+        return e
+
+    for tool in (READ, read2):
+        for i in range(25):
+            seq.update(seen_then(tool, i), TYPES)
+        rec = seq._store.get(key_flow(AGENT, tool, "charge_id"))
+        assert isinstance(rec, FlowRecord) and (rec.present, rec.total) == (25, 25)
+    assert seq.is_write(AGENT, READ) and seq.is_write(AGENT, read2)  # nothing known yet
+
+    nxt = call(SessionTracker(), "sq2-next", 0, WRITE, {"charge_id": "ch_3SQNEXT01"})
+    seq.update(dataclasses.replace(nxt, prev_response=PrevResponse(READ, 3)), TYPES)
     assert not seq.is_write(AGENT, READ)
-    assert seq.is_write(AGENT, WRITE)
-    s, _ = seq._s_flow(probe([(READ, {"charge_id": "ch_3FAKE0001"}, None)]), TYPES)
-    assert s == 0.0
+    assert seq.is_write(AGENT, read2)
+
+    fake = "ch_3FAKE0001"
+    s_read, _ = seq._s_flow(probe([(READ, {"charge_id": fake}, None)]), TYPES)
+    s_ctl, ev = seq._s_flow(probe([(read2, {"charge_id": fake}, None)]), TYPES)
+    assert s_ctl == 1.0 and ev["r_flow"] == 1.0  # the gate is the only difference
+    assert s_read == 0.0
