@@ -138,8 +138,13 @@ class _FakeSF:
             "Opportunity": [],
         }
         self.queries = 0
+        self.org: dict[str, Any] = {"OrganizationType": "Developer Edition", "IsSandbox": False}
         for k in self.records:
             setattr(self, k, _FakeSObject(k, self))
+
+    def query(self, soql: str) -> dict[str, Any]:
+        assert "FROM Organization" in soql  # the seeder's only plain query is the org check
+        return {"records": [dict(self.org)]}
 
     def query_all(self, soql: str) -> dict[str, Any]:
         self.queries += 1
@@ -161,7 +166,7 @@ def test_salesforce_seed_idempotent(tmp_path: Path) -> None:
     second = seed_salesforce(cfg, company, budget, client=sf)
     assert second == first
     assert sum(len(v) for v in sf.records.values()) == total
-    assert 100_000 - budget.remaining() - used <= 3  # only the three existence queries
+    assert 100_000 - budget.remaining() - used <= 4  # the org check + three existence queries
 
 
 def test_salesforce_seed_respects_budget(tmp_path: Path) -> None:
@@ -194,3 +199,14 @@ def test_salesforce_seed_ignores_foreign_records(tmp_path: Path) -> None:
     ids = seed_salesforce(_cfg(tmp_path), build_company(0), budget, client=sf)
     assert "foreign1" not in ids.values() and "foreign2" not in ids.values()
     assert len(sf.records["Account"]) == 2 + len(build_company(0).accounts)
+
+
+def test_salesforce_seed_refuses_a_production_org_before_writing(tmp_path: Path) -> None:
+    from agentfw.sandbox.config import UnsafeConfigError
+
+    sf = _FakeSF()
+    sf.org = {"OrganizationType": "Enterprise Edition", "IsSandbox": False}
+    budget = ApiBudget(tmp_path / "b.json", limit=100_000)
+    with pytest.raises(UnsafeConfigError):
+        seed_salesforce(_cfg(tmp_path), build_company(0), budget, client=sf)
+    assert all(not v for v in sf.records.values())

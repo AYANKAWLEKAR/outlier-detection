@@ -7,6 +7,7 @@ from typing import Any
 
 from agentfw.sandbox.config import ApiBudget, SandboxConfig
 from agentfw.sandbox.seed.company import Company
+from agentfw.sandbox.tools.salesforce_server import require_developer_org
 
 PREFIX = "afw-seed:"
 _REFERENCE_DATE = (2026, 1, 1)
@@ -41,7 +42,8 @@ def _create(
 def seed_salesforce(
     cfg: SandboxConfig, company: Company, budget: ApiBudget, client: Any | None = None
 ) -> dict[str, str]:
-    """Return {record key: Salesforce Id}; every API call is charged to `budget`."""
+    """Return {record key: Salesforce Id}; every API call is charged to `budget`. Refuses
+    (``UnsafeConfigError``) a non-Developer-Edition, non-sandbox org before writing anything."""
     sf = client
     if sf is None:
         from simple_salesforce.api import Salesforce
@@ -52,6 +54,8 @@ def seed_salesforce(
             security_token=cfg.sf_security_token.get_secret_value(),
             domain=cfg.sf_domain,
         )
+    budget.charge(1)
+    require_developer_org(sf)  # before any write: never seed a production org
     ids: dict[str, str] = {}
     have_acct = _existing(sf, "Account", budget)
     have_cont = _existing(sf, "Contact", budget)

@@ -163,7 +163,7 @@ async def test_mass_update_unknown_object_is_clean_error(server) -> None:  # typ
 @pytest.mark.anyio
 async def test_mass_update_failure_reports_progress(tmp_path: Path) -> None:
     sf = _FakeSF()
-    budget = ApiBudget(tmp_path / "b.json", limit=1)
+    budget = ApiBudget(tmp_path / "b.json", limit=2)  # the org check + one batch
     srv = build_server(LiveSalesforceBackend(_cfg(tmp_path), client=sf, budget=budget))
     ids = [f"003{i:012d}" for i in range(450)]
     err, msg = await call(
@@ -287,6 +287,8 @@ class _FakeSF:
         return {"records": []}
 
     def query(self, q: str) -> dict[str, Any]:
+        if "FROM Organization" in q:  # the backend's org check, not a business request
+            return {"records": [{"OrganizationType": "Developer Edition", "IsSandbox": False}]}
         self.calls.append(("QUERY", q))
         return {"records": []}
 
@@ -306,7 +308,7 @@ def _cfg(tmp_path: Path) -> SandboxConfig:
 @pytest.mark.anyio
 async def test_budget_overrun_is_error_and_charges_per_request(tmp_path: Path) -> None:
     sf = _FakeSF()
-    budget = ApiBudget(tmp_path / "b.json", limit=2)
+    budget = ApiBudget(tmp_path / "b.json", limit=3)  # the org check + two batches
     srv = build_server(LiveSalesforceBackend(_cfg(tmp_path), client=sf, budget=budget))
     ids = [f"003{i:012d}" for i in range(450)]
     err, msg = await call(
@@ -325,7 +327,7 @@ async def test_live_backend_rejects_dml_before_spending(tmp_path: Path) -> None:
     budget = ApiBudget(tmp_path / "b.json", limit=5)
     srv = build_server(LiveSalesforceBackend(_cfg(tmp_path), client=sf, budget=budget))
     err, _ = await call(srv, "run_soql", query="DELETE FROM Contact")
-    assert err and sf.calls == [] and budget.remaining() == 5
+    assert err and sf.calls == [] and budget.remaining() == 4  # only the org check spent
 
 
 def _live_cfg() -> SandboxConfig:
@@ -342,3 +344,59 @@ async def test_live_soql_select() -> None:
     srv = build_server(LiveSalesforceBackend(cfg))
     err, res = await call(srv, "run_soql", query="SELECT Id FROM Account LIMIT 1")
     assert not err and "data" in res
+
+
+class _OrgSF:
+    """A simple_salesforce stand-in whose only data is its ``Organization`` row."""
+
+    def __init__(self, org_type: str | None, is_sandbox: bool | None) -> None:
+        self.org = {"OrganizationType": org_type, "IsSandbox": is_sandbox}
+        self.queries: list[str] = []
+
+    def query(self, q: str) -> dict[str, Any]:
+        self.queries.append(q)
+        if "FROM Organization" in q:
+            return {"records": [{"attributes": {"type": "Organization"}, **self.org}]}
+        return {"records": []}
+
+
+@pytest.mark.parametrize(
+    ("org_type", "is_sandbox"),
+    [("Enterprise Edition", False), ("Unlimited Edition", False), (None, None)],
+)
+def test_live_backend_refuses_a_production_org(
+    tmp_path: Path, org_type: str | None, is_sandbox: bool | None
+) -> None:
+    from agentfw.sandbox.config import UnsafeConfigError
+
+    sf = _OrgSF(org_type, is_sandbox)
+    with pytest.raises(UnsafeConfigError, match="Developer Edition"):
+        LiveSalesforceBackend(_cfg(tmp_path), client=sf, budget=ApiBudget(tmp_path / "b.json", 9))
+    assert sf.queries == ["SELECT OrganizationType, IsSandbox FROM Organization"]
+
+
+def test_live_backend_refuses_when_the_org_cannot_be_read(tmp_path: Path) -> None:
+    from agentfw.sandbox.config import UnsafeConfigError
+
+    class _Empty(_OrgSF):
+        def query(self, q: str) -> dict[str, Any]:
+            return {"records": []}
+
+    with pytest.raises(UnsafeConfigError):
+        LiveSalesforceBackend(
+            _cfg(tmp_path), client=_Empty(None, None), budget=ApiBudget(tmp_path / "b.json", 9)
+        )
+
+
+@pytest.mark.parametrize(
+    ("org_type", "is_sandbox"),
+    [("Developer Edition", False), ("Enterprise Edition", True)],
+)
+def test_live_backend_accepts_developer_edition_or_sandbox(
+    tmp_path: Path, org_type: str, is_sandbox: bool
+) -> None:
+    sf = _OrgSF(org_type, is_sandbox)
+    budget = ApiBudget(tmp_path / "b.json", 9)
+    LiveSalesforceBackend(_cfg(tmp_path), client=sf, budget=budget)
+    assert len(sf.queries) == 1
+    assert budget.remaining() == 8  # the org check is an API request like any other

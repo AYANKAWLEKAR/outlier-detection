@@ -13,7 +13,7 @@ import orjson
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from agentfw.sandbox.config import ApiBudget, BudgetExceeded, SandboxConfig
+from agentfw.sandbox.config import ApiBudget, BudgetExceeded, SandboxConfig, UnsafeConfigError
 from agentfw.sandbox.seed.company import Company
 from agentfw.sandbox.tools.common import mark_fake, ok, tool_error
 
@@ -35,6 +35,31 @@ _STRING = re.compile(r"'(?:[^'\\]|\\.)*'")
 _COMMENT = re.compile(r"/\*|\*/|//|--")
 _RECORD_ID = re.compile(r"^[A-Za-z0-9]{15,18}$")
 _RESERVED_FIELDS = frozenset({"id", "attributes"})
+
+
+ORG_QUERY = "SELECT OrganizationType, IsSandbox FROM Organization"
+DEVELOPER_EDITION = "Developer Edition"
+
+
+def require_developer_org(sf: Any) -> None:
+    """Refuse (``UnsafeConfigError``) unless the logged-in org is a Developer Edition or a sandbox.
+
+    ``sf`` is a ``simple_salesforce.Salesforce`` (or a stand-in with its ``query``). An org that
+    cannot be read, or a query error, refuses too (fail closed)."""
+    res = sf.query(ORG_QUERY)
+    records = res.get("records") if isinstance(res, Mapping) else None
+    if not records or not isinstance(records[0], Mapping):
+        raise UnsafeConfigError(
+            f"Salesforce org refused: cannot read its Organization record; only a "
+            f"{DEVELOPER_EDITION} or sandbox org is allowed"
+        )
+    org_type, is_sandbox = records[0].get("OrganizationType"), records[0].get("IsSandbox")
+    if org_type == DEVELOPER_EDITION or is_sandbox is True:
+        return
+    raise UnsafeConfigError(
+        f"Salesforce org refused: OrganizationType={org_type!r}, IsSandbox={is_sandbox!r}; "
+        f"only a {DEVELOPER_EDITION} or sandbox org is allowed"
+    )
 
 
 class SalesforceBackend(Protocol):
@@ -224,7 +249,10 @@ class FakeSalesforceBackend:
 
 
 class LiveSalesforceBackend:
-    """Developer Edition org via simple_salesforce; every HTTP request is one budget charge."""
+    """Developer Edition org via simple_salesforce; every HTTP request is one budget charge.
+
+    Construction checks the org (``require_developer_org``, one charged request) and raises
+    ``UnsafeConfigError`` for anything but a Developer Edition or sandbox org."""
 
     def __init__(
         self, cfg: SandboxConfig, client: Any | None = None, budget: ApiBudget | None = None
@@ -241,6 +269,8 @@ class LiveSalesforceBackend:
                 security_token=cfg.sf_security_token.get_secret_value(),
                 domain=cfg.sf_domain,
             )
+        self._budget.charge(1)
+        require_developer_org(client)
         self._sf = client
 
     def _request(self, fn: Any, *args: Any, **kwargs: Any) -> Any:
