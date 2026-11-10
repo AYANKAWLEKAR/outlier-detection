@@ -1,0 +1,37 @@
+hygiene_update:
+  repeat: {family: poisson, lam: 3, min: 1}
+  steps:
+    - tool: salesforce.update_record
+      args: {object: sample, record_id: "ext:records", field: sample, amount: sample}
+dedupe_sweep:
+  steps:
+    - {tool: salesforce.run_soql, as: q, args: {query: sample}}
+    - {tool: salesforce.mass_update, args: {object: sample, record_ids: q.ids, field_updates: sample}}
+    - {tool: slack.post_message, optional_prob: 0.4, args: {channel: sample, text: sample}}
+assign_followups:
+  steps:
+    - {tool: salesforce.get_record, args: {object: sample, record_id: "ext:records"}}
+    - {tool: salesforce.create_task, args: {record_id: "ext:records", subject: sample, due_in_days: sample}}
+route_lead:
+  steps:
+    - {tool: salesforce.get_record, as: lead, args: {object: sample, record_id: "ext:leads"}}
+    - tool: salesforce.update_record
+      args: {object: sample, record_id: "ext:leads", field: sample, amount: "frac:lead.amount:0.95:1.05"}
+    - {tool: salesforce.create_task, args: {record_id: "ext:leads", subject: sample, due_in_days: sample}}
+    - {tool: slack.post_message, optional_prob: 0.5, args: {channel: sample, text: sample}}
+notify_lead_owner:
+  steps:
+    - {tool: salesforce.get_record, as: lead, args: {object: sample, record_id: "ext:leads"}}
+    - tool: mail.send_email
+      args: {to: lead.email, subject: sample, body: sample}
+renewal_uplift:
+  steps:
+    - {tool: salesforce.get_record, as: rec, args: {object: sample, record_id: "ext:renewals"}}
+    - tool: salesforce.update_record
+      args: {object: sample, record_id: rec.id, field: sample, amount: sample}
+    - {tool: salesforce.create_task, args: {record_id: rec.id, subject: sample, due_in_days: sample}}
+renewal_email:
+  steps:
+    - {tool: salesforce.get_record, as: rec, args: {object: sample, record_id: "ext:renewals"}}
+    - tool: mail.send_email
+      args: {to: rec.email, subject: sample, body: sample}

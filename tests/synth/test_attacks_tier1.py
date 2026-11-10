@@ -17,7 +17,7 @@ from agentfw.core.envelope import Label, RawCall
 from agentfw.core.patterns import email_domain
 from agentfw.synth.attacks import ATTACKS, AttackContext, applicable, eligible, inject
 from agentfw.synth.generate import GenerateConfig, generate
-from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR
+from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR, TIER0_PERSONA_IDS
 from agentfw.synth.sampler import sample_persona
 
 from .conftest import World
@@ -239,6 +239,7 @@ def test_inject_slow_drift_marks_all_sessions_and_does_not_reattack(
     cfg = GenerateConfig(
         seed=0,
         personas_dir=PERSONAS_DIR,
+        persona_ids=list(TIER0_PERSONA_IDS),
         tasks_dir=TASKS_DIR,
         catalog_dir=CATALOG_DIR,
         days=3,
@@ -375,6 +376,7 @@ def test_inject_controls_independent_of_attack_draw(world: World, make_ctx: Ctx)
     base = dict(
         seed=0,
         personas_dir=PERSONAS_DIR,
+        persona_ids=list(TIER0_PERSONA_IDS),
         tasks_dir=TASKS_DIR,
         catalog_dir=CATALOG_DIR,
         days=1,
@@ -415,6 +417,7 @@ def _all_cfg(**kw: object) -> GenerateConfig:
     base: dict[str, object] = {
         "seed": 0,
         "personas_dir": PERSONAS_DIR,
+        "persona_ids": list(TIER0_PERSONA_IDS),
         "tasks_dir": TASKS_DIR,
         "catalog_dir": CATALOG_DIR,
         "days": 100,

@@ -21,7 +21,7 @@ from agentfw.bench.registry import make_detector
 from agentfw.bench.replay import SplitSpec, replay
 from agentfw.core.envelope import Label, RawCall
 from agentfw.synth.generate import GenerateConfig, generate
-from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR
+from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR, TIER0_PERSONA_IDS
 
 __all__ = ["BASELINE_PATH", "CI_DATASET", "ci_dataset", "compare", "main", "measure"]
 
@@ -35,6 +35,7 @@ _N_BOOT = 0  # the regression compares point estimates only
 CI_DATASET = GenerateConfig(
     seed=0,
     personas_dir=PERSONAS_DIR,
+    persona_ids=list(TIER0_PERSONA_IDS),  # ruling A4: the CI dataset stays the 3 Tier-0 personas
     tasks_dir=TASKS_DIR,
     catalog_dir=CATALOG_DIR,
     days=60,

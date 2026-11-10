@@ -1,0 +1,25 @@
+agent_id: escalations-a
+tools:
+  - zendesk.get_ticket
+  - zendesk.list_tickets
+  - zendesk.add_comment
+  - zendesk.update_status
+  - stripe.retrieve_charge
+  - mail.send_email
+  - slack.post_message
+  - slack.read_channel
+session_rate: {family: poisson, lam: 10}
+tasks:
+  - {name: urgent_escalation, weight: 0.5}
+  - {name: escalation_review, weight: 0.3}
+  - {name: escalation_queue, weight: 0.2}
+fields:
+  mail.send_email.to.__domain__: {family: zipf, vocab_size: 5, s: 1.7}
+  mail.send_email.to.__len__: {family: poisson, lam: 2.0, min: 1}
+drift: null
+noise: {skip_lookup: 0.04, retry: 0.03, abandon: 0.02, arg_dropout: 0.02}
+id_pools:
+  tickets: {prefix: "tk_", size: 1500, s: 1.3}
+id_flow_rate: 0.0
+working_hours: [8, 20]
+quarter_end_days: []

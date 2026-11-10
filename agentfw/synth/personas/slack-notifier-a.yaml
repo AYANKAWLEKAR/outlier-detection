@@ -1,0 +1,16 @@
+agent_id: slack-notifier-a
+tools:
+  - zendesk.list_tickets
+  - slack.read_channel
+  - slack.post_message
+session_rate: {family: poisson, lam: 60}
+tasks:
+  - {name: status_broadcast, weight: 0.6}
+  - {name: alert_ack, weight: 0.4}
+fields: {}
+drift: null
+noise: {skip_lookup: 0.02, retry: 0.06, abandon: 0.01, arg_dropout: 0.01}
+id_pools: {}
+id_flow_rate: 1.0
+working_hours: [0, 24]
+quarter_end_days: []

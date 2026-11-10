@@ -1,0 +1,26 @@
+agent_id: billing-disputes-a
+tools:
+  - zendesk.get_ticket
+  - zendesk.add_comment
+  - zendesk.update_status
+  - stripe.retrieve_charge
+  - stripe.retrieve_customer
+  - stripe.create_refund
+  - mail.send_email
+  - slack.post_message
+session_rate: {family: poisson, lam: 18}
+tasks:
+  - {name: dispute_refund, weight: 0.5}
+  - {name: dispute_note, weight: 0.3}
+  - {name: dispute_notice, weight: 0.2}
+fields:
+  stripe.create_refund.amount: {family: lognormal, mu: 5.0, sigma: 0.9, round_cents: true}
+  mail.send_email.to.__domain__: {family: zipf, vocab_size: 15, s: 1.25}
+  mail.send_email.to.__len__: {family: poisson, lam: 1.3, min: 1}
+drift: null
+noise: {skip_lookup: 0.05, retry: 0.03, abandon: 0.03, arg_dropout: 0.02}
+id_pools:
+  tickets: {prefix: "tk_", size: 2500, s: 1.1}
+id_flow_rate: 1.0
+working_hours: [8, 17]
+quarter_end_days: []

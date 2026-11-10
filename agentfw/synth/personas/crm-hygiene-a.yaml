@@ -1,0 +1,23 @@
+agent_id: crm-hygiene-a
+tools:
+  - salesforce.run_soql
+  - salesforce.get_record
+  - salesforce.update_record
+  - salesforce.mass_update
+  - salesforce.create_task
+  - slack.post_message
+session_rate: {family: poisson, lam: 14}
+tasks:
+  - {name: hygiene_update, weight: 0.5}
+  - {name: dedupe_sweep, weight: 0.3}
+  - {name: assign_followups, weight: 0.2}
+  - {name: quarter_end_mass_update, weight: 0.0}  # scheduled on quarter_end_days only
+fields:
+  salesforce.update_record.amount: {family: lognormal, mu: 7.0, sigma: 0.5, round_cents: true}
+drift: null
+noise: {skip_lookup: 0.05, retry: 0.03, abandon: 0.02, arg_dropout: 0.02}
+id_pools:
+  records: {prefix: "006", size: 6000, s: 1.1}
+id_flow_rate: 0.0
+working_hours: [6, 20]
+quarter_end_days: [28, 29, 30, 31]

@@ -1,0 +1,22 @@
+reconcile_batch:
+  repeat: {family: poisson, lam: 6, min: 2}
+  steps:
+    - {tool: stripe.list_charges, args: {customer_id: "ext:customers", limit: sample}}
+    - {tool: stripe.retrieve_charge, as: charge, args: {charge_id: "ext:charges"}}
+    - {tool: stripe.retrieve_customer, optional_prob: 0.5, args: {customer_id: charge.customer}}
+reconcile_report:
+  steps:
+    - {tool: stripe.list_charges, args: {customer_id: "ext:customers", limit: sample}}
+    - tool: mail.send_email
+      args: {to: sample, subject: sample, body: sample}
+    - {tool: slack.post_message, optional_prob: 0.5, args: {channel: sample, text: sample}}
+export_report:
+  repeat: {family: poisson, lam: 5, min: 2}
+  steps:
+    - {tool: salesforce.run_soql, args: {query: sample}}
+    - tool: mail.send_email
+      args: {to: sample, subject: sample, body: sample}
+export_spotcheck:
+  steps:
+    - {tool: salesforce.run_soql, args: {query: sample}}
+    - {tool: salesforce.get_record, args: {object: sample, record_id: "ext:records"}}

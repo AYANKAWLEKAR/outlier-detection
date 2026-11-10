@@ -1,0 +1,24 @@
+agent_id: payouts-ops-a
+tools:
+  - stripe.list_charges
+  - stripe.retrieve_charge
+  - stripe.create_payout
+  - mail.send_email
+  - slack.post_message
+session_rate: {family: poisson, lam: 8}
+tasks:
+  - {name: weekly_payout, weight: 0.5}
+  - {name: payout_audit, weight: 0.3}
+  - {name: payout_receipt, weight: 0.2}
+fields:
+  stripe.create_payout.amount: {family: lognormal, mu: 8.5, sigma: 0.4, round_cents: true}
+  mail.send_email.to.__domain__: {family: zipf, vocab_size: 4, s: 1.8}
+  mail.send_email.to.__len__: {family: poisson, lam: 1.2, min: 1}
+drift: null
+noise: {skip_lookup: 0.03, retry: 0.02, abandon: 0.02, arg_dropout: 0.01}
+id_pools:
+  customers: {prefix: "cus_", size: 1500, s: 1.1}
+  charges: {prefix: "ch_", size: 4000, s: 1.1}
+id_flow_rate: 1.0
+working_hours: [9, 17]
+quarter_end_days: []

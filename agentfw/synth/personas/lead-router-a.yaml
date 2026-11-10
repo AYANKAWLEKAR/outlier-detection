@@ -1,0 +1,21 @@
+agent_id: lead-router-a
+tools:
+  - salesforce.get_record
+  - salesforce.update_record
+  - salesforce.create_task
+  - mail.send_email
+  - slack.post_message
+session_rate: {family: poisson, lam: 35}
+tasks:
+  - {name: route_lead, weight: 0.75}
+  - {name: notify_lead_owner, weight: 0.25}
+fields:
+  mail.send_email.to.__domain__: {family: zipf, vocab_size: 30, s: 1.1}
+  mail.send_email.to.__len__: {family: poisson, lam: 1.4, min: 1}
+drift: null
+noise: {skip_lookup: 0.05, retry: 0.05, abandon: 0.02, arg_dropout: 0.02}
+id_pools:
+  leads: {prefix: "006", size: 9000, s: 1.0}
+id_flow_rate: 0.0
+working_hours: [0, 24]
+quarter_end_days: []

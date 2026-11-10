@@ -58,7 +58,7 @@ stripe.create_payout:
       shape: money
       dist: {family: lognormal, mu: 8.0, sigma: 0.6, round_cents: true}
     currency: {type: categorical, vocab: [usd, eur, gbp]}
-    destination: {type: id, prefix: "ba_", source: external}
+    destination: {type: categorical, vocab: [acct_ops1, acct_ops2, acct_reserve, acct_vendor]}
   produces: [payout.id]
   produced:
     payout.id: {type: id, prefix: "po_"}

@@ -206,11 +206,12 @@ def test_score_table_parquet_roundtrip_and_hash(raws3: list[RawCall], tmp_path: 
 def test_load_dir_roundtrip_and_replay(tmp_path: Path) -> None:
     from agentfw.bench.dataset import load_dir
     from agentfw.synth.generate import GenerateConfig, generate
-    from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR
+    from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR, TIER0_PERSONA_IDS
 
     cfg = GenerateConfig(
         seed=1,
         personas_dir=PERSONAS_DIR,
+        persona_ids=list(TIER0_PERSONA_IDS),
         tasks_dir=TASKS_DIR,
         catalog_dir=CATALOG_DIR,
         days=1,

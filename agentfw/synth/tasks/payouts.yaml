@@ -1,0 +1,14 @@
+weekly_payout:
+  steps:
+    - {tool: stripe.list_charges, args: {customer_id: "ext:customers", limit: sample}}
+    - {tool: stripe.create_payout, args: {amount: sample, currency: sample, destination: sample}}
+    - {tool: slack.post_message, optional_prob: 0.5, args: {channel: sample, text: sample}}
+payout_audit:
+  repeat: {family: poisson, lam: 3, min: 1}
+  steps:
+    - {tool: stripe.list_charges, args: {customer_id: "ext:customers", limit: sample}}
+    - {tool: stripe.retrieve_charge, args: {charge_id: "ext:charges"}}
+payout_receipt:
+  steps:
+    - {tool: stripe.create_payout, args: {amount: sample, currency: sample, destination: sample}}
+    - {tool: mail.send_email, args: {to: sample, subject: sample, body: sample}}

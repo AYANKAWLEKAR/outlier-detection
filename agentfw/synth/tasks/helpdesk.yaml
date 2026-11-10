@@ -1,0 +1,32 @@
+triage_ticket:
+  steps:
+    - {tool: zendesk.get_ticket, as: t, args: {ticket_id: "ext:tickets"}}
+    - {tool: zendesk.add_comment, optional_prob: 0.7, args: {ticket_id: t.id, body: sample, public: sample}}
+    - {tool: zendesk.update_status, args: {ticket_id: t.id, status: sample}}
+queue_scan:
+  steps:
+    - {tool: zendesk.list_tickets, args: {status: sample, limit: sample}}
+escalate_to_slack:
+  steps:
+    - {tool: zendesk.get_ticket, as: t, args: {ticket_id: "ext:tickets"}}
+    - {tool: slack.post_message, args: {channel: sample, text: sample}}
+triage_direct:
+  repeat: {family: poisson, lam: 3, min: 1}
+  steps:
+    - {tool: zendesk.add_comment, optional_prob: 0.6, args: {ticket_id: "ext:tickets", body: sample, public: sample}}
+    - {tool: zendesk.update_status, args: {ticket_id: "ext:tickets", status: sample}}
+urgent_escalation:
+  steps:
+    - {tool: zendesk.add_comment, args: {ticket_id: "ext:tickets", body: sample, public: sample}}
+    - {tool: zendesk.update_status, args: {ticket_id: "ext:tickets", status: sample}}
+    - {tool: slack.post_message, args: {channel: sample, text: sample}}
+    - {tool: mail.send_email, optional_prob: 0.5, args: {to: sample, subject: sample, body: sample}}
+escalation_review:
+  steps:
+    - {tool: zendesk.get_ticket, as: t, args: {ticket_id: "ext:tickets"}}
+    - {tool: stripe.retrieve_charge, skippable: true, args: {charge_id: t.charge_id}}
+    - {tool: slack.post_message, optional_prob: 0.6, args: {channel: sample, text: sample}}
+escalation_queue:
+  steps:
+    - {tool: zendesk.list_tickets, args: {status: sample, limit: sample}}
+    - {tool: slack.post_message, optional_prob: 0.5, args: {channel: sample, text: sample}}

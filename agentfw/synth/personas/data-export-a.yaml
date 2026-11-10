@@ -1,0 +1,20 @@
+agent_id: data-export-a
+tools:
+  - salesforce.run_soql
+  - salesforce.get_record
+  - mail.send_email
+  - slack.post_message
+session_rate: {family: poisson, lam: 5}
+tasks:
+  - {name: export_report, weight: 0.7}
+  - {name: export_spotcheck, weight: 0.3}
+fields:
+  mail.send_email.to.__domain__: {family: zipf, vocab_size: 6, s: 1.5}
+  mail.send_email.to.__len__: {family: poisson, lam: 4.0, min: 1}
+drift: null
+noise: {skip_lookup: 0.03, retry: 0.03, abandon: 0.02, arg_dropout: 0.02}
+id_pools:
+  records: {prefix: "006", size: 4000, s: 1.1}
+id_flow_rate: 1.0
+working_hours: [9, 18]
+quarter_end_days: []

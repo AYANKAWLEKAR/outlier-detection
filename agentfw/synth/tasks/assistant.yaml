@@ -1,0 +1,42 @@
+inbox_triage:
+  steps:
+    - {tool: zendesk.list_tickets, args: {status: sample, limit: sample}}
+    - {tool: zendesk.get_ticket, as: t, args: {ticket_id: "ext:tickets"}}
+    - {tool: zendesk.add_comment, optional_prob: 0.4, args: {ticket_id: t.id, body: sample, public: sample}}
+crm_lookup:
+  steps:
+    - {tool: salesforce.get_record, as: rec, args: {object: sample, record_id: "ext:accounts"}}
+    - {tool: salesforce.create_task, optional_prob: 0.6, args: {record_id: rec.id, subject: sample, due_in_days: sample}}
+account_update:
+  steps:
+    - {tool: salesforce.get_record, as: rec, args: {object: sample, record_id: "ext:accounts"}}
+    - tool: salesforce.update_record
+      args: {object: sample, record_id: rec.id, field: sample, amount: "frac:rec.amount:0.9:1.1"}
+channel_digest_brief:
+  steps:
+    - {tool: slack.read_channel, args: {channel: sample, limit: sample}}
+    - {tool: slack.post_message, optional_prob: 0.5, args: {channel: sample, text: sample}}
+send_brief:
+  steps:
+    - {tool: salesforce.run_soql, args: {query: sample}}
+    - tool: mail.send_email
+      args: {to: sample, subject: sample, body: sample}
+billing_peek:
+  steps:
+    - {tool: stripe.list_charges, args: {customer_id: "ext:customers", limit: sample}}
+    - {tool: stripe.retrieve_charge, args: {charge_id: "ext:charges"}}
+newsletter_send:
+  steps:
+    - {tool: salesforce.run_soql, args: {query: sample}}
+    - tool: mail.send_email
+      args: {to: sample, subject: sample, body: sample}
+    - {tool: slack.post_message, optional_prob: 0.3, args: {channel: sample, text: sample}}
+status_broadcast:
+  repeat: {family: poisson, lam: 2, min: 1}
+  steps:
+    - {tool: zendesk.list_tickets, args: {status: sample, limit: sample}}
+    - {tool: slack.post_message, args: {channel: sample, text: sample}}
+alert_ack:
+  steps:
+    - {tool: slack.read_channel, args: {channel: sample, limit: sample}}
+    - {tool: slack.post_message, args: {channel: sample, text: sample}}

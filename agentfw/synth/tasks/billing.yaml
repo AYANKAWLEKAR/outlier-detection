@@ -1,0 +1,19 @@
+dispute_refund:
+  steps:
+    - {tool: zendesk.get_ticket, as: ticket, args: {ticket_id: "ext:tickets"}}
+    - {tool: stripe.retrieve_charge, as: charge, skippable: true, args: {charge_id: ticket.charge_id}}
+    - {tool: stripe.retrieve_customer, optional_prob: 0.6, args: {customer_id: charge.customer}}
+    - tool: stripe.create_refund
+      args: {charge_id: charge.id, amount: sample, reason: sample}
+    - {tool: zendesk.update_status, args: {ticket_id: ticket.id, status: sample}}
+dispute_note:
+  steps:
+    - {tool: zendesk.get_ticket, as: ticket, args: {ticket_id: "ext:tickets"}}
+    - {tool: stripe.retrieve_charge, args: {charge_id: ticket.charge_id}}
+    - {tool: zendesk.add_comment, args: {ticket_id: ticket.id, body: sample, public: sample}}
+dispute_notice:
+  steps:
+    - {tool: zendesk.get_ticket, as: ticket, args: {ticket_id: "ext:tickets"}}
+    - tool: mail.send_email
+      args: {to: ticket.customer_email, subject: sample, body: sample}
+    - {tool: slack.post_message, optional_prob: 0.3, args: {channel: sample, text: sample}}

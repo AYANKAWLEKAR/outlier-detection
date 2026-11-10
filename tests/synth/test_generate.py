@@ -8,7 +8,13 @@ import pytest
 
 from agentfw.core.envelope import Label, RawCall
 from agentfw.synth.generate import GenerateConfig, generate, main
-from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR, load_personas
+from agentfw.synth.load import (
+    CATALOG_DIR,
+    PERSONAS_DIR,
+    TASKS_DIR,
+    TIER0_PERSONA_IDS,
+    load_personas,
+)
 
 START = 1_767_225_600_000
 DAY_MS = 86_400_000
@@ -18,6 +24,7 @@ def cfg(**kw: object) -> GenerateConfig:
     base: dict[str, object] = {
         "seed": 0,
         "personas_dir": PERSONAS_DIR,
+        "persona_ids": list(TIER0_PERSONA_IDS),
         "tasks_dir": TASKS_DIR,
         "catalog_dir": CATALOG_DIR,
         "days": 3,

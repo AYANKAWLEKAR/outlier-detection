@@ -46,6 +46,7 @@ class GenerateConfig(BaseModel):
     attack_rate: float = 0.015
     warmup_sessions: int = 30
     families: list[str] = []
+    persona_ids: list[str] | None = None  # select a subset of ``personas_dir`` (None = all)
     control_rate: float = 0.005
 
 
@@ -101,6 +102,11 @@ def generate(cfg: GenerateConfig, out_dir: Path) -> Manifest:
     catalog, tasks = load_catalog(cfg.catalog_dir), load_tasks(cfg.tasks_dir)
     personas = sorted(load_personas(cfg.personas_dir), key=lambda p: p.agent_id)
     validate_world(catalog, personas, tasks)
+    if cfg.persona_ids is not None:
+        missing = sorted(set(cfg.persona_ids) - {p.agent_id for p in personas})
+        if missing:
+            raise ValueError(f"unknown persona ids: {missing}")
+        personas = [p for p in personas if p.agent_id in cfg.persona_ids]
     by_persona: dict[str, list[list[RawCall]]] = {}
     quarter_end: set[str] = set()
     for p, cap in zip(personas, _split_cap(cfg.max_sessions, len(personas)), strict=True):

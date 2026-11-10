@@ -1,0 +1,22 @@
+agent_id: renewals-a
+tools:
+  - salesforce.get_record
+  - salesforce.update_record
+  - salesforce.create_task
+  - mail.send_email
+  - slack.post_message
+session_rate: {family: poisson, lam: 6}
+tasks:
+  - {name: renewal_uplift, weight: 0.45}
+  - {name: renewal_email, weight: 0.55}
+fields:
+  salesforce.update_record.amount: {family: lognormal, mu: 10.5, sigma: 0.4, round_cents: true}
+  mail.send_email.to.__domain__: {family: zipf, vocab_size: 10, s: 1.4}
+  mail.send_email.to.__len__: {family: poisson, lam: 2.2, min: 1}
+drift: null
+noise: {skip_lookup: 0.04, retry: 0.02, abandon: 0.03, arg_dropout: 0.02}
+id_pools:
+  renewals: {prefix: "006", size: 1200, s: 1.2}
+id_flow_rate: 1.0
+working_hours: [8, 17]
+quarter_end_days: []

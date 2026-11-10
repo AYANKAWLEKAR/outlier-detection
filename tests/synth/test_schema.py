@@ -23,7 +23,8 @@ CAT, PER, TASKS = CATALOG_DIR, PERSONAS_DIR, TASKS_DIR
 def test_world_loads_and_is_consistent() -> None:
     cat, ps, ts = load_catalog(CAT), load_personas(PER), load_tasks(TASKS)
     validate_world(cat, ps, ts)
-    assert {p.agent_id for p in ps} == {"support-refunds-a", "sales-ops-a", "outreach-a"}
+    assert {"support-refunds-a", "sales-ops-a", "outreach-a"} <= {p.agent_id for p in ps}
+    assert len(ps) == 20  # the full roster (Task 1.13; see tests/synth/test_personas.py)
     for tool in (
         "stripe.retrieve_charge",
         "stripe.list_charges",

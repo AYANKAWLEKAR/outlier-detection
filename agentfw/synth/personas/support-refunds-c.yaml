@@ -1,0 +1,25 @@
+agent_id: support-refunds-c
+tools:
+  - zendesk.get_ticket
+  - zendesk.add_comment
+  - zendesk.update_status
+  - stripe.retrieve_charge
+  - stripe.create_refund
+  - mail.send_email
+  - slack.post_message
+session_rate: {family: poisson, lam: 55}
+tasks:
+  - {name: small_refund, weight: 0.8}
+  - {name: followup_email, weight: 0.17}
+  - {name: escalate, weight: 0.03}
+fields:
+  stripe.create_refund.amount: {family: lognormal, mu: 2.8, sigma: 0.6, round_cents: true}
+  mail.send_email.to.__domain__: {family: zipf, vocab_size: 6, s: 1.6}
+  mail.send_email.to.__len__: {family: poisson, lam: 1.1, min: 1}
+drift: null
+noise: {skip_lookup: 0.04, retry: 0.04, abandon: 0.02, arg_dropout: 0.03}
+id_pools:
+  tickets: {prefix: "tk_", size: 6000, s: 1.05}
+id_flow_rate: 1.0
+working_hours: [6, 16]
+quarter_end_days: []

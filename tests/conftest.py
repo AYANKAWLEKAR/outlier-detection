@@ -9,7 +9,7 @@ import pytest
 from agentfw.bench.dataset import load_dir
 from agentfw.core.envelope import Label, RawCall
 from agentfw.synth.generate import GenerateConfig, generate
-from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR
+from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR, TIER0_PERSONA_IDS
 
 
 @pytest.fixture(scope="session")
@@ -19,6 +19,7 @@ def tiny_dataset(tmp_path_factory: pytest.TempPathFactory) -> Path:
     cfg = GenerateConfig(
         seed=0,
         personas_dir=PERSONAS_DIR,
+        persona_ids=list(TIER0_PERSONA_IDS),
         tasks_dir=TASKS_DIR,
         catalog_dir=CATALOG_DIR,
         days=5,
@@ -38,6 +39,7 @@ def validation_dataset(
     cfg = GenerateConfig(
         seed=0,
         personas_dir=PERSONAS_DIR,
+        persona_ids=list(TIER0_PERSONA_IDS),
         tasks_dir=TASKS_DIR,
         catalog_dir=CATALOG_DIR,
         days=60,

@@ -1,0 +1,17 @@
+agent_id: newsletter-a
+tools:
+  - salesforce.run_soql
+  - mail.send_email
+  - slack.post_message
+session_rate: {family: poisson, lam: 4}
+tasks:
+  - {name: newsletter_send, weight: 1.0}
+fields:
+  mail.send_email.to.__domain__: {family: zipf, vocab_size: 80, s: 0.9}
+  mail.send_email.to.__len__: {family: poisson, lam: 60, min: 20}
+drift: null
+noise: {skip_lookup: 0.02, retry: 0.02, abandon: 0.01, arg_dropout: 0.01}
+id_pools: {}
+id_flow_rate: 1.0
+working_hours: [9, 12]
+quarter_end_days: []

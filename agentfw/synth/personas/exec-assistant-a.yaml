@@ -1,0 +1,36 @@
+agent_id: exec-assistant-a
+tools:
+  - zendesk.list_tickets
+  - zendesk.get_ticket
+  - zendesk.add_comment
+  - salesforce.run_soql
+  - salesforce.get_record
+  - salesforce.update_record
+  - salesforce.create_task
+  - stripe.list_charges
+  - stripe.retrieve_charge
+  - mail.send_email
+  - slack.read_channel
+  - slack.post_message
+session_rate: {family: poisson, lam: 12}
+tasks:
+  - {name: inbox_triage, weight: 0.15}
+  - {name: crm_lookup, weight: 0.15}
+  - {name: account_update, weight: 0.1}
+  - {name: channel_digest_brief, weight: 0.15}
+  - {name: send_brief, weight: 0.15}
+  - {name: billing_peek, weight: 0.15}
+  - {name: alert_ack, weight: 0.15}
+fields:
+  mail.send_email.to.__domain__: {family: zipf, vocab_size: 50, s: 0.8}
+  mail.send_email.to.__len__: {family: poisson, lam: 3.0, min: 1}
+drift: null
+noise: {skip_lookup: 0.05, retry: 0.03, abandon: 0.03, arg_dropout: 0.03}
+id_pools:
+  tickets: {prefix: "tk_", size: 5000, s: 1.0}
+  accounts: {prefix: "006", size: 6000, s: 0.9}
+  customers: {prefix: "cus_", size: 3000, s: 1.0}
+  charges: {prefix: "ch_", size: 8000, s: 0.9}
+id_flow_rate: 1.0
+working_hours: [7, 21]
+quarter_end_days: []

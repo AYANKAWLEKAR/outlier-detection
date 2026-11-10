@@ -13,6 +13,10 @@ CATALOG_DIR = _HERE / "catalog"
 PERSONAS_DIR = _HERE / "personas"
 TASKS_DIR = _HERE / "tasks"
 
+# The three personas behind the Tier-0 CI dataset and goldens (ruling A4);
+# ``GenerateConfig.persona_ids`` selects them out of the full roster.
+TIER0_PERSONA_IDS = ("outreach-a", "sales-ops-a", "support-refunds-a")
+
 DERIVED_SUFFIXES = ("__domain__", "__len__", "__host__", "__prefix__")
 
 

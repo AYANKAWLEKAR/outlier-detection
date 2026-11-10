@@ -1,0 +1,17 @@
+agent_id: helpdesk-triage-b
+tools:
+  - zendesk.list_tickets
+  - zendesk.add_comment
+  - zendesk.update_status
+session_rate: {family: poisson, lam: 30}
+tasks:
+  - {name: triage_direct, weight: 0.7}
+  - {name: queue_scan, weight: 0.3}
+fields: {}
+drift: null
+noise: {skip_lookup: 0.05, retry: 0.03, abandon: 0.02, arg_dropout: 0.02}
+id_pools:
+  tickets: {prefix: "tk_", size: 3000, s: 1.2}
+id_flow_rate: 0.0
+working_hours: [8, 16]
+quarter_end_days: []

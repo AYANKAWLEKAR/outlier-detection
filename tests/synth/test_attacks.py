@@ -24,7 +24,7 @@ from agentfw.synth.attacks import (
 )
 from agentfw.synth.generate import GenerateConfig, generate
 from agentfw.synth.grammar import walk
-from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR
+from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR, TIER0_PERSONA_IDS
 from agentfw.synth.sampler import persona_rng
 
 from .conftest import World
@@ -216,6 +216,7 @@ def _cfg(**kw: object) -> GenerateConfig:
     base: dict[str, object] = {
         "seed": 0,
         "personas_dir": PERSONAS_DIR,
+        "persona_ids": list(TIER0_PERSONA_IDS),
         "tasks_dir": TASKS_DIR,
         "catalog_dir": CATALOG_DIR,
         "days": 60,
