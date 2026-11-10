@@ -56,12 +56,20 @@ SWEEP_SWITCH_DEFAULTS: dict[str, object] = {
 }
 
 
-# Task 1.15 opt-in switches (docs/decisions/008-tier1-gate.md): defaults keep the spec's behaviour.
+# Task 1.15 switches (docs/decisions/008-tier1-gate.md). The censoring switches stay opt-in and
+# keep the spec's behaviour; the other three are defaults by user decision (below).
 GATE_SWITCH_DEFAULTS: dict[str, object] = {
     "cal_censor": "none",
     "cal_censor_min_n": 0,
-    "vel_count_attempts": False,
-    "seq_prereq_graded": False,
+}
+
+# User decision 2026-11-10 (decision 008, "User decision"): three engine switches on by default.
+# Spec values: vel_count_attempts=False, seq_prereq_graded=False (§6.6(b)), novelty_full_n=200
+# (§6.5); tests of spec behaviour pin those values explicitly.
+USER_DECISION_DEFAULTS: dict[str, object] = {
+    "vel_count_attempts": True,
+    "seq_prereq_graded": True,
+    "novelty_full_n": 50,
 }
 
 
@@ -73,9 +81,21 @@ DECISION_OVERRIDES: dict[str, object] = {
 
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
-        GLOBAL_CONSTRAINT_VALUES | SWEEP_SWITCH_DEFAULTS | GATE_SWITCH_DEFAULTS | DECISION_OVERRIDES
+        GLOBAL_CONSTRAINT_VALUES
+        | SWEEP_SWITCH_DEFAULTS
+        | GATE_SWITCH_DEFAULTS
+        | DECISION_OVERRIDES
+        | USER_DECISION_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
+
+
+def test_user_decision_engine_defaults() -> None:
+    """Decision 008, user decision 2026-11-10: attempts count, graded prereq, novelty ramp 50."""
+    cfg = EngineConfig()
+    assert cfg.vel_count_attempts is True
+    assert cfg.seq_prereq_graded is True
+    assert cfg.novelty_full_n == 50
 
 
 def test_engine_config_frozen_slots_and_replace() -> None:

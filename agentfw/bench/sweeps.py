@@ -18,8 +18,12 @@ and summarises each run with :func:`sweep_metrics`, all on **warm test** rows:
 The long sweeps run outside pytest: ``python -m agentfw.bench.sweeps --traces DIR --out DIR``
 (see :func:`main`), which also measures quantile tail error (Open Decision 1) and velocity
 long-window memory (Open Decision 4), and writes ``sweeps.json`` + ``sweeps.md``. Suite ``gate``
-(Task 1.15, decision 008) replays :data:`GATE_CANDIDATES`, each with its replay outcome mode, and
-adds the live-threshold trajectory summary (the censoring ratchet).
+(Task 1.15, decision 008) replays :data:`GATE_CANDIDATES`, each with its replay outcome mode and
+the spec values of the three user-decision switches pinned (:data:`SPEC_SWITCHES`), so it keeps
+reproducing decision 008's evidence; it adds the live-threshold trajectory summary (the censoring
+ratchet). Every other suite replays the current defaults under ``--outcomes`` (default: the
+benchmark protocol ``BENCH_OUTCOMES``, the oracle-reviewer approval loop); :func:`sweep` takes the
+outcome mode explicitly.
 """
 
 from __future__ import annotations
@@ -57,7 +61,14 @@ from agentfw.bench.diagnostics import (
 )
 from agentfw.bench.metrics import GATE_FAMILIES, Thresholds, compute_all, gate_preview
 from agentfw.bench.protocol import Detector
-from agentfw.bench.replay import OutcomeMode, ScoreRow, SplitSpec
+from agentfw.bench.replay import (
+    BENCH_OUTCOMES,
+    OUTCOME_MODES,
+    PROTOCOL_LABELS,
+    OutcomeMode,
+    ScoreRow,
+    SplitSpec,
+)
 from agentfw.core.config import EngineConfig
 from agentfw.core.detectors.base import IQR_TO_SIGMA, signed_log1p
 from agentfw.core.detectors.velocity import VelocityRecord
@@ -69,6 +80,7 @@ from agentfw.synth.generate import generate
 
 __all__ = [
     "GATE_CANDIDATES",
+    "SPEC_SWITCHES",
     "SweepRow",
     "calibration_tail_error",
     "field_tail_errors",
@@ -184,12 +196,12 @@ def _check_fields(keys: Sequence[str]) -> None:
         raise ValueError(f"unknown EngineConfig field(s): {unknown}")
 
 
-_Job = tuple[str, str, SplitSpec, EngineConfig, int]
+_Job = tuple[str, str, SplitSpec, EngineConfig, int, OutcomeMode]
 
 
 def _sweep_one(job: _Job) -> dict[str, float]:
-    traces_dir, detector, split, cfg, n_boot = job
-    rows, det = replay_detector(traces_dir, detector, split, cfg)
+    traces_dir, detector, split, cfg, n_boot, outcomes = job
+    rows, det = replay_detector(traces_dir, detector, split, cfg, outcomes=outcomes)
     return sweep_metrics(
         rows, state_bytes=det.state_bytes(), cal_alpha=cfg.cal_alpha, n_boot=n_boot
     )
@@ -200,12 +212,14 @@ def sweep(
     grid: Mapping[str, Sequence[object]],
     split: SplitSpec,
     *,
+    outcomes: OutcomeMode,
     detector: str = "engine",
     base: EngineConfig | None = None,
     n_boot: int = 0,
     workers: int = 1,
 ) -> list[SweepRow]:
-    """One :class:`SweepRow` per grid point (order of :func:`grid_points`).
+    """One :class:`SweepRow` per grid point (order of :func:`grid_points`), each replayed with
+    the caller's ``outcomes`` (the replay protocol; no default).
 
     Each point is ``base.replace(**point)`` (default ``EngineConfig()``); grid keys that are not
     ``EngineConfig`` fields raise ``ValueError`` before anything is replayed.
@@ -213,7 +227,7 @@ def sweep(
     _check_fields(list(grid))
     base = EngineConfig() if base is None else base
     points = grid_points(grid)
-    jobs = [(str(traces_dir), detector, split, base.replace(**p), n_boot) for p in points]
+    jobs = [(str(traces_dir), detector, split, base.replace(**p), n_boot, outcomes) for p in points]
     results = parallel_map(_sweep_one, jobs, workers)
     return [SweepRow(p, m) for p, m in zip(points, results, strict=True)]
 
@@ -383,23 +397,32 @@ ABLATION_VARIANTS = [
     *(f"engine-only-{d}" for d in DETECTOR_ORDER),
     "engine-no-priors",
 ]
-#: Task 1.15 gate candidates (docs/decisions/008-tier1-gate.md): ``(setting, params, outcomes)``.
-#: Every switch is opt-in; "default" is the spec engine under the spec's allow-all replay.
-#: "oracle-reviewer" rows use replay outcomes "review": the oracle-reviewer approval loop
-#: (labels act as a perfect human reviewer -> optimistic). ``oracle`` reads every label
-#: (attacks never learned): a diagnostic upper bound only. Neither is the benchmark protocol
-#: (decision 008, GATE3).
+#: Spec values of the three switches the user turned on by default (decision 008, user decision
+#: 2026-11-10). Every gate candidate starts from them, so the suite keeps decision 008's meaning.
+SPEC_SWITCHES: dict[str, object] = {
+    "vel_count_attempts": False,
+    "seq_prereq_graded": False,
+    "novelty_full_n": 200,
+}
+#: Task 1.15 gate candidates (docs/decisions/008-tier1-gate.md): ``(setting, params, outcomes)``,
+#: params on top of :data:`SPEC_SWITCHES`. "default" is the spec engine under the spec's
+#: allow-all replay. "oracle-reviewer" rows use replay outcomes "review": the oracle-reviewer
+#: approval loop (labels act as a perfect human reviewer -> optimistic). ``oracle`` reads every
+#: label (attacks never learned): a diagnostic upper bound only. The last oracle-reviewer row
+#: (all three switches) is today's benchmark protocol and engine defaults (user decision).
 REVIEW_NOTE = (
     "oracle-reviewer = oracle-reviewer approval loop (labels act as a perfect human reviewer -> "
-    "optimistic); oracle = no call labelled attack is ever learned (diagnostic). The benchmark "
-    'protocol is the spec\'s allow-all replay ("default").'
+    'optimistic); oracle = no call labelled attack is ever learned (diagnostic). "default" is the '
+    "spec engine under spec §5.2 allow-all. The benchmark protocol and engine defaults (user "
+    'decision 2026-11-10) are the row "oracle-reviewer, vel attempts, graded prereq, '
+    'novelty_full_n=50".'
 )
 _W: dict[str, object] = {"cal_censor": "winsorize"}
 _W500: dict[str, object] = {**_W, "cal_censor_min_n": 500}
 _ATT: dict[str, object] = {"vel_count_attempts": True}
 _GRADED: dict[str, object] = {"seq_prereq_graded": True}
 _NOV50: dict[str, object] = {"novelty_full_n": 50}
-GATE_CANDIDATES: list[tuple[str, dict[str, object], OutcomeMode]] = [
+_GATE_CANDIDATES: list[tuple[str, dict[str, object], OutcomeMode]] = [
     ("default", {}, "allow"),
     ("enforce", {}, "enforce"),
     ("cal_censor=drop", {"cal_censor": "drop"}, "allow"),
@@ -423,6 +446,9 @@ GATE_CANDIDATES: list[tuple[str, dict[str, object], OutcomeMode]] = [
         "review",
     ),
     ("oracle (labels; diagnostic)", {}, "oracle"),
+]
+GATE_CANDIDATES: list[tuple[str, dict[str, object], OutcomeMode]] = [
+    (name, {**SPEC_SWITCHES, **params}, mode) for name, params, mode in _GATE_CANDIDATES
 ]
 ALL_SUITES = [*SUITE_GRIDS, "prereq", "ablation", "tail", "saturation", "gate"]
 
@@ -456,12 +482,12 @@ class _Spec:
     params: tuple[tuple[str, object], ...]
     split: SplitSpec
     n_boot: int
-    outcomes: OutcomeMode = "allow"
+    outcomes: OutcomeMode
 
 
 def _run_spec(spec: _Spec) -> dict[str, Any]:
     cfg = EngineConfig().replace(**dict(spec.params))
-    rows, det = replay_detector(spec.traces, spec.detector, spec.split, cfg, spec.outcomes)
+    rows, det = replay_detector(spec.traces, spec.detector, spec.split, cfg, outcomes=spec.outcomes)
     out: dict[str, Any] = {
         "metrics": sweep_metrics(
             rows, state_bytes=det.state_bytes(), cal_alpha=cfg.cal_alpha, n_boot=spec.n_boot
@@ -526,6 +552,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--suites", default="all", help=f"comma list of {ALL_SUITES} or 'all'")
     p.add_argument("--workers", type=int, default=1)
     p.add_argument("--n-boot", type=int, default=0)
+    p.add_argument(
+        "--outcomes",
+        choices=OUTCOME_MODES,
+        default=BENCH_OUTCOMES,
+        help="replay protocol of every suite except gate (whose candidates carry their own); "
+        "default: the benchmark protocol (oracle-reviewer approval loop)",
+    )
     a = p.parse_args(argv)
     suites = ALL_SUITES if a.suites == "all" else [s for s in a.suites.split(",") if s]
     unknown = sorted(set(suites) - set(ALL_SUITES))
@@ -538,9 +571,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         params: Mapping[str, object],
         traces: str = base,
         det: str = "engine",
-        outcomes: OutcomeMode = "allow",
+        outcomes: OutcomeMode | None = None,
     ) -> _Spec:
-        return _Spec(traces, det, tuple(params.items()), split, a.n_boot, outcomes)
+        mode: OutcomeMode = a.outcomes if outcomes is None else outcomes
+        return _Spec(traces, det, tuple(params.items()), split, a.n_boot, mode)
 
     plan: dict[str, list[tuple[str, _Spec]]] = {}
     for s in suites:
@@ -567,8 +601,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     jobs = list(dict.fromkeys(sp for items in plan.values() for _, sp in items))
     results = dict(zip(jobs, parallel_map(_run_spec, jobs, a.workers), strict=True))
 
-    report: dict[str, Any] = {"traces": base, "split": dataclasses.asdict(split), "suites": {}}
-    md: list[str] = [f"# Sweeps on `{base}`", ""]
+    report: dict[str, Any] = {
+        "traces": base,
+        "split": dataclasses.asdict(split),
+        "outcomes": a.outcomes,
+        "suites": {},
+    }
+    md: list[str] = [
+        f"# Sweeps on `{base}`",
+        "",
+        f"Protocol (every suite except gate): {PROTOCOL_LABELS[a.outcomes]}.",
+        "",
+    ]
     for s, items in plan.items():
         entries = [
             {

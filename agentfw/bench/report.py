@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from agentfw.bench.ablation import AblationRow
 from agentfw.bench.metrics import GATE_RECALL, GatePreview, Metrics
-from agentfw.bench.replay import SplitSpec
+from agentfw.bench.replay import PROTOCOL_LABELS, SplitSpec
 
 __all__ = [
     "README_END",
@@ -174,6 +174,7 @@ def render_markdown(report: Mapping[str, object]) -> str:
         f"seed {meta['seed']}, git `{str(meta['git_sha'])[:10]}`, "
         f"dataset `{str(meta['dataset_sha'])[:12]}`.",
         "",
+        *_protocol_md(_dict(report["extras"]).get("outcomes")),
         "#### Headline",
         "",
         _row(["Metric", "All rows", "Warm only (headline)"]),
@@ -266,6 +267,14 @@ def render_markdown(report: Mapping[str, object]) -> str:
         "",
     ]
     return "\n".join(lines)
+
+
+def _protocol_md(outcomes: object) -> list[str]:
+    """The replay protocol's label (``extras.outcomes``); nothing for reports that lack it."""
+    if outcomes is None:
+        return []
+    label = PROTOCOL_LABELS.get(str(outcomes), f"outcomes={outcomes}")
+    return [f"Protocol: {label}.", ""]
 
 
 def _gate_md(gate: object) -> list[str]:

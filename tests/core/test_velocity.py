@@ -23,7 +23,9 @@ AGENT = "a1"
 TOOL = "stripe.create_refund"
 MIN = 60_000
 T0 = 1_700_000_000_000 - 1_700_000_000_000 % (24 * 60 * MIN)  # midnight UTC
-CFG = EngineConfig()
+# Spec §6.4: refused calls are not counted. vel_count_attempts (default on by user decision,
+# decision 008) is pinned off here and switched on explicitly by the tests that cover it.
+CFG = EngineConfig().replace(vel_count_attempts=False)
 TYPES = TypeView(TypeInference(DictStore(), CFG), AGENT, TOOL)  # velocity ignores types
 
 
@@ -435,7 +437,7 @@ def test_sum_signal_off_scores_count_only_and_keeps_no_money_keys() -> None:
     assert det._store.get(key_vel(AGENT, TOOL, "amount")) is None
 
 
-# -- Task 1.15 opt-in: refused attempts count in the window, never in the baseline ----------------
+# -- vel_count_attempts (default on, user decision): refused attempts count in the window only --
 
 
 def test_refused_attempts_count_in_the_window_but_not_in_history() -> None:

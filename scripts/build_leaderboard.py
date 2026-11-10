@@ -2,14 +2,17 @@
 
 SW1 = seed 0, all 20 personas, 90 days, all 8 attack families (the Tier-1 acceptance dataset).
 Every detector that can run offline is replayed on the full test split, by time and (as a separate
-table) by agent, with the spec's default protocol (allow-all replay, default engine config).
-``llm_judge`` needs a live judge model, so it is listed as not run; it is never faked here.
+table) by agent, under the benchmark protocol (the oracle-reviewer approval loop, default engine
+config; user decision 2026-11-10, decision 008). The engine is also replayed under spec §5.2
+allow-all as a labelled comparison row (``engine-allow-all``). ``llm_judge`` needs a live judge
+model, so it is listed as not run; it is never faked here.
 
     uv run python scripts/build_leaderboard.py [--traces traces/sw1-seed0] [--reuse] [--jobs 4]
 
 Runs land in ``results/synth-v1/<split>/<detector>/`` (gitignored); the rendered tables go to
 ``docs/leaderboard.md``. ``--reuse`` keeps a run whose report already matches the dataset, split,
-detector and n_boot; it trusts outputs from older code (no git_sha check).
+detector, protocol (``extras.outcomes``) and n_boot; it trusts outputs from older code (no
+git_sha check).
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ import orjson
 
 from agentfw.bench.leaderboard import build_leaderboard, render_leaderboard
 from agentfw.bench.metrics import BOOTSTRAP_N
-from agentfw.bench.replay import SplitSpec
+from agentfw.bench.replay import BENCH_OUTCOMES, PROTOCOL_LABELS, OutcomeMode, SplitSpec
 from agentfw.bench.run import run
 from agentfw.synth.attacks import ATTACKS
 from agentfw.synth.generate import GenerateConfig, Manifest, generate
@@ -39,7 +42,15 @@ SW1 = GenerateConfig(
     attack_rate=0.015,
 )
 LABEL = "synthetic benchmark (SW1)"
-DETECTORS = ("engine", "random", "static_threshold", "isolation_forest")
+# (run name, detector, protocol): every detector under the benchmark protocol, plus the engine
+# under spec §5.2 allow-all as the labelled comparison row.
+RUNS: tuple[tuple[str, str, OutcomeMode], ...] = (
+    ("engine", "engine", BENCH_OUTCOMES),
+    ("engine-allow-all", "engine", "allow"),
+    ("random", "random", BENCH_OUTCOMES),
+    ("static_threshold", "static_threshold", BENCH_OUTCOMES),
+    ("isolation_forest", "isolation_forest", BENCH_OUTCOMES),
+)
 SPLITS = ("time", "agent")
 NOT_RUN = {"llm_judge": "requires a live judge model"}
 
@@ -54,14 +65,15 @@ def _dataset(d: Path) -> str:
     return m.files["traces.jsonl"]
 
 
-def _job(traces: Path, det: str, split: str, out: Path, n_boot: int) -> str:
+def _job(traces: Path, det: str, split: str, out: Path, n_boot: int, outcomes: OutcomeMode) -> str:
     t0 = time.time()
-    run(traces, det, SplitSpec(kind=split), out, n_boot=n_boot)  # type: ignore[arg-type]
-    return f"{split}/{det}: {time.time() - t0:.0f} s"
+    run(traces, det, SplitSpec(kind=split), out, n_boot=n_boot, outcomes=outcomes)  # type: ignore[arg-type]
+    return f"{split}/{out.name}: {time.time() - t0:.0f} s"
 
 
-def _fresh(out: Path, sha: str, n_boot: int, split: str, det: str) -> bool:
-    """An existing report for this dataset, split, detector and n_boot (code version unchecked)."""
+def _fresh(out: Path, sha: str, n_boot: int, split: str, det: str, outcomes: OutcomeMode) -> bool:
+    """An existing report for this dataset, split, detector, protocol and n_boot (code version
+    unchecked)."""
     p = out / "report.json"
     if not p.exists():
         return False
@@ -72,6 +84,7 @@ def _fresh(out: Path, sha: str, n_boot: int, split: str, det: str) -> bool:
         and meta["split"]["kind"] == split
         and meta["detector"] == det
         and rep["extras"].get("n_boot") == n_boot
+        and rep["extras"].get("outcomes") == outcomes
     )
 
 
@@ -87,14 +100,17 @@ def _doc(sections: list[str], sha: str) -> str:
         "LLM agents), which has not been built yet; see the README for how to build it. The "
         "Tier-2 exit numbers belong to that dataset.",
         "",
-        "Protocol: spec §5.2 allow-all replay, default engine configuration, full test split. "
+        f"Protocol: {PROTOCOL_LABELS[BENCH_OUTCOMES]}, default engine configuration, full test "
+        f"split. The engine is also shown under {PROTOCOL_LABELS['allow']} (row "
+        "`engine-allow-all`) for comparison; every row's caveat names its protocol. The baselines "
+        "do not learn online, so the protocol does not change their scores. "
         "The by-time and by-agent splits are separate tables and are never averaged (§5.3). "
         "`llm_judge` is listed but was not run: it needs a live judge model and is evaluated on a "
         "stratified 2,000-envelope sample (§5.5), which only the sandbox dataset run will do.",
         "",
         "The leaderboard's per-agent FPR@95 is an operating point fixed after the fact on the "
         "test labels (spec §5.4). It is not the engine's live calibration. The Tier-1 gate (live "
-        "thresholds, per-family recall ≥ 0.90) is not met under this protocol; see "
+        "thresholds, per-family recall ≥ 0.90) is not met under either protocol; see "
         "[docs/decisions/008-tier1-gate.md](decisions/008-tier1-gate.md) and "
         "[docs/writeup.md](writeup.md).",
         "",
@@ -118,17 +134,17 @@ def main() -> None:
     a = p.parse_args()
     sha = _dataset(a.traces)
     todo = [
-        (a.traces, det, split, a.results / split / det, a.n_boot)
+        (a.traces, det, split, a.results / split / name, a.n_boot, oc)
         for split in SPLITS
-        for det in DETECTORS
-        if not (a.reuse and _fresh(a.results / split / det, sha, a.n_boot, split, det))
+        for name, det, oc in RUNS
+        if not (a.reuse and _fresh(a.results / split / name, sha, a.n_boot, split, det, oc))
     ]
     with ProcessPoolExecutor(max_workers=a.jobs) as ex:
         for msg in ex.map(_job, *zip(*todo, strict=True)) if todo else []:
             print(msg, flush=True)
     sections = []
     for split in SPLITS:
-        reports = [a.results / split / det / "report.json" for det in DETECTORS]
+        reports = [a.results / split / name / "report.json" for name, _, _ in RUNS]
         lb = build_leaderboard(reports, label=LABEL, not_run=NOT_RUN)
         sections.append(render_leaderboard(lb))
     a.out.write_text(_doc(sections, sha))

@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pytest
 
-from agentfw.bench.ci_regress import ci_dataset
+from agentfw.bench.ci_regress import CI_OUTCOMES, ci_dataset
 from agentfw.bench.metrics import compute_all
 from agentfw.bench.protocol import Detector
 from agentfw.bench.registry import DETECTORS, make_detector
@@ -182,7 +182,8 @@ def test_types_observed_last_in_update() -> None:
 
 
 def test_blocked_action_does_not_move_baseline(tmp_path: Path) -> None:
-    eng = Engine()
+    # Spec behaviour: refused calls move nothing (vel_count_attempts, default on, pinned off).
+    eng = Engine(EngineConfig().replace(vel_count_attempts=False))
     feed(eng, amounts(120))
     before = dump(eng, tmp_path / "before.jsonl")
     spike = env({"amount": 1e6, "currency": "xxx", "new": "cus_ABCDEFGH12"}, 120)
@@ -399,7 +400,7 @@ def test_registry_engine_accepts_kwargs() -> None:
 
 @cache
 def _ci_rows(name: str) -> list[ScoreRow]:
-    return replay(*ci_dataset(), make_detector(name), SplitSpec())
+    return replay(*ci_dataset(), make_detector(name), SplitSpec(), outcomes=CI_OUTCOMES)
 
 
 def test_engine_beats_static_threshold_on_ci_dataset() -> None:
@@ -533,8 +534,10 @@ def test_cal_censor_winsorize_feeds_the_threshold(monkeypatch: pytest.MonkeyPatc
 def test_cal_censor_winsorize_counts_blocked_mass_only_in_the_calibrator(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    eng = _warm_cfg(EngineConfig().replace(cal_censor="winsorize"))
-    ref = _warm_cfg(EngineConfig().replace(cal_censor="winsorize"))
+    # vel_count_attempts pinned off: only the calibrator may see the blocked call here.
+    cfg = EngineConfig().replace(cal_censor="winsorize", vel_count_attempts=False)
+    eng = _warm_cfg(cfg)
+    ref = _warm_cfg(cfg)
     fed = _cal_spy(eng, monkeypatch)
     n0 = _n_scored(eng)
     r = eng.score(ODD)
@@ -601,7 +604,7 @@ def test_vel_count_attempts_counts_refused_calls_in_the_window(outcome: Outcome)
         return v
 
     on = _warm_cfg(EngineConfig().replace(vel_count_attempts=True))
-    off = _warm_cfg(EngineConfig())
+    off = _warm_cfg(EngineConfig().replace(vel_count_attempts=False))
     for eng in (on, off):
         for k in range(5):
             eng.update(env({"amount": 1e6, "currency": "usd"}, 250, session=f"r{k}"), outcome)

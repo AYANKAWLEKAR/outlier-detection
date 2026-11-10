@@ -4,9 +4,12 @@ Every detector and baseline runs through :func:`replay`: envelopes are sorted by
 ``(ts_unix_ms, session_id, seq_no)``, normalized causally, scored, and only then
 used to update the detector.
 
-The outcome handed to ``update`` is ``ALLOWED`` for every envelope by default (spec §5.2: the
-harness measures detection, not enforcement). Two opt-in modes exist for Task 1.15
-(``docs/decisions/008-tier1-gate.md``):
+``replay``'s own default outcome mode is ``"allow"``: ``ALLOWED`` for every envelope (spec §5.2:
+the harness measures detection, not enforcement). The *benchmark* protocol is
+:data:`BENCH_OUTCOMES` = ``"review"`` (user decision 2026-11-10, decision 008):
+``agentfw.bench.run``, CI and the goldens pass it explicitly; every bench tool states its outcome
+mode, and :data:`PROTOCOL_LABELS` holds the label each report must carry. Modes besides
+``"allow"`` (Task 1.15):
 
 * ``outcomes="enforce"``: ``BLOCKED`` when the detector's own ``DetectorResult.decision`` is
   ``BLOCK``, else ``ALLOWED`` -- including ``REQUIRE_APPROVAL`` calls (there is no reviewer in
@@ -41,7 +44,9 @@ from agentfw.core.envelope import ActionEnvelope, Decision, Label, Outcome, RawC
 from agentfw.core.normalize import SessionTracker, normalize
 
 __all__ = [
+    "BENCH_OUTCOMES",
     "OUTCOME_MODES",
+    "PROTOCOL_LABELS",
     "LeakError",
     "OutcomeMode",
     "ScoreRow",
@@ -56,6 +61,15 @@ __all__ = [
 Split = Literal["train", "test"]
 OutcomeMode = Literal["allow", "enforce", "review", "oracle"]
 OUTCOME_MODES: tuple[OutcomeMode, ...] = ("allow", "enforce", "review", "oracle")
+#: The benchmark protocol (user decision 2026-11-10, decision 008): the oracle-reviewer loop.
+BENCH_OUTCOMES: OutcomeMode = "review"
+#: The label every report header, leaderboard row or table using a mode must carry (verbatim).
+PROTOCOL_LABELS: dict[str, str] = {
+    "allow": "spec §5.2 allow-all",
+    "enforce": "outcomes=enforce: not the spec 5.2 allow-all protocol",
+    "review": "oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)",
+    "oracle": "diagnostic upper bound (reads every label) → optimistic",
+}
 _FLAGGED = frozenset({Decision.BLOCK, Decision.REQUIRE_APPROVAL})
 
 

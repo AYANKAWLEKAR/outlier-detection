@@ -1,6 +1,6 @@
 {
   "engine": {
-    "auprc": 1.0,
+    "auprc": 0.5,
     "fpr95": 0.008403361344537815
   },
   "static_threshold": {

@@ -78,9 +78,25 @@ def test_stable_vocab_exact_formula(nov: NoveltyDetector) -> None:
     assert score(nov, "currency", "jpy") == pytest.approx(1.0)
 
 
-def test_half_warm_formula(nov: NoveltyDetector) -> None:
-    feed(nov, "currency", ["usd", "eur"] * 50)  # n=100
-    assert score(nov, "currency", "jpy") == pytest.approx(0.5)
+# Spec §6.5 ramp min(1, n / 200); the default is 50 by user decision (decision 008).
+SPEC_RAMP = EngineConfig().replace(novelty_full_n=200)
+
+
+@pytest.fixture
+def nov_spec() -> NoveltyDetector:
+    return NoveltyDetector(DictStore(), SPEC_RAMP)
+
+
+def test_half_warm_formula(nov_spec: NoveltyDetector) -> None:
+    feed(nov_spec, "currency", ["usd", "eur"] * 50)  # n=100
+    assert score(nov_spec, "currency", "jpy") == pytest.approx(0.5)
+
+
+def test_default_ramp_is_50_observations(nov: NoveltyDetector) -> None:
+    feed(nov, "currency", ["usd", "eur"] * 12)  # n=24
+    assert score(nov, "currency", "jpy") == pytest.approx(24 / 50)
+    feed(nov, "currency", ["usd", "eur"] * 13)  # n=50: fully warm
+    assert score(nov, "currency", "jpy") == pytest.approx(1.0)
 
 
 def test_cold_key_scores_zero_without_division_error(nov: NoveltyDetector) -> None:
@@ -112,9 +128,9 @@ def test_new_address_known_domain_vs_new_domain(nov: NoveltyDetector) -> None:
     assert other["to[]"].score < 0.05
 
 
-def test_p_unseen_is_good_turing_singleton_fraction(nov: NoveltyDetector) -> None:
-    feed(nov, "currency", ["usd"] * 98 + ["eur", "gbp"])  # n=100, 2 singletons
-    [s] = [s for s in scores(nov, {"currency": "jpy"}) if s.field == "currency"]
+def test_p_unseen_is_good_turing_singleton_fraction(nov_spec: NoveltyDetector) -> None:
+    feed(nov_spec, "currency", ["usd"] * 98 + ["eur", "gbp"])  # n=100, 2 singletons
+    [s] = [s for s in scores(nov_spec, {"currency": "jpy"}) if s.field == "currency"]
     assert s.evidence["p_unseen"] == pytest.approx(0.02)
     assert s.evidence["unseen_score"] == pytest.approx(0.98 * 0.5)
     assert s.score == pytest.approx(0.49)
@@ -249,7 +265,7 @@ def test_prior_boundary_is_mag_cold_n(n: int, prior_used: bool) -> None:
     for v in ("usd", "eur", "gbp"):
         pooled.seen[v] = 1000
     pooled.n_total, pooled.n_distinct = 3000, 3
-    det = NoveltyDetector(DictStore(), EngineConfig(), priors=_Prior(pooled))
+    det = NoveltyDetector(DictStore(), SPEC_RAMP, priors=_Prior(pooled))
     feed(det, "currency", ["usd"] * n)
     [s] = [s for s in scores(det, {"currency": "jpy"}) if s.field == "currency"]
     assert s.evidence["prior_used"] is prior_used

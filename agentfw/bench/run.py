@@ -1,6 +1,10 @@
 """Bench run CLI: replay a detector over a dataset and write scores + report.
 
-``dataset_sha`` is the sha256 of ``traces.jsonl`` as recorded in the dataset manifest.
+``dataset_sha`` is the sha256 of ``traces.jsonl`` as recorded in the dataset manifest. The replay
+protocol (``--outcomes``) defaults to the benchmark protocol, the oracle-reviewer approval loop
+(``BENCH_OUTCOMES``, user decision 2026-11-10, decision 008); ``--outcomes allow`` is spec §5.2
+allow-all. Baselines and the ablation table use the same protocol as the run; the report records
+it in ``extras.outcomes`` and labels it in its header.
 """
 
 from __future__ import annotations
@@ -19,7 +23,15 @@ from agentfw.bench.dataset import load_dir
 from agentfw.bench.metrics import BOOTSTRAP_N, compute_all, gate_preview
 from agentfw.bench.protocol import BatchFit
 from agentfw.bench.registry import make_detector
-from agentfw.bench.replay import SplitSpec, canonical_hash, replay, write_score_table
+from agentfw.bench.replay import (
+    BENCH_OUTCOMES,
+    OUTCOME_MODES,
+    OutcomeMode,
+    SplitSpec,
+    canonical_hash,
+    replay,
+    write_score_table,
+)
 from agentfw.bench.report import RunMeta, build_report, git_sha, render_markdown, update_readme
 from agentfw.bench.sampling import sample_counts, stratified_sample
 from agentfw.sandbox.llm import OpenAICompatClient
@@ -36,20 +48,24 @@ def run(
     n_boot: int = BOOTSTRAP_N,
     ablations: Sequence[str] | None = None,
     sample: str | None = None,
+    outcomes: OutcomeMode = BENCH_OUTCOMES,
     **detector_kw: Any,
 ) -> Path:
     """Write ``scores.parquet``, ``report.json``, ``report.md`` into ``out_dir``; returns it.
 
     ``ablations``: registry variants to replay on the same dataset and split for the report's
-    ablation table (``None``: no table). They use the default config, not ``detector_kw``.
+    ablation table (``None``: no table). They use the default config, not ``detector_kw``, and the
+    run's ``outcomes``.
     ``sample``: ``"stratified:N"`` scores only a stratified N-envelope test subsample (others get
     NaN and drop out of the metrics); the spec, actual counts and caveats go in the report.
+    ``outcomes``: the replay protocol (:func:`agentfw.bench.replay.replay`), recorded as
+    ``extras.outcomes``.
     """
     raws, labels, manifest = load_dir(traces_dir)
     det = make_detector(detector, **detector_kw)
     seed = manifest.config.seed
     sample_ids: set[str] | None = None
-    extras: dict[str, object] = {}
+    extras: dict[str, object] = {"outcomes": outcomes}
     notes: list[str] = []
     if sample is not None:
         n = _parse_sample(sample)
@@ -70,7 +86,7 @@ def run(
         )
     if notes:
         extras["notes"] = notes
-    rows = replay(raws, labels, det, split, sample_ids=sample_ids)
+    rows = replay(raws, labels, det, split, sample_ids=sample_ids, outcomes=outcomes)
     out_dir.mkdir(parents=True, exist_ok=True)
     write_score_table(rows, out_dir / "scores.parquet")
     all_ = compute_all(rows, warm_only=False, n_boot=n_boot, seed=seed)
@@ -95,7 +111,9 @@ def run(
             **extras,
         },
         gate=gate_preview(rows),
-        ablations=None if ablations is None else run_ablation(traces_dir, ablations, split),
+        ablations=None
+        if ablations is None
+        else run_ablation(traces_dir, ablations, split, outcomes=outcomes),
     )
     (out_dir / "report.json").write_bytes(orjson.dumps(report, option=orjson.OPT_INDENT_2))
     (out_dir / "report.md").write_text(render_markdown(report))
@@ -154,6 +172,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     p.add_argument("--judge-model", default=None, help="model id for --detector llm_judge")
     p.add_argument("--judge-cache", type=Path, default=Path("bench/cache"))
+    p.add_argument(
+        "--outcomes",
+        choices=OUTCOME_MODES,
+        default=BENCH_OUTCOMES,
+        help="replay protocol: review = oracle-reviewer approval loop (default; labels act as a "
+        "perfect human reviewer, optimistic); allow = spec §5.2 allow-all",
+    )
     p.add_argument("--update-readme", action="store_true")
     p.add_argument(
         "--ablations",
@@ -173,6 +198,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         n_boot=a.n_boot,
         ablations=a.ablations,
         sample=a.sample,
+        outcomes=a.outcomes,
         **kw,
     )
     if a.update_readme:

@@ -166,7 +166,9 @@ def test_prereq_counts_any_window_position_once(seq: SequenceDetector) -> None:
     assert rec.n_y == 50 and rec.cnt[tid("X")] == 50
 
 
-def test_missing_prereq_scores_one_with_evidence(seq: SequenceDetector) -> None:
+def test_missing_prereq_scores_one_with_evidence() -> None:
+    # Spec §6.6(b) binary s_prereq, pinned (the default is graded by user decision, decision 008).
+    seq = SequenceDetector(DictStore(), EngineConfig().replace(seq_prereq_graded=False))
     for _ in range(60):
         obs_y_with_x(seq)
     s = one(seq, probe(seq, ["Q"], "Y"))
@@ -179,9 +181,10 @@ def test_missing_prereq_scores_one_with_evidence(seq: SequenceDetector) -> None:
 
 
 def test_graded_prereq_scores_the_mined_rate_of_the_missing_tool() -> None:
-    """Task 1.15 opt-in (decision 008): s_prereq = max mined rate over the missing prerequisites."""
-    graded = SequenceDetector(DictStore(), EngineConfig().replace(seq_prereq_graded=True))
-    binary = SequenceDetector(DictStore(), EngineConfig())
+    """Task 1.15 switch, default by user decision (decision 008): s_prereq = max mined rate over
+    the missing prerequisites; ``seq_prereq_graded=False`` is the spec's binary score."""
+    graded = SequenceDetector(DictStore(), EngineConfig())
+    binary = SequenceDetector(DictStore(), EngineConfig().replace(seq_prereq_graded=False))
     for det in (graded, binary):
         for i in range(100):  # X: 95 %, W: 92 % of Y's windows
             tools = ["X", "W", "Y"] if i < 92 else ["X", "Z", "Y"] if i < 95 else ["Z", "Y"]

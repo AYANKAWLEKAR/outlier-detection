@@ -7,7 +7,8 @@ long derived host or a 400-digit int is never stored) or when ``str`` refuses a 
 
 A value is *seen* when it is in the record's LRU (``novelty_lru`` entries) or its count-min
 estimate in the lazily allocated ``evicted`` sketch is > 0 (D-011). Seen scores 0; unseen scores
-``(1 - n_singletons / n_total) * min(1, n_total / novelty_full_n)``; a path's score is the max
+``(1 - n_singletons / n_total) * min(1, n_total / novelty_full_n)`` (``novelty_full_n`` = 50 by
+user decision, decision 008; spec §6.5: 200); a path's score is the max
 over its values. Evidence: ``p_unseen`` (= n_singletons / n_total of the record used),
 ``unseen_score`` (the unseen formula), ``n_total``, ``n_distinct``, ``value_hash`` (xxhash64
 hex), ``prior_used``; the raw value is added only for non-ID types.

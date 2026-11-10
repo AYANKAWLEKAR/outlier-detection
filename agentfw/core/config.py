@@ -46,11 +46,14 @@ class EngineConfig:
     vel_cold_n: int = 30
     vel_sum_signal: bool = True  # money-sum windows next to the call count (Task 1.14 sweep)
     # Task 1.15 switch (decision 008): refused (blocked / denied) calls still count as attempts in
-    # the short window's scored count; they never enter the history baseline. Default off = spec.
-    vel_count_attempts: bool = False
+    # the short window's scored count; they never enter the history baseline. Default on by user
+    # decision (2026-11-10, decision 008 "User decision"); False = spec.
+    vel_count_attempts: bool = True
     # Novelty (§6.5)
     novelty_lru: int = 10_000
-    novelty_full_n: int = 200
+    # Novelty ramp min(1, n / novelty_full_n): 50 by user decision (2026-11-10, decision 008);
+    # spec §6.5: 200.
+    novelty_full_n: int = 50
     cms_width: int = 2048
     cms_depth: int = 4
     # Sequence (§6.6)
@@ -59,8 +62,9 @@ class EngineConfig:
     prereq_min_n: int = 50
     prereq_rate: float = 0.90  # docs/decisions/003-prereq-threshold.md (spec: 0.95)
     # Task 1.15 switch (docs/decisions/008-tier1-gate.md): ``s_prereq`` = the mined rate of the
-    # missing prerequisite instead of 1.0. Default off = spec §6.6(b).
-    seq_prereq_graded: bool = False
+    # missing prerequisite instead of 1.0. Default on by user decision (2026-11-10, decision 008);
+    # False = spec §6.6(b).
+    seq_prereq_graded: bool = True
     # Id flow (§6.7-6.8)
     flow_min_obs: int = 20
     # Fusion (§6.11)

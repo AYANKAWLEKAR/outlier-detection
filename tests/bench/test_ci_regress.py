@@ -3,14 +3,17 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from agentfw.bench.ci_regress import (
     BASELINE_PATH,
+    CI_OUTCOMES,
     ci_dataset,
     compare,
     main,
+    measure,
 )
 from agentfw.bench.registry import make_detector
 from agentfw.bench.replay import SplitSpec, canonical_hash, replay
@@ -42,8 +45,24 @@ def test_compare_accepts_none_as_nan() -> None:
     assert compare({"auprc": 0.5, "fpr95": 0.1}, {"auprc": None, "fpr95": None}) == []  # type: ignore[dict-item]
 
 
+def test_ci_protocol_is_the_benchmark_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CI and the goldens replay under the benchmark protocol (the oracle-reviewer loop)."""
+    assert CI_OUTCOMES == "review"
+    seen: list[object] = []
+
+    def spy(*a: Any, **kw: Any) -> Any:
+        seen.append(kw.get("outcomes"))
+        return replay(*a, **kw)
+
+    monkeypatch.setattr("agentfw.bench.ci_regress.replay", spy)
+    measure("static_threshold", ci_dataset())
+    assert seen == ["review"]
+
+
 def test_golden_static_threshold() -> None:
-    rows = replay(*ci_dataset(), make_detector("static_threshold"), SplitSpec())
+    rows = replay(
+        *ci_dataset(), make_detector("static_threshold"), SplitSpec(), outcomes=CI_OUTCOMES
+    )
     golden = (_ROOT / "tests/golden/static_threshold.sha256").read_text().strip()
     assert canonical_hash(rows) == golden
 

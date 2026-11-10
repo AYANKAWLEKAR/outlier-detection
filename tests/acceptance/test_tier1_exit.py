@@ -2,11 +2,14 @@
 
 Dataset SW1: ``GenerateConfig(seed=0, all 20 personas, days=90, all 8 families)``, generated into a
 session tmp dir, or reused from ``$AFW_TIER1_TRACES`` when that directory's manifest has exactly
-this config (it must come from the current generator). Protocol: the spec's allow-all replay
-(§5.2) of the default engine, through ``agentfw.bench.run`` (scores + report + ablations).
+this config (it must come from the current generator). Protocol: the benchmark protocol, the
+oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic), with the
+default engine (``vel_count_attempts``, ``seq_prereq_graded``, ``novelty_full_n=50``: user decision
+2026-11-10, decision 008), through ``agentfw.bench.run`` (scores + report + ablations).
 
 * ``test_tier1_exit`` is the brief's gate verbatim. It is a strict xfail: the gate is not met
-  under the spec protocol (decision 008). If it ever passes, the xfail must be removed.
+  under this protocol either (decision 008, "User decision"). If it ever passes, the xfail must
+  be removed.
 * The other exit items are real assertions; ``test_tier1_no_regression`` pins today's per-family
   numbers with a 0.1 tolerance.
 """
@@ -59,15 +62,17 @@ ABLATIONS = [
     "engine-no-velocity",
     "engine-no-sequence",
 ]
-# Default engine, spec protocol, SW1 (evidence/gate-seed0-seed1.md, "default" row, seed 0):
-# attack-level recall on warm test rows at live thresholds, gate bucket.
+# Default engine and default protocol (oracle-reviewer loop; user decision 2026-11-10), SW1 seed 0,
+# re-measured in Task U1 (decision 008, "User decision"; it matches the evidence row
+# "oracle-reviewer + vel attempts + graded prereq + nov50"): attack-level recall on warm test rows
+# at live thresholds, gate bucket.
 MEASURED_RECALL = {
-    "magnitude_spike": 0.538,
+    "magnitude_spike": 0.692,
     "scope_blowup": 1.000,
-    "exfil_volume": 0.579,
-    "prereq_skip": 0.933,
-    "novel_target": 0.388,
-    "velocity_burst": 0.700,
+    "exfil_volume": 1.000,
+    "prereq_skip": 1.000,
+    "novel_target": 1.000,
+    "velocity_burst": 0.880,
 }
 TOLERANCE = 0.1
 
@@ -87,7 +92,8 @@ def _sw1_dir(tmp: pytest.TempPathFactory) -> Path:
 
 @pytest.fixture(scope="session")
 def tier1_run(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
-    """(dataset dir, run dir): one default-engine run with the ablation table, n_boot=0."""
+    """(dataset dir, run dir): one default-engine run under the default (oracle-reviewer)
+    protocol with the ablation table, n_boot=0."""
     traces = _sw1_dir(tmp_path_factory)
     out = run(
         traces,
@@ -124,7 +130,8 @@ def _family_recall(warm_test: list[ScoreRow], fam: str) -> float:
 
 @pytest.mark.xfail(
     strict=True,
-    reason="Tier-1 gate not met under spec protocol; see docs/decisions/008-tier1-gate.md",
+    reason="Tier-1 gate not met (spec protocol, nor the oracle-reviewer protocol with the "
+    "user-decision defaults); see docs/decisions/008-tier1-gate.md",
 )
 def test_tier1_exit(tier1_rows: list[ScoreRow]) -> None:
     """The brief's per-family gate, verbatim (recall and top-reason share >= 0.90)."""
@@ -178,7 +185,8 @@ def test_tier1_score_latency_p99(tier1_rows: list[ScoreRow], tier1_run: tuple[Pa
 
 
 def test_tier1_no_regression(tier1_rows: list[ScoreRow]) -> None:
-    """Today's default-protocol numbers, minus a 0.1 tolerance, so regressions are caught."""
+    """Today's default-protocol numbers (oracle-reviewer loop, user-decision defaults), minus a
+    0.1 tolerance, so regressions are caught."""
     warm_test = _warm_test(tier1_rows)
     got = {fam: _family_recall(warm_test, fam) for fam in TARGETS}
     for fam, measured in MEASURED_RECALL.items():

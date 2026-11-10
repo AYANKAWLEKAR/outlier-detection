@@ -31,9 +31,10 @@ Evidence: ``signal`` (``count``/``sum``), ``window_count`` (calls in the window,
 included), ``baseline_median`` (raw units, ``None`` without history), ``n_hist``, ``z`` (``None``
 when cold), ``cold``; a sum adds ``window_sum``.
 
-Refused attempts (Task 1.15 opt-in ``vel_count_attempts``, decision 008): the engine reports each
-blocked / denied call through ``observe_refused``; the count key keeps its minute in ``refused``
-(only while it is inside the short window, and only for a key that already exists). ``score`` adds
+Refused attempts (``vel_count_attempts``, decision 008; default on by user decision 2026-11-10,
+off = spec): the engine reports each blocked / denied call through ``observe_refused``; the count
+key keeps its minute in ``refused`` (only while it is inside the short window, and only for a key
+that already exists). ``score`` adds
 the refused attempts of the current window to ``window_count``; nothing else (the ring, the
 history, money sums) ever sees them, so the baseline never moves toward a refused call.
 

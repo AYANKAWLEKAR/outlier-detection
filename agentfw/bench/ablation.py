@@ -45,11 +45,12 @@ def replay_detector(
     traces_dir: str | Path,
     detector: str,
     split: SplitSpec,
-    cfg: EngineConfig | None = None,
-    outcomes: OutcomeMode = "allow",
+    cfg: EngineConfig | None,
+    outcomes: OutcomeMode,
 ) -> tuple[list[ScoreRow], Detector]:
-    """Replay one registry detector (an engine variant gets ``cfg``) over a dataset directory;
-    ``outcomes`` is :func:`agentfw.bench.replay.replay`'s outcome mode (default allow-all)."""
+    """Replay one registry detector (an engine variant gets ``cfg``; ``None``: its default config)
+    over a dataset directory. ``outcomes`` is :func:`agentfw.bench.replay.replay`'s outcome mode,
+    always stated by the caller (the benchmark protocol is ``BENCH_OUTCOMES``, decision 008)."""
     if detector not in DETECTORS:
         raise KeyError(f"unknown detector {detector!r}; available: {sorted(DETECTORS)}")
     raws, labels = _load(str(traces_dir))
@@ -79,9 +80,9 @@ def parallel_map[T, R](fn: Callable[[T], R], items: Sequence[T], workers: int) -
         return list(ex.map(fn, items))
 
 
-def _one(job: tuple[str, str, SplitSpec, EngineConfig | None, int]) -> AblationRow:
-    traces_dir, variant, split, cfg, n_boot = job
-    rows, det = replay_detector(traces_dir, variant, split, cfg)
+def _one(job: tuple[str, str, SplitSpec, EngineConfig | None, int, OutcomeMode]) -> AblationRow:
+    traces_dir, variant, split, cfg, n_boot, outcomes = job
+    rows, det = replay_detector(traces_dir, variant, split, cfg, outcomes=outcomes)
     return ablation_row(variant, rows, det.state_bytes(), n_boot=n_boot)
 
 
@@ -90,13 +91,15 @@ def run_ablation(
     variants: Sequence[str],
     split: SplitSpec,
     *,
+    outcomes: OutcomeMode,
     cfg: EngineConfig | None = None,
     n_boot: int = 0,
     workers: int = 1,
 ) -> list[AblationRow]:
-    """One :class:`AblationRow` per variant, in order. Unknown variants raise ``KeyError`` first."""
+    """One :class:`AblationRow` per variant, in order, each replayed with ``outcomes`` (stated by
+    the caller; ``run`` passes its own). Unknown variants raise ``KeyError`` first."""
     unknown = [v for v in variants if v not in DETECTORS]
     if unknown:
         raise KeyError(f"unknown detectors {unknown}; available: {sorted(DETECTORS)}")
-    jobs = [(str(traces_dir), v, split, cfg, n_boot) for v in variants]
+    jobs = [(str(traces_dir), v, split, cfg, n_boot, outcomes) for v in variants]
     return parallel_map(_one, jobs, workers)

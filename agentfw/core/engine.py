@@ -7,10 +7,10 @@ path. The engine remembers ``(envelope_id, fused)`` of the last score; that cach
 detector state (it is not in the store and never counted by ``state_bytes``).
 
 ``update(e, outcome)``: nothing moves unless the outcome is ``ALLOWED`` / ``APPROVED`` (a blocked
-or denied action never moves a baseline; two opt-in exceptions (Task 1.15): with
+or denied action never moves a baseline; two exceptions (Task 1.15): with the opt-in
 ``cal_censor="winsorize"`` a ``BLOCKED`` call the engine itself would block (fused >= threshold)
-adds that threshold to the calibrator,
-and with ``vel_count_attempts`` a refused call counts in velocity's current window -- neither
+adds that threshold to the calibrator, and with ``vel_count_attempts`` (default on by user
+decision, decision 008; off = spec) a refused call counts in velocity's current window -- neither
 moves a baseline distribution). Otherwise, in order:
 
 1. the fused score and threshold that decided ``e``: the cached ones when they are ``e``'s, else

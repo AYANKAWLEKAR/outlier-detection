@@ -7,6 +7,7 @@ import orjson
 import pytest
 
 from agentfw.bench.leaderboard import (
+    ALLOW_ALL_CAVEAT,
     ORACLE_CAVEAT,
     ORACLE_DIAGNOSTIC_CAVEAT,
     Leaderboard,
@@ -170,7 +171,11 @@ def test_oracle_diagnostic_and_other_outcomes_caveats(tmp_path: Path) -> None:
     assert cav["engine-oracle"] == [ORACLE_DIAGNOSTIC_CAVEAT]
     assert ORACLE_DIAGNOSTIC_CAVEAT == "diagnostic upper bound (reads every label) → optimistic"
     assert cav["engine-enforce"] == ["outcomes=enforce: not the spec 5.2 allow-all protocol"]
-    assert cav["engine-allow"] == []
+    # User decision (decision 008): allow-all is a clearly labelled comparison row.
+    assert cav["engine-allow"] == [ALLOW_ALL_CAVEAT] == ["spec §5.2 allow-all"]
+    assert ORACLE_CAVEAT == (
+        "oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)"
+    )
 
 
 def test_not_run_rows_listed_after_ranked_rows(tmp_path: Path) -> None:
@@ -239,7 +244,9 @@ def test_real_runs_full_and_sampled_share_one_table(tiny_dataset: Path, tmp_path
     cav = {r.name: r.caveats for r in lb.rows}
     assert any(c.startswith(f"sampled (stratified:{n_sample})") for c in cav["engine-sample"])
     assert any(c.startswith(f"sampled (stratified:{n_sample})") for c in cav["llm_judge-sample"])
-    assert cav["random"] == []
+    # Every real run records its protocol; the default is the oracle-reviewer loop.
+    assert cav["random"] == [ORACLE_CAVEAT]
+    assert all(ORACLE_CAVEAT in c for c in cav.values())
     md = render(lb)
     for name in names:
         assert f"| {name} |" in md

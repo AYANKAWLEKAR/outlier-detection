@@ -22,7 +22,7 @@ ABLATION_VARIANTS = ["engine", *(f"engine-no-{d}" for d in DETECTOR_ORDER)]
 
 @pytest.fixture(scope="module")
 def ablation(tiny_dataset: Path) -> list[AblationRow]:
-    return run_ablation(tiny_dataset, ABLATION_VARIANTS, SplitSpec())
+    return run_ablation(tiny_dataset, ABLATION_VARIANTS, SplitSpec(), outcomes="allow")
 
 
 def test_ablation_returns_one_row_per_variant_in_order(ablation: list[AblationRow]) -> None:
@@ -60,7 +60,7 @@ def test_full_engine_auprc_at_least_every_single_detector_ablation(
 
 def test_ablation_rejects_unknown_variant(tiny_dataset: Path) -> None:
     with pytest.raises(KeyError):
-        run_ablation(tiny_dataset, ["engine-no-such"], SplitSpec())
+        run_ablation(tiny_dataset, ["engine-no-such"], SplitSpec(), outcomes="allow")
 
 
 def test_grid_points_is_the_cartesian_product_in_order() -> None:
@@ -71,7 +71,7 @@ def test_grid_points_is_the_cartesian_product_in_order() -> None:
 
 def test_sweep_returns_full_cartesian_grid_and_applies_params(tiny_dataset: Path) -> None:
     grid = {"z0": [2.5, 3.5], "cal_alpha": [0.005, 0.01]}
-    rows = sweep(tiny_dataset, grid, SplitSpec())
+    rows = sweep(tiny_dataset, grid, SplitSpec(), outcomes="allow")
     assert all(isinstance(r, SweepRow) for r in rows)
     assert [r.params for r in rows] == grid_points(grid)
     for r in rows:
@@ -85,7 +85,7 @@ def test_sweep_returns_full_cartesian_grid_and_applies_params(tiny_dataset: Path
 
 def test_sweep_rejects_unknown_config_field(tiny_dataset: Path) -> None:
     with pytest.raises(ValueError, match="not_a_field"):
-        sweep(tiny_dataset, {"not_a_field": [1]}, SplitSpec())
+        sweep(tiny_dataset, {"not_a_field": [1]}, SplitSpec(), outcomes="allow")
 
 
 def test_quantile_tail_error_is_zero_for_exact() -> None:
@@ -298,8 +298,8 @@ def test_run_without_ablations_keeps_none(tiny_dataset: Path, tmp_path: Path) ->
 def test_replay_detector_passes_the_outcome_mode(tiny_dataset: Path) -> None:
     from agentfw.bench.ablation import replay_detector
 
-    allow, _ = replay_detector(tiny_dataset, "engine", SplitSpec())
-    oracle, _ = replay_detector(tiny_dataset, "engine", SplitSpec(), outcomes="oracle")
+    allow, _ = replay_detector(tiny_dataset, "engine", SplitSpec(), None, outcomes="allow")
+    oracle, _ = replay_detector(tiny_dataset, "engine", SplitSpec(), None, outcomes="oracle")
     assert [r.envelope_id for r in allow] == [r.envelope_id for r in oracle]
     # attacks never learned: later scores (and thresholds) differ from the allow-all replay
     assert [r.fused_score for r in allow] != [r.fused_score for r in oracle]
@@ -322,3 +322,52 @@ def test_gate_suite_runs_every_candidate_with_its_outcome_mode(
     md = (tmp_path / "sweeps.md").read_text()
     assert "## gate" in md and "| setting | outcomes |" in md and "ratcheting" in md
     assert "labels act as a perfect human reviewer" in md
+
+
+# --- user decision 2026-11-10 (decision 008): every bench tool states its protocol ---------------
+
+
+def test_bench_tools_require_an_explicit_protocol(tiny_dataset: Path) -> None:
+    from agentfw.bench.ablation import replay_detector
+
+    with pytest.raises(TypeError, match="outcomes"):
+        run_ablation(tiny_dataset, ["engine"], SplitSpec())  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="outcomes"):
+        sweep(tiny_dataset, {"z0": [3.0]}, SplitSpec())  # type: ignore[call-arg]
+    with pytest.raises(TypeError, match="outcomes"):
+        replay_detector(tiny_dataset, "engine", SplitSpec(), None)  # type: ignore[call-arg]
+
+
+def test_gate_candidates_pin_the_spec_switches() -> None:
+    """The 008 evidence suite keeps its meaning: "default" is the spec engine, allow-all."""
+    from agentfw.bench.sweeps import GATE_CANDIDATES, SPEC_SWITCHES
+    from agentfw.core.config import EngineConfig
+
+    assert SPEC_SWITCHES == {
+        "vel_count_attempts": False,
+        "seq_prereq_graded": False,
+        "novelty_full_n": 200,
+    }
+    by_name = {n: (p, o) for n, p, o in GATE_CANDIDATES}
+    assert by_name["default"] == (SPEC_SWITCHES, "allow")
+    assert all(set(SPEC_SWITCHES) <= set(p) for p, _ in by_name.values())
+    rec, mode = by_name["oracle-reviewer, vel attempts, graded prereq, novelty_full_n=50"]
+    assert EngineConfig().replace(**rec) == EngineConfig() and mode == "review"
+
+
+def test_sweeps_cli_records_the_protocol_of_the_grid_suites(
+    tiny_dataset: Path, tmp_path: Path
+) -> None:
+    import orjson
+
+    from agentfw.bench.sweeps import main
+
+    base = ["--traces", str(tiny_dataset), "--suites", "saturation"]
+    assert main([*base, "--out", str(tmp_path / "d")]) == 0
+    assert main([*base, "--out", str(tmp_path / "a"), "--outcomes", "allow"]) == 0
+    for d, mode in (("d", "review"), ("a", "allow")):
+        rep = orjson.loads((tmp_path / d / "sweeps.json").read_bytes())
+        assert rep["outcomes"] == mode
+        assert [e["outcomes"] for e in rep["suites"]["saturation"]] == [mode]
+    md = (tmp_path / "d" / "sweeps.md").read_text()
+    assert "labels act as a perfect human reviewer" in md.split("## ")[0]

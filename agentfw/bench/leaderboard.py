@@ -3,9 +3,11 @@
 Rows are ranked by the warm-only per-agent FPR@95% recall (the deployable number, spec 5.4)
 ascending, then AUPRC descending. A per-agent FPR is NaN when 95 % recall is unreachable; such
 rows rank last and render as ``n/a (recall X)`` with the recall that was achieved. Runs whose
-numbers are not comparable with a full allow-all online replay carry a caveat: batch fits,
-stratified samples, and non-allow replay outcomes (the oracle-reviewer loop and the label-reading
-oracle are always labelled optimistic).
+numbers are not comparable with a full online replay carry a caveat: batch fits, stratified
+samples, and the replay outcome mode (``extras.outcomes``, labels from
+``agentfw.bench.replay.PROTOCOL_LABELS``): the benchmark protocol, the oracle-reviewer loop, and
+the label-reading oracle are always labelled optimistic; spec §5.2 allow-all is labelled as the
+comparison protocol. Reports without ``extras.outcomes`` (older runs) carry no protocol caveat.
 By-time and by-agent splits are never mixed in one table (spec 5.3).
 """
 
@@ -20,7 +22,10 @@ from typing import Any
 import orjson
 from pydantic import BaseModel
 
+from agentfw.bench.replay import PROTOCOL_LABELS
+
 __all__ = [
+    "ALLOW_ALL_CAVEAT",
     "ORACLE_CAVEAT",
     "ORACLE_DIAGNOSTIC_CAVEAT",
     "Leaderboard",
@@ -30,10 +35,9 @@ __all__ = [
     "render_leaderboard",
 ]
 
-ORACLE_CAVEAT = (
-    "oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)"
-)
-ORACLE_DIAGNOSTIC_CAVEAT = "diagnostic upper bound (reads every label) → optimistic"
+ORACLE_CAVEAT = PROTOCOL_LABELS["review"]
+ORACLE_DIAGNOSTIC_CAVEAT = PROTOCOL_LABELS["oracle"]
+ALLOW_ALL_CAVEAT = PROTOCOL_LABELS["allow"]
 BATCH_CAVEAT = "batch: fit offline on the train split, not an online learner"
 
 
@@ -86,12 +90,10 @@ def _caveats(extras: Mapping[str, Any]) -> list[str]:
             "AUPRC not comparable with a full replay"
         )
     outcomes = extras.get("outcomes")
-    if outcomes == "review":
-        out.append(ORACLE_CAVEAT)
-    elif outcomes == "oracle":
-        out.append(ORACLE_DIAGNOSTIC_CAVEAT)
-    elif outcomes not in (None, "allow"):
-        out.append(f"outcomes={outcomes}: not the spec 5.2 allow-all protocol")
+    if isinstance(outcomes, str) and outcomes in PROTOCOL_LABELS:
+        out.append(PROTOCOL_LABELS[outcomes])
+    elif outcomes is not None:
+        out.append(f"outcomes={outcomes}: unknown replay protocol")
     return out
 
 
