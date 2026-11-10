@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import contextlib
 import fcntl
 import os
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import orjson
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, ConfigDict, SecretStr, field_validator
 
 ALLOWED_SMTP_HOSTS = frozenset({"localhost", "127.0.0.1", "mailhog"})
 
@@ -25,18 +24,39 @@ class BudgetExceeded(RuntimeError):
 
 
 class SandboxConfig(BaseModel):
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    # Env vars (lower-cased) that have no default; live tests skip unless all are set.
+    REQUIRED_ENV: ClassVar[tuple[str, ...]] = (
+        "llm_base_url",
+        "llm_api_key",
+        "llm_model",
+        "judge_base_url",
+        "judge_api_key",
+        "judge_model",
+        "stripe_secret_key",
+        "sf_username",
+        "sf_password",
+        "sf_security_token",
+        "slack_bot_token",
+        "slack_channel_id",
+        "llm_usd_budget",
+        "price_in_per_m",
+        "price_out_per_m",
+    )
+
     llm_base_url: str
-    llm_api_key: str
+    llm_api_key: SecretStr
     llm_model: str
     judge_base_url: str
-    judge_api_key: str
+    judge_api_key: SecretStr
     judge_model: str
-    stripe_secret_key: str
+    stripe_secret_key: SecretStr
     sf_username: str
-    sf_password: str
-    sf_security_token: str
+    sf_password: SecretStr
+    sf_security_token: SecretStr
     sf_domain: str = "login"
-    slack_bot_token: str
+    slack_bot_token: SecretStr
     slack_channel_id: str
     smtp_host: str = "localhost"
     smtp_port: int = 1025
@@ -50,8 +70,8 @@ class SandboxConfig(BaseModel):
 
     @field_validator("stripe_secret_key")
     @classmethod
-    def _stripe_test_only(cls, v: str) -> str:
-        if not v.startswith("sk_test_"):
+    def _stripe_test_only(cls, v: SecretStr) -> SecretStr:
+        if not v.get_secret_value().startswith("sk_test_"):
             raise UnsafeConfigError("stripe_secret_key must start with 'sk_test_' (test mode only)")
         return v
 
@@ -91,6 +111,23 @@ class ApiBudget:
         self._clock = clock
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _load(self) -> dict[str, float]:
+        """Read the counter file; a corrupt or wrong-shape file fails closed."""
+        try:
+            raw = orjson.loads(self.path.read_bytes())
+        except orjson.JSONDecodeError as exc:
+            raise BudgetExceeded(f"budget file {self.path} is corrupt; refusing to spend") from exc
+        ok = (
+            isinstance(raw, dict)
+            and isinstance(raw.get("window_start"), int | float)
+            and isinstance(raw.get("used"), int)
+            and not isinstance(raw.get("used"), bool)
+            and raw["used"] >= 0
+        )
+        if not ok:
+            raise BudgetExceeded(f"budget file {self.path} has an unexpected shape; refusing")
+        return {"window_start": float(raw["window_start"]), "used": raw["used"]}
+
     def _transact(self, n: int) -> int:
         """Charge `n` (0 = peek) under an exclusive lock; return the remaining budget."""
         with open(self.path.with_name(self.path.name + ".lock"), "w") as lock:
@@ -98,8 +135,7 @@ class ApiBudget:
             now = self._clock()
             state: dict[str, float] = {"window_start": now, "used": 0}
             if self.path.exists():
-                with contextlib.suppress(orjson.JSONDecodeError):
-                    state = orjson.loads(self.path.read_bytes())
+                state = self._load()
             if now - state["window_start"] >= self.window_s:
                 state = {"window_start": now, "used": 0}
             used = int(state["used"])
@@ -112,6 +148,8 @@ class ApiBudget:
             return self.limit - used
 
     def charge(self, n: int = 1) -> None:
+        if n < 1:
+            raise ValueError("charge amount must be >= 1")
         self._transact(n)
 
     def remaining(self) -> int:

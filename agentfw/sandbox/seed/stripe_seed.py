@@ -19,12 +19,12 @@ def _find(resource: Any, params: dict[str, Any], key: str) -> Any | None:
 
 def seed_stripe(cfg: SandboxConfig, company: Company, client: Any | None = None) -> dict[str, str]:
     """Return {customer key: cus_..., charge key: ch_...}. `client` is injectable for tests."""
-    if not cfg.stripe_secret_key.startswith("sk_test_"):
+    if not cfg.stripe_secret_key.get_secret_value().startswith("sk_test_"):
         raise UnsafeConfigError("refusing to seed Stripe with a non-test key")
     if client is None:
         import stripe
 
-        client = stripe.StripeClient(cfg.stripe_secret_key)
+        client = stripe.StripeClient(cfg.stripe_secret_key.get_secret_value())
 
     ids: dict[str, str] = {}
     for c in company.customers:
@@ -51,5 +51,11 @@ def seed_stripe(cfg: SandboxConfig, company: Company, client: Any | None = None)
                     "automatic_payment_methods": {"enabled": True, "allow_redirects": "never"},
                 }
             )
-        ids[ch.key] = str(pi.latest_charge)
+        charge = getattr(pi, "latest_charge", None)
+        if getattr(pi, "status", None) != "succeeded" or not charge:
+            raise RuntimeError(
+                f"seed payment {ch.key} did not succeed (status={getattr(pi, 'status', None)!r}, "
+                f"charge={charge!r}); refusing to record a charge id"
+            )
+        ids[ch.key] = str(charge)
     return ids

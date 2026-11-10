@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import ValidationError
 
 from agentfw.sandbox.config import ApiBudget, BudgetExceeded, SandboxConfig, UnsafeConfigError
 
@@ -111,7 +112,7 @@ def test_from_env_uses_process_env_by_default(monkeypatch: pytest.MonkeyPatch) -
         "PRICE_OUT_PER_M": "1",
     }.items():
         monkeypatch.setenv(k, v)
-    assert SandboxConfig.from_env().stripe_secret_key == "sk_test_x"
+    assert SandboxConfig.from_env().stripe_secret_key.get_secret_value() == "sk_test_x"
 
 
 class _Clock:
@@ -156,3 +157,47 @@ def test_budget_persists_across_instances(tmp_path: Path) -> None:
     clock = _Clock()
     ApiBudget(tmp_path / "b.json", limit=4, clock=clock).charge(3)
     assert ApiBudget(tmp_path / "b.json", limit=4, clock=clock).remaining() == 1
+
+
+def test_repr_and_errors_hide_secrets() -> None:
+    cfg = SandboxConfig(
+        **_values(
+            llm_api_key="SECRET-llm",
+            judge_api_key="SECRET-judge",
+            sf_password="SECRET-sfpw",
+            sf_security_token="SECRET-sftok",
+            slack_bot_token="SECRET-slack",
+            stripe_secret_key="sk_test_SECRET-stripe",
+        )
+    )
+    text = repr(cfg) + str(cfg)
+    assert "SECRET" not in text
+    env = {"LLM_API_KEY": "SECRET-llm", "STRIPE_SECRET_KEY": "sk_test_SECRET-stripe"}
+    with pytest.raises(ValidationError) as ei:
+        SandboxConfig.from_env(env)
+    assert "SECRET" not in str(ei.value)
+
+
+def test_budget_corrupt_file_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "b.json"
+    path.write_bytes(b"{not json")
+    with pytest.raises(BudgetExceeded):
+        ApiBudget(path, limit=5, clock=_Clock()).charge()
+    with pytest.raises(BudgetExceeded):
+        ApiBudget(path, limit=5, clock=_Clock()).remaining()
+
+
+@pytest.mark.parametrize(
+    "content", [b"[1, 2]", b'{"used": 1}', b'{"window_start": "x", "used": 1}']
+)
+def test_budget_wrong_shape_fails_closed(tmp_path: Path, content: bytes) -> None:
+    path = tmp_path / "b.json"
+    path.write_bytes(content)
+    with pytest.raises(BudgetExceeded):
+        ApiBudget(path, limit=5, clock=_Clock()).charge()
+
+
+@pytest.mark.parametrize("n", [0, -1])
+def test_budget_charge_requires_positive(tmp_path: Path, n: int) -> None:
+    with pytest.raises(ValueError):
+        ApiBudget(tmp_path / "b.json", limit=5, clock=_Clock()).charge(n)

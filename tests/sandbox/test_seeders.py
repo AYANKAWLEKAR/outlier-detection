@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from pydantic import SecretStr
 
 from agentfw.sandbox.config import ApiBudget, BudgetExceeded, SandboxConfig, UnsafeConfigError
 from agentfw.sandbox.seed.company import build_company
@@ -46,6 +47,7 @@ class _Resource:
     def __init__(self, prefix: str, store: list[dict[str, Any]]) -> None:
         self.prefix = prefix
         self.store = store
+        self.status = "succeeded"
         self.creates: list[dict[str, Any]] = []
 
     def list(self, params: dict[str, Any] | None = None) -> _Page:
@@ -62,6 +64,7 @@ class _Resource:
         obj["id"] = f"{self.prefix}_{len(self.store):04d}"
         if self.prefix == "pi":
             obj["latest_charge"] = f"ch_{len(self.store):04d}"
+            obj["status"] = self.status
         self.store.append(obj)
         self.creates.append(params)
         return SimpleNamespace(**obj)
@@ -90,8 +93,29 @@ def test_stripe_seed_idempotent_and_params(tmp_path: Path) -> None:
         assert p["metadata"]["afw_seed_key"]
 
 
+def test_stripe_seed_fails_on_unsucceeded_payment(tmp_path: Path) -> None:
+    api = _FakeStripe()
+    api.payment_intents.status = "requires_action"
+    with pytest.raises(RuntimeError, match="requires_action"):
+        seed_stripe(_cfg(tmp_path), build_company(0), client=api)
+
+
+def test_stripe_seed_fails_on_missing_charge(tmp_path: Path) -> None:
+    api = _FakeStripe()
+    orig = api.payment_intents.create
+
+    def create(params: dict[str, Any]) -> Any:
+        pi = orig(params)
+        pi.latest_charge = None
+        return pi
+
+    api.payment_intents.create = create  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="charge"):
+        seed_stripe(_cfg(tmp_path), build_company(0), client=api)
+
+
 def test_stripe_seed_refuses_unsafe_key(tmp_path: Path) -> None:
-    cfg = _cfg(tmp_path).model_copy(update={"stripe_secret_key": "sk_live_zzz"})
+    cfg = _cfg(tmp_path).model_copy(update={"stripe_secret_key": SecretStr("sk_live_zzz")})
     with pytest.raises(UnsafeConfigError):
         seed_stripe(cfg, build_company(0), client=_FakeStripe())
 
@@ -119,8 +143,10 @@ class _FakeSF:
 
     def query_all(self, soql: str) -> dict[str, Any]:
         self.queries += 1
+        where = soql.split(" WHERE ")[1] if " WHERE " in soql else ""
+        assert "Description" not in where, "Description (long text) is not filterable in SOQL"
         kind = soql.split(" FROM ")[1].split()[0]
-        return {"records": [r for r in self.records[kind] if "afw-seed:" in r["Description"]]}
+        return {"records": list(self.records[kind])}
 
 
 def test_salesforce_seed_idempotent(tmp_path: Path) -> None:
@@ -156,3 +182,15 @@ def test_zendesk_seed(tmp_path: Path) -> None:
     )
     assert len(rows) == len(company.tickets) > 0
     assert all(r[1].startswith("ch_") and r[2].endswith((".example", ".test")) for r in rows)
+
+
+def test_salesforce_seed_ignores_foreign_records(tmp_path: Path) -> None:
+    sf = _FakeSF()
+    sf.records["Account"] += [
+        {"Id": "foreign1", "Description": None},
+        {"Id": "foreign2", "Description": "someone else's"},
+    ]
+    budget = ApiBudget(tmp_path / "b.json", limit=100_000)
+    ids = seed_salesforce(_cfg(tmp_path), build_company(0), budget, client=sf)
+    assert "foreign1" not in ids.values() and "foreign2" not in ids.values()
+    assert len(sf.records["Account"]) == 2 + len(build_company(0).accounts)

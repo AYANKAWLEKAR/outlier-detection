@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
 from typing import Any
 
 from agentfw.sandbox.config import ApiBudget, SandboxConfig
@@ -12,15 +13,18 @@ _REFERENCE_DATE = (2026, 1, 1)
 
 
 def _close_date(days: int) -> str:
-    from datetime import date, timedelta
-
     return (date(*_REFERENCE_DATE) + timedelta(days=days)).isoformat()
 
 
 def _existing(sf: Any, kind: str, budget: ApiBudget) -> dict[str, str]:
     budget.charge(1)
-    res = sf.query_all(f"SELECT Id, Description FROM {kind} WHERE Description LIKE '{PREFIX}%'")
-    return {r["Description"][len(PREFIX) :]: r["Id"] for r in res["records"]}
+    # Description is a Long Text Area: not filterable in SOQL, so filter the prefix here.
+    res = sf.query_all(f"SELECT Id, Description FROM {kind}")
+    return {
+        r["Description"][len(PREFIX) :]: r["Id"]
+        for r in res["records"]
+        if (r.get("Description") or "").startswith(PREFIX)
+    }
 
 
 def _create(
@@ -44,8 +48,8 @@ def seed_salesforce(
 
         sf = Salesforce(
             username=cfg.sf_username,
-            password=cfg.sf_password,
-            security_token=cfg.sf_security_token,
+            password=cfg.sf_password.get_secret_value(),
+            security_token=cfg.sf_security_token.get_secret_value(),
             domain=cfg.sf_domain,
         )
     ids: dict[str, str] = {}

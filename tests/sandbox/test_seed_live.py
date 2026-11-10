@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
 
 import pytest
 
@@ -15,22 +14,23 @@ from agentfw.sandbox.seed.stripe_seed import seed_stripe
 pytestmark = pytest.mark.live
 
 
-def _cfg(*names: str) -> SandboxConfig:
-    if any(n not in os.environ for n in names):
-        pytest.skip(f"missing env: {names}")
+def _cfg() -> SandboxConfig:
+    missing = [n.upper() for n in SandboxConfig.REQUIRED_ENV if n.upper() not in os.environ]
+    if missing:
+        pytest.skip(f"missing env: {missing}")
     return SandboxConfig.from_env()
 
 
 def test_stripe_seed_twice_no_duplicates() -> None:
-    cfg = _cfg("STRIPE_SECRET_KEY", "LLM_BASE_URL")
+    cfg = _cfg()
     company = build_company(0)
     first = seed_stripe(cfg, company)
     second = seed_stripe(cfg, company)
     assert first == second
 
 
-def test_salesforce_seed_twice_no_duplicates(tmp_path: Path) -> None:
-    cfg = _cfg("SF_USERNAME", "SF_PASSWORD", "SF_SECURITY_TOKEN", "STRIPE_SECRET_KEY")
+def test_salesforce_seed_twice_no_duplicates() -> None:
+    cfg = _cfg()
     company = build_company(0)
-    budget = ApiBudget(tmp_path / "b.json", cfg.sf_daily_api_budget)
+    budget = ApiBudget(cfg.data_dir / "sf_budget.json", cfg.sf_daily_api_budget)
     assert seed_salesforce(cfg, company, budget) == seed_salesforce(cfg, company, budget)
