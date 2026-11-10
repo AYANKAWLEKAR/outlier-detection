@@ -47,6 +47,9 @@ uv run python -m agentfw.bench.run --traces dataset/v1 --detector llm_judge --ju
   --sample stratified:2000 --out results/v1/llm_judge-sample
 uv run python -m agentfw.bench.leaderboard --label "sandbox dataset v1" \
   --out docs/leaderboard-v1.md results/v1/*/report.json
+# by-agent split: a separate table, never merged with by-time
+uv run python -m agentfw.bench.leaderboard --label "sandbox dataset v1" \
+  --out docs/leaderboard-v1-agent.md results/v1-agent/*/report.json
 uv run pytest -m slow tests/acceptance/test_tier2_exit.py   # skips while dataset/v1 is absent
 ```
 

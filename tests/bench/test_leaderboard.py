@@ -6,7 +6,12 @@ from typing import Any
 import orjson
 import pytest
 
-from agentfw.bench.leaderboard import ORACLE_CAVEAT, Leaderboard, build_leaderboard
+from agentfw.bench.leaderboard import (
+    ORACLE_CAVEAT,
+    ORACLE_DIAGNOSTIC_CAVEAT,
+    Leaderboard,
+    build_leaderboard,
+)
 from agentfw.bench.leaderboard import render_leaderboard as render
 from agentfw.bench.replay import SplitSpec
 from agentfw.bench.run import run
@@ -155,6 +160,19 @@ def test_sampled_batch_and_oracle_caveats_rendered(tmp_path: Path) -> None:
     assert ORACLE_CAVEAT in md
 
 
+def test_oracle_diagnostic_and_other_outcomes_caveats(tmp_path: Path) -> None:
+    paths = [
+        _report(tmp_path, "engine-oracle", extras={"outcomes": "oracle"}),
+        _report(tmp_path, "engine-enforce", extras={"outcomes": "enforce"}),
+        _report(tmp_path, "engine-allow", extras={"outcomes": "allow"}),
+    ]
+    cav = {r.name: r.caveats for r in build_leaderboard(paths).rows}
+    assert cav["engine-oracle"] == [ORACLE_DIAGNOSTIC_CAVEAT]
+    assert ORACLE_DIAGNOSTIC_CAVEAT == "diagnostic upper bound (reads every label) → optimistic"
+    assert cav["engine-enforce"] == ["outcomes=enforce: not the spec 5.2 allow-all protocol"]
+    assert cav["engine-allow"] == []
+
+
 def test_not_run_rows_listed_after_ranked_rows(tmp_path: Path) -> None:
     lb = build_leaderboard(
         [_report(tmp_path, "engine")], not_run={"llm_judge": "requires a live judge model"}
@@ -244,3 +262,14 @@ def test_cli_refuses_mixed_datasets(tmp_path: Path) -> None:
     a, b = _report(tmp_path, "engine"), _report(tmp_path, "random", sha="c" * 64)
     with pytest.raises(SystemExit, match="dataset_sha"):
         main(["--out", str(tmp_path / "x.md"), str(a), str(b)])
+
+
+def test_cli_rejects_malformed_not_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from agentfw.bench.leaderboard import main
+
+    a = _report(tmp_path, "engine")
+    with pytest.raises(SystemExit) as exc:
+        main(["--out", str(tmp_path / "x.md"), "--not-run", "llm_judge", str(a)])
+    assert exc.value.code == 2  # argparse usage error
+    assert "NAME=REASON" in capsys.readouterr().err
+    assert not (tmp_path / "x.md").exists()

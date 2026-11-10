@@ -8,7 +8,8 @@ table) by agent, with the spec's default protocol (allow-all replay, default eng
     uv run python scripts/build_leaderboard.py [--traces traces/sw1-seed0] [--reuse] [--jobs 4]
 
 Runs land in ``results/synth-v1/<split>/<detector>/`` (gitignored); the rendered tables go to
-``docs/leaderboard.md``. ``--reuse`` keeps a run whose report already matches the dataset.
+``docs/leaderboard.md``. ``--reuse`` keeps a run whose report already matches the dataset, split,
+detector and n_boot; it trusts outputs from older code (no git_sha check).
 """
 
 from __future__ import annotations
@@ -59,12 +60,19 @@ def _job(traces: Path, det: str, split: str, out: Path, n_boot: int) -> str:
     return f"{split}/{det}: {time.time() - t0:.0f} s"
 
 
-def _fresh(out: Path, sha: str, n_boot: int) -> bool:
+def _fresh(out: Path, sha: str, n_boot: int, split: str, det: str) -> bool:
+    """An existing report for this dataset, split, detector and n_boot (code version unchecked)."""
     p = out / "report.json"
     if not p.exists():
         return False
     rep = orjson.loads(p.read_bytes())
-    return bool(rep["meta"]["dataset_sha"] == sha and rep["extras"].get("n_boot") == n_boot)
+    meta = rep["meta"]
+    return bool(
+        meta["dataset_sha"] == sha
+        and meta["split"]["kind"] == split
+        and meta["detector"] == det
+        and rep["extras"].get("n_boot") == n_boot
+    )
 
 
 def _doc(sections: list[str], sha: str) -> str:
@@ -101,14 +109,19 @@ def main() -> None:
     p.add_argument("--out", type=Path, default=Path("docs/leaderboard.md"))
     p.add_argument("--n-boot", type=int, default=BOOTSTRAP_N)
     p.add_argument("--jobs", type=int, default=4)
-    p.add_argument("--reuse", action="store_true")
+    p.add_argument(
+        "--reuse",
+        action="store_true",
+        help="keep a run whose report matches the dataset sha, split, detector and n_boot; it "
+        "trusts outputs from older code (there is no git_sha check)",
+    )
     a = p.parse_args()
     sha = _dataset(a.traces)
     todo = [
         (a.traces, det, split, a.results / split / det, a.n_boot)
         for split in SPLITS
         for det in DETECTORS
-        if not (a.reuse and _fresh(a.results / split / det, sha, a.n_boot))
+        if not (a.reuse and _fresh(a.results / split / det, sha, a.n_boot, split, det))
     ]
     with ProcessPoolExecutor(max_workers=a.jobs) as ex:
         for msg in ex.map(_job, *zip(*todo, strict=True)) if todo else []:

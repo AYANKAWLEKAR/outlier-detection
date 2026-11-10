@@ -108,7 +108,7 @@ test split, spec protocol. Warm test rows; 95 % CIs from 1,000 session-bootstrap
 
 How to read these numbers:
 
-- **The engine ranks attacks far better than the baselines** (AUPRC 0.58 against 0.04–0.05 by
+- **The engine ranks attacks far better than the baselines** (AUPRC 0.58 against 0.040–0.055 by
   time; prevalence is 3.9 % of warm test envelopes, which is roughly what random scores).
   The baselines' AUPRCs (0.036–0.057 across both splits, random included) have overlapping CIs:
   `static_threshold` and `isolation_forest` barely beat random. The
@@ -199,9 +199,17 @@ calls. With three opt-in engine switches (`vel_count_attempts`, `seq_prereq_grad
 
 Even this optimistic candidate fails the gate (magnitude_spike 0.69 / 0.75, velocity_burst 0.88 on
 seed 0), and the targeted detector is the *top* reason in only 0.30 / 0.22 of detected velocity
-bursts and 0.58 / 0.64 of exfil attacks (it is *among* the reasons in 0.89–1.00). Label-free
-alternatives (enforce, censoring the calibrator) ratchet thresholds down and raise benign FPR to
-13–53 % (decision 008, "The censoring ratchet").
+bursts and 0.58 / 0.64 of exfil attacks (it is *among* the reasons in 0.89–1.00).
+
+The label-free alternatives do not fix it either (decision 008, "The censoring ratchet"; seed 0 /
+seed 1):
+
+- `enforce` and `drop` truncate the calibrator's input at θ, so θ ratchets down (median end
+  0.33–0.44) and benign FPR is 36.7 / 52.7 % and 37.6 / 31.9 %.
+- `winsorize` freezes θ at θ0 = 0.600, with benign FPR 13.5 / 13.5 %.
+- `winsorize` after 500 scores (shadow first) starts from the saturated allow-all θ: benign FPR
+  is 5.2 / 5.3 %, but min recall is 0.69 / 0.69 and 5–6 agents stay saturated. Adding `enforce`
+  to it raises benign FPR to 31.1 / 31.2 %.
 
 ## 7. Failure cases
 

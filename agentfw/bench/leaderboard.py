@@ -4,8 +4,8 @@ Rows are ranked by the warm-only per-agent FPR@95% recall (the deployable number
 ascending, then AUPRC descending. A per-agent FPR is NaN when 95 % recall is unreachable; such
 rows rank last and render as ``n/a (recall X)`` with the recall that was achieved. Runs whose
 numbers are not comparable with a full allow-all online replay carry a caveat: batch fits,
-stratified samples, and non-allow replay outcomes (the oracle-reviewer loop is always labelled
-optimistic).
+stratified samples, and non-allow replay outcomes (the oracle-reviewer loop and the label-reading
+oracle are always labelled optimistic).
 By-time and by-agent splits are never mixed in one table (spec 5.3).
 """
 
@@ -22,6 +22,7 @@ from pydantic import BaseModel
 
 __all__ = [
     "ORACLE_CAVEAT",
+    "ORACLE_DIAGNOSTIC_CAVEAT",
     "Leaderboard",
     "LeaderboardRow",
     "build_leaderboard",
@@ -32,6 +33,7 @@ __all__ = [
 ORACLE_CAVEAT = (
     "oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)"
 )
+ORACLE_DIAGNOSTIC_CAVEAT = "diagnostic upper bound (reads every label) → optimistic"
 BATCH_CAVEAT = "batch: fit offline on the train split, not an online learner"
 
 
@@ -86,6 +88,8 @@ def _caveats(extras: Mapping[str, Any]) -> list[str]:
     outcomes = extras.get("outcomes")
     if outcomes == "review":
         out.append(ORACLE_CAVEAT)
+    elif outcomes == "oracle":
+        out.append(ORACLE_DIAGNOSTIC_CAVEAT)
     elif outcomes not in (None, "allow"):
         out.append(f"outcomes={outcomes}: not the spec 5.2 allow-all protocol")
     return out
@@ -247,7 +251,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="a detector listed as not run, e.g. 'llm_judge=requires a live judge model'",
     )
     a = p.parse_args(argv)
-    not_run = dict(s.split("=", 1) for s in a.not_run)
+    not_run: dict[str, str] = {}
+    for item in a.not_run:
+        name, sep, reason = item.partition("=")
+        if not (sep and name and reason):
+            p.error(f"--not-run expects NAME=REASON, got {item!r}")
+        not_run[name] = reason
     try:
         lb = build_leaderboard(a.reports, label=a.label, not_run=not_run)
     except ValueError as e:
