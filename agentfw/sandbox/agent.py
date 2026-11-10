@@ -9,7 +9,8 @@ message carrying its ``tool_call_id``. Failures go back to the model, they never
 * an unknown function name -> ``ERROR: unknown tool ...``; the tool is not called;
 * an exception raised by the MCP call -> ``ERROR: <type>: <message>``.
 
-An exception from the LLM ends the session with ``stopped="error"``. After ``max_steps`` steps
+An exception from the LLM ends the session with ``stopped="error"`` (and ``Transcript.error``);
+the runner records such a session as ``failed``. After ``max_steps`` steps
 without a final answer the session ends with ``stopped="max_steps"``.
 """
 
@@ -49,6 +50,7 @@ class Transcript:
     steps: int = 0
     stopped: Literal["final", "max_steps", "error"] = "final"
     usage: Usage = field(default_factory=lambda: Usage(0, 0))
+    error: str | None = None  # ``stopped="error"``: the LLM failure, ``Type: message``
 
 
 def _result_text(res: CallToolResult) -> str:
@@ -118,9 +120,10 @@ async def run_session(
     while tr.steps < max_steps:
         try:
             turn = await llm.complete(tr.messages, tools)
-        except Exception:  # boundary: provider failure ends the session, the caller keeps the log
+        except Exception as exc:  # boundary: provider failure ends the session, caller decides
             logger.exception("LLM call failed at step %d", tr.steps)
             tr.stopped = "error"
+            tr.error = f"LLM call failed at step {tr.steps}: {type(exc).__name__}: {exc}"
             return tr
         tr.steps += 1
         tr.usage.prompt_tokens += turn.usage.prompt_tokens

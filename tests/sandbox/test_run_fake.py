@@ -467,3 +467,62 @@ async def test_sf_budget_hit_mid_session_marks_it_truncated(
     # truncated sessions are terminal: a resume does not re-run their (already executed) actions
     again = await execute(plans[:1], cfg, tmp_path / "run", backends="fake", sf_budget=budget)
     assert (again.truncated, again.completed) == (1, 0)
+
+
+class _FailingLlm:
+    """An LLM whose every call after the first ``after`` turns raises an ordinary Exception."""
+
+    def __init__(self, inner: ScriptedChatClient | None = None, after: int = 0) -> None:
+        self.inner, self.after, self.n = inner, after, 0
+
+    async def complete(
+        self, messages: list[dict[str, object]], tools: list[dict[str, object]]
+    ) -> ChatTurn:
+        self.n += 1
+        if self.inner is None or self.n > self.after:
+            raise RuntimeError("provider unavailable")
+        return await self.inner.complete(messages, tools)
+
+
+async def test_llm_error_session_is_failed_not_completed(tmp_path: Path) -> None:
+    plans = plan_sessions(AGENTS, TEMPLATES, 3, AttackMix(action_rate=1.0, prompt_rate=0), 0)
+    assert all(p.injection is not None for p in plans)
+    cfg = fake_config(data_dir=tmp_path / "data", max_concurrency=1)
+    out = tmp_path / "run"
+    summary = await execute(plans, cfg, out, backends="fake", llm=_FailingLlm())
+    assert (summary.completed, summary.failed, summary.attacks_attempted) == (0, 3, 0)
+    rows = _ledger(out)
+    assert {r["status"] for r in rows.values()} == {"failed"}
+    assert all("LLM" in r["error"] for r in rows.values())
+    for p in plans:
+        assert not (out / "raw" / f"{p.session_id}.jsonl").exists()
+        assert not (out / ".work" / p.session_id).exists()
+    # failed sessions are retried on the next run
+    summary = await execute(plans, cfg, out, backends="fake")
+    assert (summary.completed, summary.failed, summary.resumed) == (3, 0, 0)
+
+
+async def test_llm_error_mid_session_discards_partial_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentfw.sandbox.package import package
+
+    plans = plan_sessions(AGENTS, TEMPLATES, 3, AttackMix(action_rate=0, prompt_rate=0), 0)
+    cfg = fake_config(data_dir=tmp_path / "data", max_concurrency=1)
+    out = tmp_path / "run"
+    real = run_mod.scripted_client
+    bad = plans[1].session_id
+
+    def factory(prepared: Any) -> Any:
+        client = real(prepared)
+        return _FailingLlm(client, after=2) if prepared.plan.session_id == bad else client
+
+    monkeypatch.setattr(run_mod, "scripted_client", factory)
+    summary = await execute(plans, cfg, out, backends="fake")
+    assert (summary.completed, summary.failed) == (2, 1)
+    assert _ledger(out)[bad]["status"] == "failed"
+    assert not (out / "raw" / f"{bad}.jsonl").exists()
+    assert not (out / ".work" / bad).exists()
+    manifest = package([out], tmp_path / "dataset")
+    assert manifest.counts.sessions == 2
+    assert manifest.source_runs[0]["excluded"] == {"failed": 1}

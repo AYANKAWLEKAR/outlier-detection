@@ -21,7 +21,9 @@ ones remain; a ticket and its charge count as one record). Each session then
    proxy's action labels, post-hoc prompt labels, ``benign`` otherwise) and
    ``transcripts/<session>.json``, and only then appends its ``ledger.jsonl`` line.
 
-**Ledger statuses**: ``completed``; ``failed`` (the session raised; retried on the next run);
+**Ledger statuses**: ``completed``; ``failed`` (the session raised, or its LLM call failed and
+the transcript stopped with ``"error"``; retried on the next run, its partial work discarded and
+its injection never counted as attempted);
 ``budget_truncated`` (the Salesforce budget ran out mid-session: terminal, because its actions
 already happened, and to be excluded from packaging). A crash mid-session leaves no line, so the
 session re-runs from scratch (its work dir is replaced); a line torn by a crash mid-append is cut
@@ -149,6 +151,10 @@ _MUTABLE_KINDS = frozenset(
 _JSONL = orjson.OPT_SORT_KEYS
 StopReason = Literal["llm_usd_budget", "sf_api_budget"]
 Status = Literal["completed", "failed", "budget_truncated"]
+
+
+class SessionLlmError(RuntimeError):
+    """The agent's LLM call failed mid-session: the session is ``failed`` (retried next run)."""
 
 
 class RunSummary(BaseModel):
@@ -552,6 +558,8 @@ class _Runner:
                     max_steps=prep.rendered.max_steps,
                     meter=session_meter,
                 )
+                if transcript.stopped == "error":  # nothing below may count it as completed
+                    raise SessionLlmError(transcript.error or "LLM call failed")
             total, failed = await anyio.to_thread.run_sync(_evaluate, prep.rendered, checks_ctx)
             raws = _read_jsonl(work / CALLS, RawCall.model_validate_json)
             attacks = _read_jsonl(work / LABELS, Label.model_validate_json)

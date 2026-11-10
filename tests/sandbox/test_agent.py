@@ -184,6 +184,7 @@ async def test_llm_exception_stops_with_error() -> None:
     async with agent_session() as (client, _sink, _spies):
         t = await run_session(Boom(), client, "s", "t")
     assert t.stopped == "error"
+    assert t.error == "LLM call failed at step 0: RuntimeError: provider down"
 
 
 async def test_meter_accumulates_usd_and_usage() -> None:
