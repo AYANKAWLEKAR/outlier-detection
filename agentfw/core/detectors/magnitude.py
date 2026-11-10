@@ -29,14 +29,21 @@ from __future__ import annotations
 
 import math
 import re
-import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, ClassVar, Literal, Self
 
 from agentfw.core.config import EngineConfig
-from agentfw.core.detectors.base import PriorSource, iter_fields, signed_log1p, squash
+from agentfw.core.detectors.base import (
+    IQR_TO_SIGMA,
+    PriorSource,
+    clamp_finite,
+    iter_fields,
+    signed_expm1,
+    signed_log1p,
+    squash,
+)
 from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType, Scalar
 from agentfw.core.hints import ToolHint
 from agentfw.core.patterns import try_number
@@ -53,8 +60,6 @@ NAME = "magnitude"
 
 _UP_NAME = re.compile(r"(?i)(^|_)(amount|count|qty|total|len|strlen)")
 _UP_HINTS = frozenset({"money", "count"})
-_IQR_TO_SIGMA = 1.349
-_MAX = sys.float_info.max
 
 
 def direction_for(path: str, hints: Mapping[str, str]) -> Direction:
@@ -64,18 +69,6 @@ def direction_for(path: str, hints: Mapping[str, str]) -> Direction:
     if hints.get(path) in _UP_HINTS:
         return "up"
     return "up" if _UP_NAME.search(path.rsplit(".", 1)[-1]) else "both"
-
-
-def _unlog(y: float) -> float:
-    """Inverse of ``signed_log1p``, clamped to finite floats."""
-    try:
-        return math.copysign(math.expm1(abs(y)), y)
-    except OverflowError:
-        return math.copysign(_MAX, y)
-
-
-def _clamp(v: float) -> float:
-    return max(-_MAX, min(_MAX, v))
 
 
 @register_record
@@ -194,15 +187,15 @@ class MagnitudeDetector:
         cfg = self._cfg
         y = signed_log1p(x)
         q25, q50, q75 = rec.q.quantile(0.25), rec.q.quantile(0.5), rec.q.quantile(0.75)
-        scale = max((q75 - q25) / _IQR_TO_SIGMA * ref.inflate, cfg.mag_eps)
+        scale = max((q75 - q25) / IQR_TO_SIGMA * ref.inflate, cfg.mag_eps)
         z = (y - q50) / scale
         z = max(z, 0.0) if ref.direction == "up" else abs(z)
         return squash(z, cfg.z0, cfg.tau), {
             "observed": x,
             "z": z,
             "percentile": rec.q.percentile_of(y),
-            "median_raw": _unlog(q50),
-            "iqr_raw": _clamp(_unlog(q75) - _unlog(q25)),
+            "median_raw": signed_expm1(q50),
+            "iqr_raw": clamp_finite(signed_expm1(q75) - signed_expm1(q25)),
             **self._base_evidence(ref),
         }
 

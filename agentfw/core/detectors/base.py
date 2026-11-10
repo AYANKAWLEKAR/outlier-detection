@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import sys
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Protocol
 
@@ -13,7 +14,19 @@ if TYPE_CHECKING:
     from agentfw.core.detectors.magnitude import MagRecord
     from agentfw.core.detectors.novelty import NoveltyRecord
 
-__all__ = ["PriorSource", "SubDetector", "iter_fields", "signed_log1p", "squash"]
+__all__ = [
+    "IQR_TO_SIGMA",
+    "PriorSource",
+    "SubDetector",
+    "clamp_finite",
+    "iter_fields",
+    "signed_expm1",
+    "signed_log1p",
+    "squash",
+]
+
+IQR_TO_SIGMA = 1.349  # IQR of a standard normal: robust scale = IQR / 1.349
+_MAX = sys.float_info.max
 
 
 class SubDetector(Protocol):
@@ -48,6 +61,19 @@ def squash(z: float, z0: float, tau: float) -> float:
 def signed_log1p(x: float) -> float:
     """``sign(x) * log1p(|x|)``."""
     return math.copysign(math.log1p(abs(x)), x)
+
+
+def signed_expm1(y: float) -> float:
+    """Inverse of ``signed_log1p``, saturating at ``±float max`` instead of overflowing."""
+    try:
+        return math.copysign(math.expm1(abs(y)), y)
+    except OverflowError:
+        return math.copysign(_MAX, y)
+
+
+def clamp_finite(v: float) -> float:
+    """Clamp ``v`` into ``[-float max, float max]`` (maps ``±inf`` to the extremes)."""
+    return max(-_MAX, min(_MAX, v))
 
 
 def iter_fields(e: ActionEnvelope) -> Iterator[tuple[str, tuple[Scalar, ...]]]:

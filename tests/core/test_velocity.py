@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,7 @@ import orjson
 import pytest
 
 from agentfw.core.config import EngineConfig
-from agentfw.core.detectors.velocity import VelocityDetector, VelocityRecord
+from agentfw.core.detectors.velocity import VelocityDetector, VelocityRecord, _roll
 from agentfw.core.envelope import ActionEnvelope, DetectorScore
 from agentfw.core.hints import ToolHint
 from agentfw.core.schema_infer import TypeInference, TypeView
@@ -52,6 +53,11 @@ def record(det: VelocityDetector, path: str | None = None) -> VelocityRecord:
     rec = det._store.get(key_vel(AGENT, TOOL, path))
     assert isinstance(rec, VelocityRecord)
     return rec
+
+
+def hist_n(rec: VelocityRecord) -> int:
+    assert rec.hist_count is not None
+    return rec.hist_count.n
 
 
 def snapshot(det: VelocityDetector) -> bytes:
@@ -124,6 +130,22 @@ def test_burst_of_median_sized_refunds_is_caught(
     assert scores[-1].score > 0.95
 
 
+def test_count_signal_alone_catches_burst_after_three_days() -> None:
+    """A tool with no money field: the burst must be caught by the count signal alone."""
+    e = env(T0, {"customer": "cus_1"})
+    det = new_det()
+    last = 0
+    for last in cadence(T0, 3 * 24 * 60, 5):  # 864 calls
+        step(det, at(e, last))
+    assert det._store.get(key_vel(AGENT, TOOL, "customer")) is None
+    burst = [step(det, at(e, last + 2 * MIN + i * 3_000)) for i in range(40)]
+    s15 = burst[14]
+    assert s15.score > 0.95
+    assert s15.field is None
+    assert s15.evidence["signal"] == "count"
+    assert s15.evidence["baseline_median"] == pytest.approx(2.0, abs=0.5)
+
+
 # -- count vs. sum signal ------------------------------------------------------------------------
 
 
@@ -183,12 +205,12 @@ def test_idle_gap_adds_at_most_window_plus_one_samples() -> None:
     det = new_det()
     last = _warm(det)
     rec = record(det)
-    n_before = rec.hist_count.n
+    n_before = hist_n(rec)
     e = env(last + 12 * 60 * MIN)
     [s] = det.score(e, TYPES)
     assert s.evidence["window_count"] == 1  # window fully drained by the gap
     det.update(e, TYPES)
-    added = rec.hist_count.n - n_before
+    added = hist_n(rec) - n_before
     assert 1 <= added <= CFG.vel_short_min + 1
 
 
@@ -196,10 +218,10 @@ def test_century_gap_is_constant_time_and_prunes_long() -> None:
     det = new_det()
     last = _warm(det)
     rec = record(det)
-    n_before = rec.hist_count.n
+    n_before = hist_n(rec)
     later = last + 100 * 365 * 24 * 60 * MIN  # ~52M minutes; a per-minute loop would hang
     det.update(env(later), TYPES)
-    assert rec.hist_count.n - n_before <= CFG.vel_short_min + 1
+    assert hist_n(rec) - n_before <= CFG.vel_short_min + 1
     assert rec.last_minute == later // MIN
     assert list(rec.long) == [later // MIN]
 
@@ -240,7 +262,7 @@ def test_score_matches_post_advance_state() -> None:
     det.update(probe, TYPES)  # commits the same advance (+ this call)
     rec = record(det)
     assert virtual.evidence["window_count"] == sum(c for c, _ in rec.short)
-    assert virtual.evidence["n_hist"] == rec.hist_count.n
+    assert virtual.evidence["n_hist"] == hist_n(rec)
 
 
 # -- money keys ----------------------------------------------------------------------------------
@@ -327,4 +349,73 @@ def test_from_dict_rejects_inconsistent_state() -> None:
     det.update(env(T0), TYPES)
     d = record(det).to_dict()
     with pytest.raises(ValueError):
-        VelocityRecord.from_dict({**d, "short": []})
+        VelocityRecord.from_dict({**d, "short_count": []})
+
+
+def test_unused_history_and_sums_are_not_kept() -> None:
+    det = new_det()
+    det.update(env(T0, {"amount": 12.5}), TYPES)
+    count_rec, money_rec = record(det), record(det, "amount")
+    assert count_rec.hist_count is not None and count_rec.hist_sum is None
+    assert money_rec.hist_count is None and money_rec.hist_sum is not None
+    cd, md = count_rec.to_dict(), money_rec.to_dict()
+    assert "short_sum" not in cd and "long_sum" not in cd
+    assert "short_sum" in md and "long_sum" in md
+    for rec, d in ((count_rec, cd), (money_rec, md)):
+        assert VelocityRecord.from_dict(orjson.loads(orjson.dumps(d))).to_dict() == d
+        assert rec == VelocityRecord.from_dict(d)
+
+
+def test_from_dict_requires_exactly_one_history() -> None:
+    det = new_det()
+    det.update(env(T0, {"amount": 12.5}), TYPES)
+    cd, md = record(det).to_dict(), record(det, "amount").to_dict()
+    with pytest.raises(ValueError):
+        VelocityRecord.from_dict({**cd, "hist_sum": md["hist_sum"]})
+    with pytest.raises(ValueError):
+        VelocityRecord.from_dict({**md, "hist_sum": None})
+
+
+def test_nonpositive_long_window_does_not_raise() -> None:
+    det = VelocityDetector(DictStore(), CFG.replace(vel_long_min=0))
+    for i in range(3):
+        det.update(env(T0 + i * MIN), TYPES)
+    assert len(record(det).long) <= 1
+
+
+def _roll_reference(ring: list[tuple[int, float]], last: int, to: int) -> list[tuple[int, float]]:
+    """Brute force: recompute the window total from scratch at every step."""
+    w, out, m = len(ring), [], last
+    while m < to and sum(c for c, _ in ring) > 0:
+        total = sum(s for _, s in ring)
+        out.append(
+            (sum(c for c, _ in ring), max(-sys.float_info.max, min(sys.float_info.max, total)))
+        )
+        m += 1
+        ring[m % w] = (0, 0.0)
+    return out
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_roll_running_total_matches_recompute(seed: int) -> None:
+    rng = np.random.default_rng(seed)
+    w = CFG.vel_short_min
+    ring = [
+        (int(c), round(float(rng.uniform(1, 500)) * int(c), 2)) if c else (0, 0.0)
+        for c in rng.integers(0, 4, w)
+    ]
+    if seed == 0:  # overflowing buckets must not leave a stale infinite running total
+        ring[3], ring[4] = (1, sys.float_info.max), (1, sys.float_info.max)
+    last = int(rng.integers(1_000, 2_000))
+    to = last + int(rng.integers(0, 2 * w))
+    expected = _roll_reference(list(ring), last, to)
+    got_ring = list(ring)
+    samples, (cnt, total) = _roll(got_ring, last, to, with_sum=True)
+    assert [c for c, _ in samples] == [c for c, _ in expected]
+    for (_, a), (_, b) in zip(samples, expected, strict=True):
+        assert a == pytest.approx(b, rel=1e-9, abs=1e-6)
+    assert cnt == sum(c for c, _ in got_ring)
+    assert total == pytest.approx(min(sum(s for _, s in got_ring), sys.float_info.max), abs=1e-6)
+    count_only, (cnt2, total2) = _roll(list(ring), last, to, with_sum=False)
+    assert [c for c, _ in count_only] == [c for c, _ in expected] and total2 == 0.0
+    assert cnt2 == cnt
