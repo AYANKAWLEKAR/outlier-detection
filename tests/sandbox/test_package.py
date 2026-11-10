@@ -472,3 +472,29 @@ def test_card_has_limitations_and_fake_banner(tmp_path: Path) -> None:
     both = package([fake, live], tmp_path / "o_both")
     assert [r["mode"] for r in both.source_runs] == ["fake", "live"]
     assert "FAKE" in (tmp_path / "o_both" / "DATASET_CARD.md").read_text()
+
+
+# -- findings never echo the secret (FR I5) -------------------------------------------------------
+
+_TOKEN = "sk_live_" + "Zq9" * 12  # 44 chars
+
+
+def test_secret_finding_reports_pattern_length_location_not_the_value(mini: Path) -> None:
+    p = mini / "traces.jsonl"
+    p.write_bytes(p.read_bytes().replace(b"T-1", _TOKEN.encode(), 1))
+    rep = validate_dataset(mini, **LOW)
+    hits = [x for x in rep.problems if "secret" in x]
+    assert hits and all("traces.jsonl" in x for x in hits)
+    assert any("stripe_key" in x and f"{len(_TOKEN)} chars" in x and "line 2" in x for x in hits)
+    for x in rep.problems:
+        assert _TOKEN[:12] not in x and "Zq9Zq9" not in x
+
+
+def test_refusal_exception_never_contains_the_secret(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])}, meta={"model": _TOKEN, "mode": "live"})
+    with pytest.raises(ValueError, match="secret") as info:
+        package([run], tmp_path / "out")
+    text = str(info.value)
+    assert "stripe_key" in text and f"{len(_TOKEN)} chars" in text
+    assert _TOKEN[:12] not in text and "Zq9Zq9" not in text

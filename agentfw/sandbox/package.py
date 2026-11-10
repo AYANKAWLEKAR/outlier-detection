@@ -59,23 +59,41 @@ CARD_TEMPLATE = Path(__file__).resolve().parents[2] / "docs" / "dataset_card.md"
 _OPTS = orjson.OPT_SORT_KEYS
 _FILES = ("traces.jsonl", "labels.jsonl", "traces.parquet", "labels.parquet")
 
-_SECRET_PATTERNS = (
-    re.compile(r"(?:sk|rk|pk)_(?:test|live)_[A-Za-z0-9]+"),  # Stripe
-    re.compile(r"whsec_[A-Za-z0-9]+"),  # Stripe webhook secret
-    re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{20,}"),  # OpenAI-style (incl. sk-proj-)
-    re.compile(r"xox[abposr]-[A-Za-z0-9-]+"),  # Slack
-    re.compile(r"xapp-[A-Za-z0-9-]+"),  # Slack app-level
+_SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("stripe_key", re.compile(r"(?:sk|rk|pk)_(?:test|live)_[A-Za-z0-9]+")),
+    ("stripe_webhook_secret", re.compile(r"whsec_[A-Za-z0-9]+")),
+    ("openai_style_key", re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{20,}")),  # incl. sk-proj-
+    ("slack_token", re.compile(r"xox[abposr]-[A-Za-z0-9-]+")),
+    ("slack_app_token", re.compile(r"xapp-[A-Za-z0-9-]+")),
     # whitespace may be real or still JSON-escaped (\t, \n, \r) in raw serialized text
-    re.compile(r"\bbearer(?:\s|\\[tnr])+[^\s\\\"]+", re.IGNORECASE),
-    re.compile(r"00D[A-Za-z0-9]{12,15}![A-Za-z0-9._]+"),  # Salesforce session id
+    ("bearer_token", re.compile(r"\bbearer(?:\s|\\[tnr])+[^\s\\\"]+", re.IGNORECASE)),
+    ("salesforce_session_id", re.compile(r"00D[A-Za-z0-9]{12,15}![A-Za-z0-9._]+")),
 )
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)")
 _RESERVED_TLDS = (".example", ".test")
 
 
+def _secret_hits(text: str) -> list[tuple[str, int, int]]:
+    """``(pattern name, start offset, length)`` of every credential-like match in ``text``."""
+    return [
+        (name, m.start(), m.end() - m.start())
+        for name, p in _SECRET_PATTERNS
+        for m in p.finditer(text)
+    ]
+
+
 def scan_secrets(text: str) -> list[str]:
-    """Every substring of ``text`` that looks like a credential (Stripe, Slack, bearer, SF)."""
-    return [m.group(0) for p in _SECRET_PATTERNS for m in p.finditer(text)]
+    """Every substring of ``text`` that looks like a credential (Stripe, Slack, bearer, SF).
+
+    For callers that hold the text anyway; findings that are printed or raised use
+    ``_secret_hits`` (pattern name, length and location only, never the value)."""
+    return [text[i : i + n] for _, i, n in _secret_hits(text)]
+
+
+def _where(text: str, offset: int) -> str:
+    line = text.count("\n", 0, offset) + 1
+    col = offset - (text.rfind("\n", 0, offset) + 1) + 1
+    return f"line {line}, col {col}"
 
 
 def _bad_domains(text: str) -> list[str]:
@@ -96,27 +114,34 @@ def _strings(v: object) -> Iterator[str]:
             yield from _strings(x)
 
 
-def _text_problems(name: str, text: str) -> list[str]:
-    hits = sorted(set(scan_secrets(text)))
-    out = [f"{name}: secret-like string {s[:40]!r}" for s in hits]
-    out += [f"{name}: email domain {d!r} is not .example/.test" for d in _bad_domains(text)]
-    return out
+def _secret_problem(name: str, pattern: str, length: int, where: str) -> str:
+    """A finding that never contains the matched value: pattern, length and location only."""
+    return f"{name}: secret-like string ({pattern}, {length} chars) at {where}"
 
 
 def _content_problems(name: str, text: str) -> list[str]:
     """Secret and email findings in ``text``: the raw text and, for JSON / JSON lines, every
-    decoded string value (so escapes cannot hide a secret)."""
-    found = dict.fromkeys(_text_problems(name, text))
+    decoded string value (so escapes cannot hide a secret). Secret findings name the pattern,
+    the match length and where it is, never the matched text."""
+    found = dict.fromkeys(
+        _secret_problem(name, pat, n, _where(text, i)) for pat, i, n in _secret_hits(text)
+    )
+    domains = _bad_domains(text)
     if name.endswith((".json", ".jsonl")):
-        for line in text.splitlines():
+        lines = text.splitlines() if name.endswith(".jsonl") else [text]
+        for lineno, line in enumerate(lines, 1):
             try:
-                value = orjson.loads(line) if name.endswith(".jsonl") else orjson.loads(text)
+                value = orjson.loads(line)
             except orjson.JSONDecodeError:
                 continue
-            for st in _strings(value):
-                found.update(dict.fromkeys(_text_problems(name, st)))
-            if not name.endswith(".jsonl"):
-                break
+            for k, st in enumerate(_strings(value)):
+                for pat, _, n in _secret_hits(st):
+                    where = f"line {lineno}, decoded string #{k + 1}"
+                    found[_secret_problem(name, pat, n, where)] = None
+                domains += _bad_domains(st)
+    found.update(
+        dict.fromkeys(f"{name}: email domain {d!r} is not .example/.test" for d in domains)
+    )
     return list(found)
 
 
