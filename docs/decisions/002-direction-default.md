@@ -23,7 +23,7 @@ control false positives? Task 1.14 adds `EngineConfig.mag_direction_default` (de
 | both | 0.550 | 0.563 (0.951) | 0.0027 | 0.062 | 0.388 |
 | up | 0.550 | 0.564 (0.951) | 0.0027 | 0.062 | 0.388 |
 
-Every gate cell is identical. In the 20-persona world almost every numeric field is up-named
+Every gate cell is identical. Only the per-agent FPR@95 moves, by 0.001 (0.563 vs 0.564). In the 20-persona world almost every numeric field is up-named
 (`amount`, `__len__`, `__strlen__`, `item_count`); the main exception is `due_in_days`, whose
 magnitude_spike attacks are *upward*; the controls (manager-approved large refunds, quarter-end mass
 updates) are upward on up-named fields too, so the switch has nothing to act on in this world.

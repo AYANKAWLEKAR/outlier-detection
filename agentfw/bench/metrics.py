@@ -156,6 +156,7 @@ class GatePreview:
     control_fpr: float
     min_recall: float
     passed: bool
+    missing: tuple[str, ...] = ()  # gated families with no attack in the gate population
 
 
 @dataclass(slots=True)
@@ -442,9 +443,10 @@ def gate_preview(rows: Sequence[ScoreRow], thresholds: Thresholds = "row") -> Ga
     For every :data:`GATE_FAMILIES` family present: attack-level recall in its gate bucket and the
     :func:`top_reason_share` of its targeted detector (over all detected attacks of the family);
     plus benign and control FPR on the same rows. Thresholds default to ``"row"``, the engine's
-    live per-agent thresholds. ``passed`` means every present gated family reaches
-    :data:`GATE_RECALL` (``min_recall`` is NaN and ``passed`` False when none is present). The
-    top-reason share is reported but is not part of ``passed``.
+    live per-agent thresholds. Gated families with no attack in that population are listed in
+    ``missing``; ``passed`` means none is missing and every one reaches :data:`GATE_RECALL`.
+    ``min_recall`` is over the present families (NaN when none is). The top-reason share is
+    reported but is not part of ``passed``.
     """
     warm = [r for r in _valid(rows) if r.split == "test" and r.is_warm]
     by_family = recall_by_family(warm, thresholds, "attack")
@@ -459,12 +461,14 @@ def gate_preview(rows: Sequence[ScoreRow], thresholds: Thresholds = "row") -> Ga
         )
     recalls = [c.recall for c in cells.values()]
     min_recall = min(recalls) if recalls else math.nan
+    missing = tuple(f for f in GATE_FAMILIES if f not in cells)
     return GatePreview(
         cells=cells,
         benign_fpr=benign_fpr(warm, thresholds),
         control_fpr=control_fpr(warm, thresholds),
         min_recall=min_recall,
-        passed=bool(recalls) and min_recall >= GATE_RECALL - _EPS,
+        passed=not missing and min_recall >= GATE_RECALL - _EPS,
+        missing=missing,
     )
 
 

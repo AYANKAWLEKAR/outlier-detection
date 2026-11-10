@@ -38,7 +38,7 @@ def test_ablation_returns_one_row_per_variant_in_order(ablation: list[AblationRo
 # Measured in Task 1.14: on tiny_dataset (5 days, 18 warm test attack rows) removing magnitude
 # RAISES warm AUPRC (0.449 -> 0.500): magnitude's benign false positives on short-history keys
 # outrank attacks. Kept as a strict xfail so the property is re-checked automatically (an XPASS
-# fails the run) -- see docs/decisions and the Task 1.14 report.
+# fails the run) -- see docs/decisions/007-ablation-dominance.md.
 _MAG_HURTS = pytest.mark.xfail(
     strict=True, reason="Task 1.14 finding: engine-no-magnitude beats engine on tiny_dataset"
 )
@@ -172,7 +172,8 @@ def test_gate_preview_uses_gate_bucket_warm_test_rows_and_live_thresholds() -> N
     assert (cell.n_detected, cell.n_total) == (1, 2)
     assert cell.recall == pytest.approx(0.5)
     assert cell.top_reason_share == pytest.approx(1.0)
-    assert set(g.cells) == {"magnitude_spike"}  # absent families are not reported
+    assert set(g.cells) == {"magnitude_spike"}  # absent families get no cell ...
+    assert "prereq_skip" in g.missing  # ... and are listed as missing
     assert g.benign_fpr == pytest.approx(1 / 3)
     assert g.control_fpr == pytest.approx(0.0)
     assert g.min_recall == pytest.approx(0.5)
@@ -188,6 +189,20 @@ def test_gate_preview_excludes_slow_drift() -> None:
     ]  # fmt: skip
     g = gate_preview(rows)
     assert set(g.cells) == {"prereq_skip"}
+    assert g.cells["prereq_skip"].recall == pytest.approx(1.0)
+    # Every other gated family is absent, so the gate cannot pass.
+    assert set(g.missing) == set(GATE_FAMILIES) - {"prereq_skip"}
+    assert g.passed is False
+
+
+def test_gate_preview_passes_only_with_every_gated_family_present() -> None:
+    rows = [
+        _row(i, label="attack", attack_family=fam, attack_id=fam, fused_score=0.9,
+             strength=20.0 if fam == "magnitude_spike" else None)
+        for i, fam in enumerate(GATE_FAMILIES)
+    ]  # fmt: skip
+    g = gate_preview(rows)
+    assert g.missing == ()
     assert g.passed is True
 
 
@@ -219,6 +234,7 @@ def test_render_markdown_has_ablation_cold_start_drift_and_gate_sections() -> No
         AblationRow("engine-no-sequence", 0.42, math.nan, 0.80, {"prereq_skip": 0.2}, 900),
     ]
     gate = gate_preview([_row(1, label="attack", attack_family="prereq_skip", fused_score=0.9)])
+    assert gate.passed is False
     rep = build_report(m, m, meta, ablations=abl, gate=gate)
     md = render_markdown(rep)
     for heading in ("Ablations", "Cold start", "Drift", "Tier-1 gate preview"):
@@ -226,7 +242,8 @@ def test_render_markdown_has_ablation_cold_start_drift_and_gate_sections() -> No
     assert "engine-no-sequence" in md
     assert "per-agent recall" in md.lower()  # FPR is always shown with its achieved recall
     assert rep["ablations"][1]["fpr95_per_agent"] is None  # type: ignore[index]
-    assert rep["gate"]["passed"] is True  # type: ignore[index]
+    assert rep["gate"]["passed"] is False  # type: ignore[index]
+    assert "Missing gated families" in md
 
 
 def test_render_markdown_without_ablations_says_so() -> None:
@@ -243,3 +260,33 @@ def test_render_markdown_without_ablations_says_so() -> None:
     md = render_markdown(build_report(m, m, meta))
     assert re.search(r"^#+ Ablations$", md, re.M)
     assert "No ablations" in md
+
+
+# --- run(..., ablations=) -------------------------------------------------------------------------
+
+
+def test_run_with_ablations_feeds_the_report(tiny_dataset: Path, tmp_path: Path) -> None:
+    import orjson
+
+    from agentfw.bench.run import main
+
+    variants = ["engine", "engine-no-magnitude"]
+    main(
+        [
+            *("--traces", str(tiny_dataset), "--detector", "engine", "--out", str(tmp_path)),
+            *("--n-boot", "0", "--ablations", ",".join(variants)),
+        ]
+    )
+    rep = orjson.loads((tmp_path / "report.json").read_bytes())
+    assert [a["variant"] for a in rep["ablations"]] == variants
+    md = (tmp_path / "report.md").read_text()
+    assert "engine-no-magnitude" in md and "No ablations" not in md
+
+
+def test_run_without_ablations_keeps_none(tiny_dataset: Path, tmp_path: Path) -> None:
+    import orjson
+
+    from agentfw.bench.run import run
+
+    run(tiny_dataset, "random", SplitSpec(), tmp_path, n_boot=0)
+    assert orjson.loads((tmp_path / "report.json").read_bytes())["ablations"] is None

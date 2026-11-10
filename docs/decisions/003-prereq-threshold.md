@@ -43,14 +43,27 @@ FPR does not move with the rate (0.062 / 0.068 / 0.062 / 0.078 per dataset, flat
 effect: at 0.90 the rule also fires on many velocity bursts (duplicated writes), so velocity_burst
 recall rises (0.60 → 0.70 on the persona grammar) while velocity's top-reason share falls (0.63 → 0.26).
 
+**Evidence limits.** Each grammar has only 9–16 warm test prereq_skip attacks, so one attack moves
+gate recall by 6–11 pp. The rate was selected on the same time split's test rows that the Tier-1
+gate preview uses. There is no separate selection split and no second seed, so this is not an
+out-of-sample result. What argues against plain overfitting:
+- the ordering is the same in four independently regenerated grammars;
+- the effect is on the rule itself (rule recall moves 25–60 pp, far larger than one attack);
+- it has a mechanistic cause (the threshold sat on the lookup base rate).
+
+A held-out seed should confirm it before Tier 2 publishes numbers.
+
 ## Decision
 
 Set **`prereq_rate = 0.90`** (spec: 0.95); keep `prereq_min_n = 50`. A threshold has to sit below the
 lookup's base rate with margin; at 0.95 it sits on top of it, so mining flaps and the rule catches only
-13–67 % of skips. 0.90 is the best setting in all four grammars, not just the default one, so this is
-not fitted to the gate's test split. Cost, stated plainly: live benign FPR rises from 0.27 % to 0.39 % on
+37.5–66.7 % of skips. 0.90 is the best setting in all four grammars, not just the default one. Cost, stated plainly: live benign FPR rises from 0.27 % to 0.39 % on
 the persona grammar (+0.12 pp; the rule fires on 0.17 % of benign rows), and the velocity-burst
 top-reason share drops. `EngineConfig`, `tests/core/test_config.py` (as a recorded override of the spec
 value) and the prereq boundary tests were updated; the engine golden and the CI baseline were
 regenerated in the same commit and are byte-identical (the 3-persona, 200-session CI dataset mines no
-prerequisite whose rate falls in [0.90, 0.95)).
+prerequisite whose rate falls in [0.90, 0.95)). Pinned at engine level by
+`tests/core/test_engine.py::test_default_engine_mines_a_92_percent_prerequisite_that_095_would_not`.
+Later finding (fix round 1, evidence `saturation` section): at 0.90 the prereq rule supplies the top-1
+score of 47 % of benign fused == 1.0 rows (302 of 638). Those rows are part of the benign tail that
+the calibrator learns (decision 006).

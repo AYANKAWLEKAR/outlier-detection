@@ -112,11 +112,15 @@
 | engine-only-sequence | 0.153 | n/a | 0.911 | 0.158 | 0.000 | 0.000 | 0.467 | 0.154 | 0.000 | 0.240 | 3064750 |
 | engine-no-priors | 0.550 | 0.566 | 0.950 | 0.579 | 0.368 | 0.388 | 0.867 | 1.000 | 0.364 | 0.600 | 8700179 |
 
+<!-- Fix round 1: the `tail` and `saturation` sections below were regenerated with
+     uv run python -m agentfw.bench.sweeps --traces traces/sweep-seed0 --out results/sweeps-seed0-diag --suites tail,saturation
+     at the CURRENT default config (prereq_rate=0.90, decision 003); every section above was run at prereq_rate=0.95. -->
+
 ## tail
 
 | setting | AUPRC | FPR95 pa (recall) | benign FPR | control FPR | magnitude_spike 10-100 rec (share) | scope_blowup all rec (share) | exfil_volume all rec (share) | prereq_skip all rec (share) | novel_target all rec (share) | velocity_burst all rec (share) | min rec | pass | offcal min rec | offcal benign FPR | offcal control FPR |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| default | 0.550 | 0.563 (0.951) | 0.0027 | 0.062 | 0.538 (1.00) n=13 | 1.000 (0.85) n=13 | 0.579 (0.73) n=19 | 0.867 (1.00) n=15 | 0.388 (1.00) n=49 | 0.600 (0.63) n=50 | 0.388 | no | 0.579 | 0.0153 | 0.157 |
+| default | 0.575 | 0.564 (0.951) | 0.0039 | 0.062 | 0.538 (1.00) n=13 | 1.000 (0.85) n=13 | 0.579 (0.73) n=19 | 0.933 (1.00) n=15 | 0.388 (1.00) n=49 | 0.700 (0.26) n=50 | 0.388 | no | 0.579 | 0.0165 | 0.156 |
 
 P² error per numeric key (103 keys with n >= 200), robust-sigma units (|P² - exact| / max(IQR/1.349, eps)):
 
@@ -128,9 +132,78 @@ P² error per numeric key (103 keys with n >= 200), robust-sigma units (|P² - e
 | 0.75 | 0.0068 | 0.0602 | 0.3311 |
 | 0.95 | 0.0333 | 0.2264 | 1.2960 |
 
+Worst keys per quantile (robust-sigma error; scale = max(IQR/1.349, eps)):
+
+| q | agent | tool | path | n | scale | error (sigma) |
+|---|---|---|---|---|---|---|
+| 0.05 | sales-ops-b | salesforce.mass_update | record_ids.__len__ | 217 | 0.727 | 0.125 |
+| 0.05 | newsletter-a | mail.send_email | to.__len__ | 385 | 0.110 | 0.094 |
+| 0.05 | payouts-ops-a | stripe.create_payout | amount | 575 | 0.398 | 0.066 |
+| 0.25 | crm-hygiene-a | salesforce.create_task | due_in_days | 332 | 0.379 | 0.766 |
+| 0.25 | escalations-a | mail.send_email | to.__len__ | 239 | 0.514 | 0.264 |
+| 0.25 | outreach-a | mail.send_email | to.__len__ | 4427 | 0.514 | 0.239 |
+| 0.5 | sales-ops-a | salesforce.run_soql | query.__strlen__ | 2702 | 0.107 | 0.842 |
+| 0.5 | crm-hygiene-a | salesforce.run_soql | query.__strlen__ | 294 | 0.107 | 0.557 |
+| 0.5 | crm-hygiene-a | salesforce.create_task | due_in_days | 332 | 0.379 | 0.196 |
+| 0.75 | outreach-a | mail.send_email | to.__len__ | 4427 | 0.514 | 0.331 |
+| 0.75 | escalations-a | zendesk.add_comment | body.__strlen__ | 414 | 0.480 | 0.172 |
+| 0.75 | billing-disputes-a | mail.send_email | body.__strlen__ | 244 | 0.337 | 0.155 |
+| 0.95 | billing-disputes-a | mail.send_email | to.__len__ | 393 | 0.301 | 1.296 |
+| 0.95 | exec-assistant-a | mail.send_email | to.__len__ | 210 | 0.379 | 0.926 |
+| 0.95 | sales-ops-b | salesforce.create_task | due_in_days | 1239 | 0.379 | 0.555 |
+
 Calibrator P² tail (fused-score units), per agent:
 
 | alpha | median | max |
 |---|---|---|
-| 0.005 | 0.0002 | 0.0191 |
-| 0.01 | 0.0002 | 0.0829 |
+| 0.005 | 0.0001 | 0.0191 |
+| 0.01 | 0.0001 | 0.0829 |
+
+## saturation
+
+| setting | AUPRC | FPR95 pa (recall) | benign FPR | control FPR | magnitude_spike 10-100 rec (share) | scope_blowup all rec (share) | exfil_volume all rec (share) | prereq_skip all rec (share) | novel_target all rec (share) | velocity_burst all rec (share) | min rec | pass | offcal min rec | offcal benign FPR | offcal control FPR |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| default | 0.575 | 0.564 (0.951) | 0.0039 | 0.062 | 0.538 (1.00) n=13 | 1.000 (0.85) n=13 | 0.579 (0.73) n=19 | 0.933 (1.00) n=15 | 0.388 (1.00) n=49 | 0.700 (0.26) n=50 | 0.388 | no | 0.579 | 0.0165 | 0.156 |
+
+17 of 20 agents end with a live threshold >= 0.999. All splits; the calibrator learns benign AND attack rows:
+
+| agent | final live threshold | benign rows | benign == 1.0 (share) | benign >= 0.99 | attack rows | attack == 1.0 | attack >= 0.99 | all rows >= 0.99 (share) |
+|---|---|---|---|---|---|---|---|---|
+| billing-disputes-a | 1.0000 | 6070 | 113 (0.0186) | 119 | 302 | 112 | 257 | 376 (0.0590) |
+| crm-hygiene-a | 1.0000 | 3409 | 12 (0.0035) | 12 | 157 | 32 | 117 | 129 (0.0362) |
+| data-export-a | 0.9640 | 3744 | 1 (0.0003) | 1 | 28 | 13 | 15 | 16 (0.0042) |
+| escalations-a | 1.0000 | 2598 | 3 (0.0012) | 4 | 403 | 41 | 340 | 344 (0.1146) |
+| exec-assistant-a | 0.9996 | 2186 | 0 (0.0000) | 10 | 138 | 20 | 109 | 119 (0.0512) |
+| finance-reconcile-a | 0.9996 | 9730 | 9 (0.0009) | 11 | 66 | 3 | 44 | 55 (0.0056) |
+| helpdesk-triage-a | 0.9999 | 8700 | 7 (0.0008) | 7 | 610 | 309 | 528 | 535 (0.0575) |
+| helpdesk-triage-b | 0.9673 | 10567 | 12 (0.0011) | 12 | 611 | 2 | 19 | 31 (0.0028) |
+| lead-router-a | 1.0000 | 10074 | 3 (0.0003) | 8 | 686 | 247 | 514 | 522 (0.0485) |
+| newsletter-a | 0.9993 | 848 | 9 (0.0106) | 10 | 18 | 14 | 14 | 24 (0.0277) |
+| outreach-a | 0.9999 | 8973 | 1 (0.0001) | 5 | 362 | 244 | 296 | 301 (0.0322) |
+| outreach-b | 0.9999 | 21069 | 0 (0.0000) | 3 | 479 | 328 | 407 | 410 (0.0190) |
+| payouts-ops-a | 0.9998 | 2532 | 0 (0.0000) | 10 | 119 | 10 | 89 | 99 (0.0373) |
+| renewals-a | 0.9993 | 1443 | 0 (0.0000) | 0 | 87 | 52 | 63 | 63 (0.0412) |
+| sales-ops-a | 1.0000 | 10712 | 45 (0.0042) | 50 | 209 | 57 | 137 | 187 (0.0171) |
+| sales-ops-b | 1.0000 | 7187 | 77 (0.0107) | 87 | 213 | 65 | 130 | 217 (0.0293) |
+| slack-notifier-a | 0.9731 | 18911 | 2 (0.0001) | 2 | 990 | 1 | 46 | 48 (0.0024) |
+| support-refunds-a | 0.9999 | 12408 | 75 (0.0060) | 112 | 516 | 368 | 408 | 520 (0.0402) |
+| support-refunds-b | 1.0000 | 8486 | 25 (0.0029) | 33 | 509 | 203 | 356 | 389 (0.0432) |
+| support-refunds-c | 1.0000 | 18151 | 245 (0.0135) | 276 | 577 | 265 | 293 | 569 (0.0304) |
+
+Top-1 detector:part of benign fused == 1.0 rows:
+
+| top-1 | rows | share |
+|---|---|---|
+| sequence:prereq | 302 | 0.473 |
+| magnitude:to.__len__ | 71 | 0.111 |
+| sequence:flow | 71 | 0.111 |
+| sequence:trans | 57 | 0.089 |
+| velocity:count | 56 | 0.088 |
+| magnitude:amount | 29 | 0.045 |
+| magnitude:body.__strlen__ | 15 | 0.023 |
+| novelty:to[].__domain__ | 13 | 0.020 |
+| magnitude:subject.__strlen__ | 10 | 0.016 |
+| novelty:ticket_id | 8 | 0.013 |
+| magnitude:__resp__.item_count | 5 | 0.008 |
+| novelty:reason | 1 | 0.002 |
+| novelty:record_id | 1 | 0.002 |

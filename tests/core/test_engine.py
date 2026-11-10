@@ -417,3 +417,36 @@ def test_engine_replay_strict_mode_no_leak() -> None:
     raws, labels = ci_dataset()
     rows = replay(raws[:300], labels, Engine(), SplitSpec(), strict=True)
     assert len(rows) == 300
+
+
+# --- docs/decisions/003-prereq-threshold.md: the default mines a 92 %-rate prerequisite --------
+
+
+def _prereq_engine(cfg: EngineConfig) -> Engine:
+    """100 sessions of ``Y`` (lookup ``X`` before it in 92 of them, ``Z`` otherwise)."""
+    eng = Engine(cfg)
+    for i in range(100):
+        tr = SessionTracker()
+        first = "zendesk.get_ticket" if i % 25 not in (1, 2) else "slack.post_message"
+        for j, tool in enumerate((first, "stripe.create_refund")):
+            e = make_env(
+                tracker=tr, session_id=f"p{i}", agent_id="a1", tool_id=tool, seq_no=j,
+                ts_unix_ms=1_700_000_000_000 + (2 * i + j) * 60_000, args={},
+            )  # fmt: skip
+            eng.score(e)
+            eng.update(e, Outcome.ALLOWED)
+            tr.observe(e)
+    return eng
+
+
+def _skip(eng: Engine) -> object:
+    e = make_env(
+        session_id="skip", agent_id="a1", tool_id="stripe.create_refund",
+        ts_unix_ms=1_700_000_000_000 + 300 * 60_000, args={},
+    )  # fmt: skip
+    return by(eng.score(e), "sequence").evidence["prereq_missing"]
+
+
+def test_default_engine_mines_a_92_percent_prerequisite_that_095_would_not() -> None:
+    assert _skip(_prereq_engine(EngineConfig())) == "zendesk.get_ticket"
+    assert _skip(_prereq_engine(EngineConfig().replace(prereq_rate=0.95))) is None

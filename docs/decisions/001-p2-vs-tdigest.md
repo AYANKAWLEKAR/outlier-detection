@@ -33,15 +33,21 @@ in robust-sigma units (the unit of magnitude's z; z0 = 3):
 | 0.75 | 0.0068 | 0.060 | 0.331 |
 | 0.95 | 0.0333 | 0.226 | 1.296 |
 
-The maxima are all discrete or near-constant fields whose IQR collapses to `eps` (`query.__strlen__` of
-templated SOQL, scale 0.107; `to.__len__`, `due_in_days` small integers), where any estimator's error
-in sigma units is inflated by the tiny scale. Calibrator tail (fused-score units, per agent): median
-0.0002, max 0.019 at α = 0.005; median 0.0002, max 0.083 at α = 0.01 (finance-reconcile-a).
+The maxima are all discrete or near-constant fields with a tiny scale, where any estimator's
+error in sigma units is inflated. The worst keys per quantile come from the "Worst keys per
+quantile" table in the evidence `tail` section, produced by `field_tail_errors`:
+`salesforce.run_soql query.__strlen__` (templated SOQL, scale 0.107; 0.842 σ at q50),
+`salesforce.create_task due_in_days` (small integers; 0.766 σ at q25) and `mail.send_email
+to.__len__` (1.296 σ at q95). Calibrator tail (fused-score units, per agent, from
+`calibration_tail_error`): median 0.0001, max 0.019 at α = 0.005; max 0.083 at α = 0.01
+(finance-reconcile-a). The calibrator's thresholds saturate near 1.0, but not because of the P²
+tail. The `saturation` section (`agentfw.bench.diagnostics.threshold_saturation`) traces it to
+the score distribution the calibrator is fed (decision 006).
 
 ## Decision
 
 Keep **P²**. The quantiles that drive scoring (q25/q50/q75) are within 0.07 σ of exact for 90 % of keys —
-two orders of magnitude below the z0 = 3 decision scale — and the calibrator's tail error is ≤ 0.02 at
+≈ 43× below the z0 = 3 decision scale (3 / 0.07) — and the calibrator's tail error is ≤ 0.02 at
 the default α. No measured failure justifies a new dependency or a heavier Go port. Revisit only if a
 future detector scores on q05/q95 directly (p90 error 0.23 σ at q95), and then benchmark t-digest with
 the same function.

@@ -298,6 +298,8 @@ def _gate_md(gate: object) -> list[str]:
         f"min recall {_f(gate['min_recall'])}: gate {'PASS' if gate['passed'] else 'FAIL'}.",
         "",
     ]
+    if gate.get("missing"):
+        lines += [f"Missing gated families (gate cannot pass): {', '.join(gate['missing'])}.", ""]
     return lines
 
 

@@ -43,6 +43,12 @@ from agentfw.bench.ablation import (
     replay_detector,
 )
 from agentfw.bench.dataset import load_dir
+from agentfw.bench.diagnostics import (
+    AgentSaturation,
+    SaturationReport,
+    saturation_md,
+    threshold_saturation,
+)
 from agentfw.bench.metrics import GATE_FAMILIES, Thresholds, compute_all, gate_preview
 from agentfw.bench.protocol import Detector
 from agentfw.bench.replay import ScoreRow, SplitSpec
@@ -370,7 +376,7 @@ ABLATION_VARIANTS = [
     *(f"engine-only-{d}" for d in DETECTOR_ORDER),
     "engine-no-priors",
 ]
-ALL_SUITES = [*SUITE_GRIDS, "prereq", "ablation", "tail"]
+ALL_SUITES = [*SUITE_GRIDS, "prereq", "ablation", "tail", "saturation"]
 
 
 def skip_dataset(base_dir: Path, skip: float) -> Path:
@@ -416,6 +422,7 @@ def _run_spec(spec: _Spec) -> dict[str, Any]:
         ),
         "velocity_memory": velocity_memory(det),
         "calibration_tail": {str(a): calibration_tail_error(rows, a) for a in CAL_ALPHAS},
+        "saturation": dataclasses.asdict(threshold_saturation(rows)),
     }
     return out
 
@@ -496,7 +503,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         (f"{tag}, prereq_rate={rate}", spec({"prereq_rate": rate}, traces))
                     )
             plan[s] = items
-        elif s == "tail":
+        elif s in ("tail", "saturation"):
             plan[s] = [("default", spec({}))]
 
     # Run each distinct replay once (the default point appears in several suites).
@@ -536,6 +543,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"| {e['setting']} | {int(vm['vel_keys'])} | {int(vm['vel_json_sparse'])} "
                     f"| {int(vm['vel_json_dense'])} | {int(vm['vel_json_no_long'])} |"
                 )
+        if s == "saturation":
+            rep = entries[0]["saturation"]
+            md += ["", *saturation_md(_saturation_from_dict(rep))]
         if s == "tail":
             fte = field_tail_errors(a.traces, EngineConfig().mag_probs)
             report["field_tail"] = fte
@@ -548,6 +558,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     (a.out / "sweeps.md").write_text("\n".join(md))
     print(a.out / "sweeps.md")
     return 0
+
+
+def _saturation_from_dict(d: Mapping[str, Any]) -> SaturationReport:
+    agents = {k: AgentSaturation(**v) for k, v in d["agents"].items()}
+    return SaturationReport(agents, int(d["n_saturated"]), dict(d["top1"]))
 
 
 def _ablation_md(rows: Sequence[AblationRow]) -> list[str]:
@@ -574,6 +589,17 @@ def _tail_md(fte: Sequence[Mapping[str, Any]], cal: Mapping[str, Mapping[str, fl
     for p in probs:
         v = np.asarray([e["err_sigma"][p] for e in fte])
         out.append(f"| {p:g} | {np.median(v):.4f} | {np.percentile(v, 90):.4f} | {v.max():.4f} |")
+    out += ["", "Worst keys per quantile (robust-sigma error; scale = max(IQR/1.349, eps)):", ""]
+    out += [
+        "| q | agent | tool | path | n | scale | error (sigma) |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for p in probs:
+        for e in sorted(fte, key=lambda e: -e["err_sigma"][p])[:3]:
+            out.append(
+                f"| {p:g} | {e['agent']} | {e['tool']} | {e['path']} | {e['n']} "
+                f"| {e['scale']:.3f} | {e['err_sigma'][p]:.3f} |"
+            )
     out += ["", "Calibrator P² tail (fused-score units), per agent:", ""]
     out += ["| alpha | median | max |", "|---|---|---|"]
     for alpha, per in cal.items():

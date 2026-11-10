@@ -13,6 +13,7 @@ from typing import Any
 
 import orjson
 
+from agentfw.bench.ablation import run_ablation
 from agentfw.bench.dataset import load_dir
 from agentfw.bench.metrics import BOOTSTRAP_N, compute_all, gate_preview
 from agentfw.bench.registry import make_detector
@@ -29,9 +30,14 @@ def run(
     out_dir: Path,
     *,
     n_boot: int = BOOTSTRAP_N,
+    ablations: Sequence[str] | None = None,
     **detector_kw: Any,
 ) -> Path:
-    """Write ``scores.parquet``, ``report.json``, ``report.md`` into ``out_dir``; returns it."""
+    """Write ``scores.parquet``, ``report.json``, ``report.md`` into ``out_dir``; returns it.
+
+    ``ablations``: registry variants to replay on the same dataset and split for the report's
+    ablation table (``None``: no table). They use the default config, not ``detector_kw``.
+    """
     raws, labels, manifest = load_dir(traces_dir)
     det = make_detector(detector, **detector_kw)
     rows = replay(raws, labels, det, split)
@@ -55,6 +61,7 @@ def run(
         meta,
         {"state_bytes": det.state_bytes(), "score_hash": canonical_hash(rows), "n_boot": n_boot},
         gate=gate_preview(rows),
+        ablations=None if ablations is None else run_ablation(traces_dir, ablations, split),
     )
     (out_dir / "report.json").write_bytes(orjson.dumps(report, option=orjson.OPT_INDENT_2))
     (out_dir / "report.md").write_text(render_markdown(report))
@@ -69,8 +76,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--n-boot", type=int, default=BOOTSTRAP_N)
     p.add_argument("--update-readme", action="store_true")
+    p.add_argument(
+        "--ablations",
+        type=lambda s: [v for v in s.split(",") if v],
+        default=None,
+        help="registry variants for the ablation table, e.g. engine,engine-no-novelty",
+    )
     a = p.parse_args(argv)
-    out = run(a.traces, a.detector, SplitSpec(kind=a.split), a.out, n_boot=a.n_boot)
+    out = run(
+        a.traces, a.detector, SplitSpec(kind=a.split), a.out, n_boot=a.n_boot, ablations=a.ablations
+    )
     if a.update_readme:
         update_readme(Path("README.md"), (out / "report.md").read_text())
     print(out)
