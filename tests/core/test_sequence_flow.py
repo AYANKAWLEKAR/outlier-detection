@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import math
 from collections.abc import Mapping, Sequence
@@ -10,7 +11,13 @@ import pytest
 
 from agentfw.core.config import EngineConfig
 from agentfw.core.detectors.sequence import FlowRecord, SequenceDetector, ToolKindRecord
-from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType, ResponseMeta
+from agentfw.core.envelope import (
+    ActionEnvelope,
+    DetectorScore,
+    FieldType,
+    PrevResponse,
+    ResponseMeta,
+)
 from agentfw.core.hints import ToolHint
 from agentfw.core.normalize import SessionTracker
 from agentfw.core.schema_infer import TypeInference, TypeView
@@ -223,7 +230,7 @@ def test_only_id_typed_paths_are_considered(seq: SequenceDetector) -> None:
     other = IdTypes("note_id")  # charge_id UNKNOWN here
     s, ev = seq._s_flow(e, other)
     assert s == 0.0  # no flow history for note_id yet
-    assert ev["missing_id_path"] in (None, "note_id")
+    assert ev["missing_id_path"] == "note_id"
 
 
 def test_fired_is_none_when_all_parts_zero(seq: SequenceDetector) -> None:
@@ -272,3 +279,18 @@ def test_records_roundtrip_and_json_finite(seq: SequenceDetector) -> None:
             type(rec).from_dict(d).to_dict(), option=orjson.OPT_SORT_KEYS
         )
     assert math.isfinite(one(seq, probe([(WRITE, {"charge_id": "ch_3ZZZZZZZ"}, None)])).score)
+
+
+def test_item_count_via_prev_response_marks_read(seq: SequenceDetector) -> None:
+    """Pre-response envelopes (no own response_meta): the count arrives on the next call."""
+    first = call(SessionTracker(), "sq2", 0, READ, {"charge_id": "ch_3SQTWO001"})
+    assert first.response_meta is None
+    seq.update(first, TYPES)
+    assert seq.is_write(AGENT, READ)  # nothing known yet
+    nxt = call(SessionTracker(), "sq2", 1, WRITE, {"charge_id": "ch_3SQTWO001"})
+    nxt = dataclasses.replace(nxt, prev_response=PrevResponse(READ, 3))
+    seq.update(nxt, TYPES)
+    assert not seq.is_write(AGENT, READ)
+    assert seq.is_write(AGENT, WRITE)
+    s, _ = seq._s_flow(probe([(READ, {"charge_id": "ch_3FAKE0001"}, None)]), TYPES)
+    assert s == 0.0

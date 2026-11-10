@@ -323,6 +323,15 @@ class SequenceDetector:
             self._store.put(kkey, krec)
         if e.response_meta is not None and e.response_meta.item_count is not None:
             krec.has_item_count = True
+        pr = e.prev_response
+        if pr is not None and pr.item_count is not None:
+            # D-004: the previous call's response arrives on this envelope (pre-response path).
+            pkey = key_kind(e.agent_id, pr.tool_id)
+            prec = self._store.get(pkey)
+            if not isinstance(prec, ToolKindRecord):
+                prec = ToolKindRecord()
+                self._store.put(pkey, prec)
+            prec.has_item_count = True
         for path, vals in e.flat_args.items():
             if types(path) != FieldType.ID:
                 continue
