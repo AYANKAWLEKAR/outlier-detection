@@ -9,9 +9,10 @@ harness measures detection, not enforcement). Two opt-in modes exist for Task 1.
 (``docs/decisions/008-tier1-gate.md``):
 
 * ``outcomes="enforce"``: ``BLOCKED`` when the detector's own ``DetectorResult.decision`` is
-  ``BLOCK``, else ``ALLOWED`` (``REQUIRE_APPROVAL`` is approved; envelopes not sampled by
-  ``sample_ids`` are allowed). Mirrors deployment: a blocked call never moves a baseline.
-* ``outcomes="review"``: the §6.8 feedback loop with a perfect reviewer. Every *flagged* envelope
+  ``BLOCK``, else ``ALLOWED`` -- including ``REQUIRE_APPROVAL`` calls (there is no reviewer in
+  this mode) and envelopes not sampled by ``sample_ids``. A blocked call never moves a baseline.
+* ``outcomes="review"``: the oracle-reviewer approval loop (§6.8 with the labels acting as a
+  perfect human reviewer, hence optimistic). Every *flagged* envelope
   (decision ``BLOCK`` or ``REQUIRE_APPROVAL``) is ``APPROVED`` if benign and ``DENIED`` if labelled
   ``attack``; unflagged envelopes are ``ALLOWED`` unseen (missed attacks are learned). It reads the
   labels of flagged envelopes only (the reviewer's verdict).

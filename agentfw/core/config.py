@@ -75,7 +75,8 @@ class EngineConfig:
     # Task 1.15 switch (docs/decisions/008-tier1-gate.md): what the calibrator learns from a call
     # the engine itself blocked (fused >= the threshold that scored it). "none" (spec §6.8): the
     # fused score of every allowed call; "drop": nothing; "winsorize": the threshold instead of the
-    # fused score, also when the call was BLOCKED (tail mass kept, value not).
+    # fused score, also when the call was BLOCKED with fused >= threshold (tail mass kept, value
+    # not).
     cal_censor: CalCensor = "none"
     # ... applied only once the agent's calibrator holds this many scores (shadow, then censor).
     cal_censor_min_n: int = 0

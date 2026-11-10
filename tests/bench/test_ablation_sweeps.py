@@ -321,3 +321,4 @@ def test_gate_suite_runs_every_candidate_with_its_outcome_mode(
     assert all(e["trajectory"] for e in entries)
     md = (tmp_path / "sweeps.md").read_text()
     assert "## gate" in md and "| setting | outcomes |" in md and "ratcheting" in md
+    assert "labels act as a perfect human reviewer" in md

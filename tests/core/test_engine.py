@@ -607,3 +607,21 @@ def test_vel_count_attempts_counts_refused_calls_in_the_window(outcome: Outcome)
             eng.update(env({"amount": 1e6, "currency": "usd"}, 250, session=f"r{k}"), outcome)
     probe = env({"amount": 36.6, "currency": "usd"}, 250, session="p")
     assert window(on, probe) == window(off, probe) + 5
+
+
+def test_cal_censor_winsorize_ignores_blocked_calls_below_the_threshold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call blocked by something other than the engine (fused < theta, e.g. policy) is not
+    tail mass: winsorize feeds nothing, with or without a cached score."""
+    eng = _warm_cfg(EngineConfig().replace(cal_censor="winsorize"))
+    fed = _cal_spy(eng, monkeypatch)
+    typical = env({"amount": 36.6, "currency": "usd"}, 251)
+    r = eng.score(typical)
+    assert r.threshold is not None and r.fused_score < r.threshold
+    eng.update(typical, Outcome.BLOCKED)  # cached score
+    eng.update(typical, Outcome.BLOCKED)  # no cache: scored fresh (pure) before deciding
+    assert fed == []
+    theta = eng.calibrator.threshold("a1")
+    eng.update(ODD, Outcome.BLOCKED)  # no cache, but the engine would block it: censored
+    assert fed == [("cens", theta)]

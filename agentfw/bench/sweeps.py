@@ -385,8 +385,15 @@ ABLATION_VARIANTS = [
 ]
 #: Task 1.15 gate candidates (docs/decisions/008-tier1-gate.md): ``(setting, params, outcomes)``.
 #: Every switch is opt-in; "default" is the spec engine under the spec's allow-all replay.
-#: ``review`` reads the labels of flagged calls (a perfect §6.8 reviewer); ``oracle`` reads every
-#: label (attacks never learned): a diagnostic upper bound only.
+#: "oracle-reviewer" rows use replay outcomes "review": the oracle-reviewer approval loop
+#: (labels act as a perfect human reviewer -> optimistic). ``oracle`` reads every label
+#: (attacks never learned): a diagnostic upper bound only. Neither is the benchmark protocol
+#: (decision 008, GATE3).
+REVIEW_NOTE = (
+    "oracle-reviewer = oracle-reviewer approval loop (labels act as a perfect human reviewer -> "
+    "optimistic); oracle = no call labelled attack is ever learned (diagnostic). The benchmark "
+    'protocol is the spec\'s allow-all replay ("default").'
+)
 _W: dict[str, object] = {"cal_censor": "winsorize"}
 _W500: dict[str, object] = {**_W, "cal_censor_min_n": 500}
 _ATT: dict[str, object] = {"vel_count_attempts": True}
@@ -405,13 +412,13 @@ GATE_CANDIDATES: list[tuple[str, dict[str, object], OutcomeMode]] = [
         {**_W500, **_ATT, **_GRADED, **_NOV50},
         "enforce",
     ),
-    ("review", {}, "review"),
-    ("review, graded prereq", dict(_GRADED), "review"),
-    ("review, novelty_full_n=50", dict(_NOV50), "review"),
-    ("review, vel attempts", dict(_ATT), "review"),
-    ("review, vel attempts, graded prereq", {**_ATT, **_GRADED}, "review"),
+    ("oracle-reviewer", {}, "review"),
+    ("oracle-reviewer, graded prereq", dict(_GRADED), "review"),
+    ("oracle-reviewer, novelty_full_n=50", dict(_NOV50), "review"),
+    ("oracle-reviewer, vel attempts", dict(_ATT), "review"),
+    ("oracle-reviewer, vel attempts, graded prereq", {**_ATT, **_GRADED}, "review"),
     (
-        "review, vel attempts, graded prereq, novelty_full_n=50",
+        "oracle-reviewer, vel attempts, graded prereq, novelty_full_n=50",
         {**_ATT, **_GRADED, **_NOV50},
         "review",
     ),
@@ -600,7 +607,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"| {int(vm['vel_json_dense'])} | {int(vm['vel_json_no_long'])} |"
                 )
         if s == "gate":
-            md += ["", *_trajectory_summary_md(entries)]
+            md += ["", REVIEW_NOTE, "", *_trajectory_summary_md(entries)]
         if s == "saturation":
             rep = entries[0]["saturation"]
             md += ["", *saturation_md(_saturation_from_dict(rep))]

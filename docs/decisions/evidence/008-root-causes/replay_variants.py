@@ -1,14 +1,16 @@
 """Task 1.15 root-cause replays (evidence for docs/decisions/008-tier1-gate.md; not package code).
 
-    uv run python docs/decisions/evidence/008-root-causes/replay_variants.py TRACES_DIR OUT_DIR
+    uv run python docs/decisions/evidence/008-root-causes/replay_variants.py TRACES_DIR OUT_DIR \
+        [OUTCOMES ['JSON EngineConfig params']]
 
-Writes three score tables of the default EngineConfig on TRACES_DIR:
-  default.parquet   -- spec replay (every call ALLOWED, spec §5.2)
-  oraclecal.parquet -- the calibrator never learns attack-labelled calls; detectors learn all
-  oracle.parquet    -- replay(outcomes="oracle"): nothing learns attack-labelled calls
-The two oracle variants read the labels: diagnostics only, never reported numbers.
+Writes three score tables of one configuration (default: the spec engine, outcomes "allow"):
+  primary.parquet   -- replay(outcomes=OUTCOMES) with EngineConfig().replace(**params)
+  oraclecal.parquet -- the same, but the calibrator never learns attack-labelled calls
+  oracle.parquet    -- the same config with replay(outcomes="oracle"): nothing learns attacks
+The two oracle variants read every label: diagnostics only, never reported numbers.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -22,8 +24,8 @@ from agentfw.core.envelope import ActionEnvelope, DetectorResult, Outcome
 class OracleCal:
     """Engine whose calibrator skips attack-labelled calls (detectors still learn them)."""
 
-    def __init__(self, attacks: set[str]) -> None:
-        self.e = Engine(EngineConfig())
+    def __init__(self, attacks: set[str], cfg: EngineConfig) -> None:
+        self.e = Engine(cfg)
         self.attacks = attacks
         self._observe = self.e.calibrator.observe
 
@@ -47,13 +49,17 @@ class OracleCal:
 
 def main() -> None:
     traces, out = sys.argv[1], Path(sys.argv[2])
+    outcomes = sys.argv[3] if len(sys.argv) > 3 else "allow"
+    cfg = EngineConfig().replace(**(json.loads(sys.argv[4]) if len(sys.argv) > 4 else {}))
     out.mkdir(parents=True, exist_ok=True)
     raws, labels, _ = load_dir(traces)
     attacks = {e for e, lab in labels.items() if lab.label == "attack"}
     split = SplitSpec()
-    write_score_table(replay(raws, labels, Engine(), split), out / "default.parquet")
-    write_score_table(replay(raws, labels, OracleCal(attacks), split), out / "oraclecal.parquet")
-    oracle = replay(raws, labels, Engine(), split, outcomes="oracle")
+    primary = replay(raws, labels, Engine(cfg), split, outcomes=outcomes)  # type: ignore[arg-type]
+    write_score_table(primary, out / "primary.parquet")
+    oraclecal = replay(raws, labels, OracleCal(attacks, cfg), split, outcomes=outcomes)  # type: ignore[arg-type]
+    write_score_table(oraclecal, out / "oraclecal.parquet")
+    oracle = replay(raws, labels, Engine(cfg), split, outcomes="oracle")
     write_score_table(oracle, out / "oracle.parquet")
 
 

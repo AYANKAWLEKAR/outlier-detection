@@ -8,7 +8,8 @@ detector state (it is not in the store and never counted by ``state_bytes``).
 
 ``update(e, outcome)``: nothing moves unless the outcome is ``ALLOWED`` / ``APPROVED`` (a blocked
 or denied action never moves a baseline; two opt-in exceptions (Task 1.15): with
-``cal_censor="winsorize"`` a ``BLOCKED`` call adds the threshold that blocked it to the calibrator,
+``cal_censor="winsorize"`` a ``BLOCKED`` call the engine itself would block (fused >= threshold)
+adds that threshold to the calibrator,
 and with ``vel_count_attempts`` a refused call counts in velocity's current window -- neither
 moves a baseline distribution). Otherwise, in order:
 
@@ -162,9 +163,11 @@ class Engine:
             if self._velocity is not None:
                 self._velocity.observe_refused(e)  # no-op unless vel_count_attempts
             if outcome is Outcome.BLOCKED and censor == "winsorize":
-                if fused is None:
+                if fused is None:  # pure score and current threshold, nothing has moved yet
+                    fused = self._fuse(e, self._view(e))[1].fused
                     theta = self.calibrator.threshold(e.agent_id)
-                self.calibrator.observe_censored(e.agent_id, theta)
+                if fused >= theta:  # only the engine's own blocks are tail mass
+                    self.calibrator.observe_censored(e.agent_id, theta)
             return
         view = self._view(e)
         if fused is None:
