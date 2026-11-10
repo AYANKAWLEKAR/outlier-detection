@@ -4,7 +4,7 @@ Each iteration is one LLM completion (a *step*). A turn with no tool calls ends 
 (``final``); otherwise every tool call is executed through MCP and answered with a ``role="tool"``
 message carrying its ``tool_call_id``. Failures go back to the model, they never crash the loop:
 
-* error results (``is_error``) are passed verbatim with an ``ERROR: `` prefix;
+* error results (``is_error``) are passed to the model unchanged (AG1);
 * malformed (or non-object) JSON arguments -> ``invalid JSON arguments: ...``, tool not called;
 * an unknown function name -> ``ERROR: unknown tool ...``; the tool is not called;
 * an exception raised by the MCP call -> ``ERROR: <type>: <message>``.
@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 import orjson
-from mcp.types import CallToolResult, ListToolsResult, TextContent
+from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 from agentfw.sandbox.llm import ChatClient, Usage, UsageMeter, to_fn_name
 
@@ -53,7 +53,9 @@ class Transcript:
 
 def _result_text(res: CallToolResult) -> str:
     text = "\n".join(b.text for b in res.content if isinstance(b, TextContent))
-    return f"ERROR: {text}" if res.is_error else text
+    if not text and not res.is_error and res.structured_content:
+        return orjson.dumps(res.structured_content, option=orjson.OPT_SORT_KEYS).decode()
+    return text or "(no text output)"
 
 
 async def _execute(mcp: McpLike, tool_ids: dict[str, str], name: str, arguments_json: str) -> str:
@@ -61,7 +63,7 @@ async def _execute(mcp: McpLike, tool_ids: dict[str, str], name: str, arguments_
     if tool_id is None:
         return f"ERROR: unknown tool {name!r}"
     try:
-        args = orjson.loads(arguments_json) if arguments_json.strip() else {}
+        args = orjson.loads(arguments_json) if (arguments_json or "").strip() else {}
     except orjson.JSONDecodeError as exc:
         return f"invalid JSON arguments: {exc}"
     if not isinstance(args, dict):
@@ -82,10 +84,19 @@ async def run_session(
     max_steps: int = 25,
     meter: UsageMeter | None = None,
 ) -> Transcript:
+    candidates: dict[str, list[Tool]] = {}
+    for t in (await mcp.list_tools()).tools:
+        try:
+            candidates.setdefault(to_fn_name(t.name), []).append(t)
+        except ValueError as exc:
+            logger.warning("skipping tool %r: %s", t.name, exc)
     tool_ids: dict[str, str] = {}
     tools: list[dict[str, object]] = []
-    for t in (await mcp.list_tools()).tools:
-        fn = to_fn_name(t.name)
+    for fn, group in candidates.items():
+        if len(group) > 1:  # neither may be callable: the model could invoke the wrong one
+            logger.warning("skipping tools %s: same function name %r", [t.name for t in group], fn)
+            continue
+        t = group[0]
         tool_ids[fn] = t.name
         tools.append(
             {

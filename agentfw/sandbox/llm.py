@@ -116,6 +116,9 @@ class ScriptedChatClient:
         default_factory=list
     )
 
+    def __post_init__(self) -> None:
+        self.turns = list(self.turns)  # never consume the caller's list
+
     async def complete(
         self, messages: list[dict[str, object]], tools: list[dict[str, object]]
     ) -> ChatTurn:

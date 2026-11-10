@@ -10,6 +10,7 @@ from typing import Any
 import orjson
 import pytest
 from mcp import Client
+from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool
 
 from agentfw.sandbox.agent import run_session
 from agentfw.sandbox.llm import (
@@ -98,15 +99,15 @@ async def test_scripted_three_turn_session_yields_two_envelopes() -> None:
     assert first_call[0]["function"]["name"] == "zendesk__get_ticket"
 
 
-async def test_error_result_returned_verbatim_with_prefix() -> None:
+async def test_error_result_returned_verbatim() -> None:
     llm = ScriptedChatClient(
         [_turn(_call("c1", "flaky__boom", {})), _turn(content="gave up")],
     )
     async with agent_session() as (client, _sink, _spies):
         t = await run_session(llm, client, "s", "t")
     (msg,) = _tool_msgs(t.messages)
-    assert msg["content"].startswith("ERROR: ")
-    assert "boom" in msg["content"].lower()
+    assert not msg["content"].startswith("ERROR")  # AG1: error text passes through unchanged
+    assert msg["content"] == "Error executing tool boom"
     assert t.stopped == "final"
 
 
@@ -249,3 +250,105 @@ async def test_every_sandbox_server_tool_maps_legally() -> None:
                 assert from_fn_name(to_fn_name(tid)) == tid
                 seen += 1
     assert seen > 10
+
+
+class _FakeMcp:
+    """Minimal McpLike double with configurable tools and call behaviour."""
+
+    def __init__(self, names: list[str], result: CallToolResult | Exception | None = None) -> None:
+        self.tools = [
+            Tool(name=n, description="d", input_schema={"type": "object", "properties": {}})
+            for n in names
+        ]
+        self.result = result
+        self.called: list[str] = []
+
+    async def list_tools(self) -> ListToolsResult:
+        return ListToolsResult(tools=self.tools)
+
+    async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
+        self.called.append(name)
+        if isinstance(self.result, Exception):
+            raise self.result
+        assert self.result is not None
+        return self.result
+
+
+def _offered(llm: ScriptedChatClient) -> set[str]:
+    return {str(t["function"]["name"]) for t in llm.calls[0][1]}  # type: ignore[index]
+
+
+async def test_illegal_tool_name_skipped_session_survives() -> None:
+    mcp = _FakeMcp(["good.tool", "bad.name with space", "x." + "a" * 70])
+    llm = ScriptedChatClient([_turn(content="done")])
+    t = await run_session(llm, mcp, "s", "t")
+    assert t.stopped == "final"
+    assert _offered(llm) == {"good__tool"}
+
+
+async def test_colliding_fn_names_both_skipped() -> None:
+    # "a.b__c" and "a__b.c" both map to "a__b__c"
+    mcp = _FakeMcp(["a.b__c", "a__b.c", "ok.tool"])
+    llm = ScriptedChatClient([_turn(_call("c1", "a__b__c", {})), _turn(content="done")])
+    t = await run_session(llm, mcp, "s", "t")
+    assert _offered(llm) == {"ok__tool"}
+    assert mcp.called == []
+    assert "unknown tool" in _tool_msgs(t.messages)[0]["content"]
+
+
+async def test_mcp_call_raising_is_reported_and_session_continues() -> None:
+    mcp = _FakeMcp(["s.t"], RuntimeError("transport gone"))
+    llm = ScriptedChatClient([_turn(_call("c1", "s__t", {})), _turn(content="done")])
+    t = await run_session(llm, mcp, "s", "t")
+    (msg,) = _tool_msgs(t.messages)
+    assert msg["tool_call_id"] == "c1" and "transport gone" in msg["content"]
+    assert t.stopped == "final"
+
+
+async def test_none_arguments_treated_as_empty() -> None:
+    mcp = _FakeMcp(["s.t"], CallToolResult(content=[TextContent(type="text", text="ok")]))
+    tc = ToolCall(id="c1", name="s__t", arguments_json=None)  # type: ignore[arg-type]
+    t = await run_session(ScriptedChatClient([_turn(tc), _turn(content="d")]), mcp, "s", "t")
+    assert mcp.called == ["s.t"]
+    assert _tool_msgs(t.messages)[0]["content"] == "ok"
+
+
+async def test_empty_success_result_gets_placeholder_or_structured() -> None:
+    mcp = _FakeMcp(["s.t"], CallToolResult(content=[]))
+    t = await run_session(
+        ScriptedChatClient([_turn(_call("c", "s__t", {})), _turn(content="d")]), mcp, "s", "t"
+    )
+    assert _tool_msgs(t.messages)[0]["content"] == "(no text output)"
+    mcp = _FakeMcp(["s.t"], CallToolResult(content=[], structured_content={"k": 1}))
+    t = await run_session(
+        ScriptedChatClient([_turn(_call("c", "s__t", {})), _turn(content="d")]), mcp, "s", "t"
+    )
+    assert orjson.loads(_tool_msgs(t.messages)[0]["content"]) == {"k": 1}
+
+
+def test_to_fn_name_rejects_illegal() -> None:
+    with pytest.raises(ValueError):
+        to_fn_name("a.b c")
+    with pytest.raises(ValueError):
+        to_fn_name("a." + "x" * 64)
+
+
+async def test_final_turn_with_no_content() -> None:
+    mcp = _FakeMcp([])
+    t = await run_session(ScriptedChatClient([_turn(content=None)]), mcp, "s", "t")
+    assert t.stopped == "final" and t.messages[-1]["content"] is None
+
+
+async def test_max_steps_zero_makes_no_llm_call() -> None:
+    llm = ScriptedChatClient([_turn(content="x")])
+    t = await run_session(llm, _FakeMcp([]), "s", "t", max_steps=0)
+    assert t.stopped == "max_steps" and t.steps == 0 and llm.calls == []
+
+
+def test_scripted_client_does_not_mutate_callers_list() -> None:
+    import anyio
+
+    turns = [_turn(content="x")]
+    client = ScriptedChatClient(turns)
+    anyio.run(client.complete, [], [])
+    assert len(turns) == 1
