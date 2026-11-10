@@ -53,6 +53,7 @@ import fcntl
 import logging
 import math
 import os
+import re
 import shutil
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -118,6 +119,7 @@ from agentfw.sandbox.tasks.schema import (
     load_templates,
     render,
 )
+from agentfw.sandbox.tools.salesforce_server import BUDGET_ERROR_CODE
 
 __all__ = [
     "COMPANY_SEED",
@@ -143,7 +145,8 @@ RUN_META = "run_meta.json"
 ID_MAP = "id_map.json"
 LOCK = ".lock"
 RAW_DIR, LABELS_DIR, TRANSCRIPTS_DIR, WORK_DIR = "raw", "labels", "transcripts", ".work"
-BUDGET_HIT = "budget exceeded"  # what the (live or budgeted fake) Salesforce backend raises
+# A tool result that IS the budget refusal: MCP's error prefix, then the budget error code.
+_BUDGET_HIT = re.compile(rf"(?:Error executing tool [\w.-]+: )?{re.escape(BUDGET_ERROR_CODE)}: ")
 
 _MUTABLE_KINDS = frozenset(
     {"ticket_open", "charge_refundable", "contact", "account", "opportunity", "soql_object"}
@@ -406,8 +409,11 @@ def _final_labels(raws: Sequence[RawCall], attacks: Sequence[Label]) -> list[Lab
 
 
 def _budget_hit(tr: Transcript) -> bool:
+    """Whether a tool result is the Salesforce budget refusal (its error code at the start;
+    tool output that merely quotes "budget exceeded" does not count)."""
     return any(
-        m.get("role") == "tool" and BUDGET_HIT in str(m.get("content", "")) for m in tr.messages
+        m.get("role") == "tool" and _BUDGET_HIT.match(str(m.get("content", "")))
+        for m in tr.messages
     )
 
 
@@ -481,7 +487,7 @@ class _Runner:
         if inj is None or inj.level != "prompt":
             yield None
             return
-        injector = PromptInjector(backends)
+        injector = PromptInjector(backends, id_map=self.id_map)
         try:
             handle = injector.plant(inj, self.company, record_key=prep.carrier_key)
         except (TypeError, ValueError) as exc:  # e.g. a live backend without snapshot/restore

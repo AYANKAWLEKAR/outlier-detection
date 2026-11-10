@@ -526,3 +526,24 @@ async def test_llm_error_mid_session_discards_partial_work(
     manifest = package([out], tmp_path / "dataset")
     assert manifest.counts.sessions == 2
     assert manifest.source_runs[0]["excluded"] == {"failed": 1}
+
+
+def test_tool_output_quoting_budget_exceeded_does_not_truncate() -> None:
+    from agentfw.sandbox.agent import Transcript
+    from agentfw.sandbox.tools.salesforce_server import BUDGET_ERROR_CODE
+
+    def tr(*contents: str) -> Transcript:
+        return Transcript(messages=[{"role": "tool", "content": c} for c in contents])
+
+    quoting = tr(
+        '{"description": "customer wrote: budget exceeded, please refund"}',
+        "Error executing tool get_ticket: NOT_FOUND: ticket 'budget exceeded' missing",
+        f'{{"note": "{BUDGET_ERROR_CODE}: quoted in a record"}}',
+        f"Error executing tool run_soql: bad query near '{BUDGET_ERROR_CODE}: x'",
+    )
+    assert not run_mod._budget_hit(quoting)
+    hit = f"Error executing tool create_task: {BUDGET_ERROR_CODE}: budget exceeded: API budget 2"
+    assert run_mod._budget_hit(tr(hit))
+    assert not run_mod._budget_hit(
+        Transcript(messages=[{"role": "user", "content": hit}])  # only tool results count
+    )

@@ -30,17 +30,18 @@ import re
 import sys
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
 from agentfw.core.envelope import Label, RawCall
 from agentfw.core.normalize import SessionTracker, normalize
+from agentfw.sandbox.config import SandboxConfig, UnsafeConfigError
 from agentfw.sandbox.retime import retime
 from agentfw.sandbox.tasks.schema import AGENTS_DIR, load_agents
 
@@ -48,6 +49,7 @@ __all__ = [
     "DatasetManifest",
     "ManifestCounts",
     "ValidationReport",
+    "config_secrets",
     "main",
     "package",
     "scan_secrets",
@@ -60,13 +62,15 @@ _OPTS = orjson.OPT_SORT_KEYS
 _FILES = ("traces.jsonl", "labels.jsonl", "traces.parquet", "labels.parquet")
 
 _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("stripe_key", re.compile(r"(?:sk|rk|pk)_(?:test|live)_[A-Za-z0-9]+")),
+    # leading boundary: ``risk_test_x`` / ``task_live_y`` are identifiers, not keys
+    ("stripe_key", re.compile(r"(?<![A-Za-z0-9])(?:sk|rk|pk)_(?:test|live)_[A-Za-z0-9]+")),
     ("stripe_webhook_secret", re.compile(r"whsec_[A-Za-z0-9]+")),
     ("openai_style_key", re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{20,}")),  # incl. sk-proj-
     ("slack_token", re.compile(r"xox[abposr]-[A-Za-z0-9-]+")),
     ("slack_app_token", re.compile(r"xapp-[A-Za-z0-9-]+")),
-    # whitespace may be real or still JSON-escaped (\t, \n, \r) in raw serialized text
-    ("bearer_token", re.compile(r"\bbearer(?:\s|\\[tnr])+[^\s\\\"]+", re.IGNORECASE)),
+    # whitespace may be real or still JSON-escaped (\t, \n, \r) in raw serialized text; a token
+    # of >= 20 chars, so prose ("the bearer of bad news") is not a finding
+    ("bearer_token", re.compile(r"\bbearer(?:\s|\\[tnr])+[^\s\\\"]{20,}", re.IGNORECASE)),
     ("salesforce_session_id", re.compile(r"00D[A-Za-z0-9]{12,15}![A-Za-z0-9._]+")),
 )
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)")
@@ -119,12 +123,42 @@ def _secret_problem(name: str, pattern: str, length: int, where: str) -> str:
     return f"{name}: secret-like string ({pattern}, {length} chars) at {where}"
 
 
-def _content_problems(name: str, text: str) -> list[str]:
+def config_secrets(cfg: SandboxConfig | None) -> dict[str, str]:
+    """``{field name: value}`` of every non-empty ``SecretStr`` field of ``cfg`` (none if None)."""
+    if cfg is None:
+        return {}
+    out: dict[str, str] = {}
+    for name in type(cfg).model_fields:
+        v = getattr(cfg, name)
+        if isinstance(v, SecretStr) and v.get_secret_value():
+            out[name] = v.get_secret_value()
+    return out
+
+
+def _configured_hits(text: str, secrets: Mapping[str, str]) -> list[tuple[str, int, int]]:
+    """``(config field, offset, length)`` of every literal occurrence of a configured secret."""
+    hits: list[tuple[str, int, int]] = []
+    for field, value in sorted(secrets.items()):
+        i = text.find(value)
+        while i != -1:
+            hits.append((field, i, len(value)))
+            i = text.find(value, i + 1)
+    return hits
+
+
+def _content_problems(name: str, text: str, secrets: Mapping[str, str] | None = None) -> list[str]:
     """Secret and email findings in ``text``: the raw text and, for JSON / JSON lines, every
-    decoded string value (so escapes cannot hide a secret). Secret findings name the pattern,
-    the match length and where it is, never the matched text."""
+    decoded string value (so escapes cannot hide a secret). Secret findings name the pattern (or
+    the configured secret's field), the match length and where it is, never the matched text.
+    ``secrets`` are literal configured values (``config_secrets``) to look for as well."""
+    secrets = secrets or {}
+
+    def hits(t: str) -> list[tuple[str, int, int]]:
+        conf = [(f"configured secret {f}", i, n) for f, i, n in _configured_hits(t, secrets)]
+        return _secret_hits(t) + conf
+
     found = dict.fromkeys(
-        _secret_problem(name, pat, n, _where(text, i)) for pat, i, n in _secret_hits(text)
+        _secret_problem(name, pat, n, _where(text, i)) for pat, i, n in hits(text)
     )
     domains = _bad_domains(text)
     if name.endswith((".json", ".jsonl")):
@@ -135,7 +169,7 @@ def _content_problems(name: str, text: str) -> list[str]:
             except orjson.JSONDecodeError:
                 continue
             for k, st in enumerate(_strings(value)):
-                for pat, _, n in _secret_hits(st):
+                for pat, _, n in hits(st):
                     where = f"line {lineno}, decoded string #{k + 1}"
                     found[_secret_problem(name, pat, n, where)] = None
                 domains += _bad_domains(st)
@@ -358,9 +392,16 @@ def _render_card(manifest: DatasetManifest) -> str:
 
 
 def package(
-    run_dirs: Sequence[Path], out_dir: Path, *, version: str = "v1", seed: int = 0
+    run_dirs: Sequence[Path],
+    out_dir: Path,
+    *,
+    version: str = "v1",
+    seed: int = 0,
+    cfg: SandboxConfig | None = None,
 ) -> DatasetManifest:
-    """Merge, retime, check and write the dataset; see the module docs."""
+    """Merge, retime, check and write the dataset; see the module docs. With ``cfg``, the literal
+    values of its secrets are refused too (reported by field name, never printed)."""
+    secrets = config_secrets(cfg)
     sessions: dict[str, list[RawCall]] = {}
     labels: dict[str, Label] = {}
     seen: set[str] = set()
@@ -371,8 +412,8 @@ def package(
     final = [labels[r.envelope_id] for r in raws]
     traces_blob = _jsonl([_dump(r) for r in raws])
     labels_blob = _jsonl([_dump(lab) for lab in final])
-    problems = _content_problems("traces.jsonl", traces_blob.decode())
-    problems += _content_problems("labels.jsonl", labels_blob.decode())
+    problems = _content_problems("traces.jsonl", traces_blob.decode(), secrets)
+    problems += _content_problems("labels.jsonl", labels_blob.decode(), secrets)
     if problems:
         raise ValueError("refusing to package: " + "; ".join(problems))
     _check_normalizes(raws)
@@ -387,8 +428,8 @@ def package(
         created_unix=int(time.time()),
     )
     card = _render_card(manifest)
-    problems = _content_problems("DATASET_CARD.md", card)
-    problems += _content_problems("manifest.json", manifest.model_dump_json())
+    problems = _content_problems("DATASET_CARD.md", card, secrets)
+    problems += _content_problems("manifest.json", manifest.model_dump_json(), secrets)
     if problems:
         raise ValueError("refusing to package: " + "; ".join(problems))
 
@@ -433,8 +474,11 @@ def validate_dataset(
     min_sessions: int = 2000,
     min_actions: int = 40_000,
     min_attacks: int = 600,
+    cfg: SandboxConfig | None = None,
 ) -> ValidationReport:
-    """Check a packaged dataset directory; never raises on bad data, reports problems instead."""
+    """Check a packaged dataset directory; never raises on bad data, reports problems instead.
+    With ``cfg``, its secrets' literal values are findings too (by field name, never printed)."""
+    secrets = config_secrets(cfg)
     d = Path(dir)
     problems: list[str] = []
     missing = [n for n in (*_FILES, "manifest.json", "DATASET_CARD.md") if not (d / n).is_file()]
@@ -456,7 +500,7 @@ def validate_dataset(
     for path in sorted(d.iterdir()):  # every text file: data, manifest, card, anything extra
         if path.is_file() and path.suffix != ".parquet":
             try:
-                problems += _content_problems(path.name, path.read_text())
+                problems += _content_problems(path.name, path.read_text(), secrets)
             except UnicodeDecodeError:
                 problems.append(f"{path.name}: not UTF-8 text")
     try:
@@ -496,6 +540,15 @@ def validate_dataset(
 # --- CLI -----------------------------------------------------------------------------------------
 
 
+def _env_config() -> SandboxConfig | None:
+    """The sandbox config from the environment, or None (then only the patterns are scanned)."""
+    try:
+        return SandboxConfig.from_env()
+    except (ValueError, UnsafeConfigError):  # incomplete or refused env: no literal values
+        sys.stderr.write("note: no sandbox config in the environment; secret values not scanned\n")
+        return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m agentfw.sandbox.package", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -512,7 +565,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     v.add_argument("--min-attacks", type=int, default=600)
     a = ap.parse_args(argv)
     if a.cmd == "build":
-        m = package(a.runs, a.out, version=a.version, seed=a.seed)
+        m = package(a.runs, a.out, version=a.version, seed=a.seed, cfg=_env_config())
         sys.stdout.write(m.counts.model_dump_json(indent=2) + "\n")
         return 0
     rep = validate_dataset(
@@ -521,6 +574,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         min_sessions=a.min_sessions,
         min_actions=a.min_actions,
         min_attacks=a.min_attacks,
+        cfg=_env_config(),
     )
     sys.stdout.write(rep.model_dump_json(indent=2) + "\n")
     return 0 if rep.ok else 1

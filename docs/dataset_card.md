@@ -61,8 +61,10 @@ are kept but clamped to 0.5-120 s, and `velocity_burst` gaps are kept exactly.
 * Attack prevalence is set by `--action-rate` / `--prompt-rate`, not drawn from natural traffic;
   it is far above real-world base rates.
 * Attack labels are planted or matched ground truth (what the injector inserted or the payload
-  matcher recognized), not observed harm; a planted attack the agent ignored is still labeled where
-  it was injected.
+  matcher recognized), not observed harm. A prompt-level payload the agent ignored produces no
+  attack label at all (only calls that match the payload are labeled), so ignored injections are
+  invisible in the labels. Action-level injections label the calls the injector mutated or added
+  (none if the agent never made the targeted call).
 * `failed` and `budget_truncated` sessions are excluded, a survivorship bias toward sessions that
   ran cleanly.
 * The calendar is retimed from a fixed start date; only in-session gaps (clamped to 0.5-120 s) and

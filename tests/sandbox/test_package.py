@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TypedDict
 
 import orjson
 import pyarrow as pa
@@ -16,6 +17,7 @@ from agentfw.bench.registry import make_detector
 from agentfw.bench.replay import SplitSpec, replay
 from agentfw.core.envelope import Label, RawCall, ResponseMeta
 from agentfw.core.normalize import SessionTracker, normalize
+from agentfw.sandbox.config import SandboxConfig
 from agentfw.sandbox.package import (
     DatasetManifest,
     main,
@@ -28,7 +30,16 @@ from agentfw.sandbox.tasks.schema import AGENTS_DIR, load_agents
 
 AGENT_IDS = [a.agent_id for a in load_agents(AGENTS_DIR)]
 WALL = 1_790_000_000_000
-LOW = {"min_agents": 1, "min_sessions": 1, "min_actions": 1, "min_attacks": 0}
+
+
+class _Mins(TypedDict):
+    min_agents: int
+    min_sessions: int
+    min_actions: int
+    min_attacks: int
+
+
+LOW: _Mins = {"min_agents": 1, "min_sessions": 1, "min_actions": 1, "min_attacks": 0}
 
 
 # -- hand-built run directories -------------------------------------------------------------------
@@ -118,7 +129,9 @@ def test_scan_secrets_patterns() -> None:
     assert scan_secrets("key sk_test_abc123") == ["sk_test_abc123"]
     assert scan_secrets("sk_live_XyZ9") == ["sk_live_XyZ9"]
     assert scan_secrets("t xoxb-123-abc-DEF") == ["xoxb-123-abc-DEF"]
-    assert scan_secrets("Authorization: Bearer abc.def") == ["Bearer abc.def"]
+    assert scan_secrets("Authorization: Bearer abc.defghij0123456789") == [
+        "Bearer abc.defghij0123456789"
+    ]
     assert scan_secrets("sid 00D5g000000AbCdEFG!AQEAQabc.def_9") == [
         "00D5g000000AbCdEFG!AQEAQabc.def_9"
     ]
@@ -364,11 +377,11 @@ def test_fake_run_packages_validates_and_replays(tmp_path: Path) -> None:
         "whsec_abc123XYZ",
         "xapp-1-A0B1-123-abc",
         "xoxb-1-2-abc",
-        "authorization: bearer abc123",
-        "BEARER abc123",
-        "Bearer\\tabc123",  # JSON-escaped tab, as in raw serialized text
-        "Bearer\\nabc123",
-        "Bearer\tabc123",
+        "authorization: bearer abcdefghij0123456789xyz",
+        "BEARER abcdefghij0123456789xyz",
+        "Bearer\\tabcdefghij0123456789xyz",  # JSON-escaped tab, as in raw serialized text
+        "Bearer\\nabcdefghij0123456789xyz",
+        "Bearer\tabcdefghij0123456789xyz",
     ],
 )
 def test_scan_secrets_extended_patterns(text: str) -> None:
@@ -396,7 +409,7 @@ def test_secret_in_run_dir_name_blocks_packaging(tmp_path: Path) -> None:
 
 def test_secret_split_by_json_escape_is_found(mini: Path) -> None:
     p = mini / "traces.jsonl"
-    p.write_bytes(p.read_bytes().replace(b"T-1", b"Bearer\\tabc", 1))
+    p.write_bytes(p.read_bytes().replace(b"T-1", b"Bearer\\tabcdefghij0123456789xyz", 1))
     rep = validate_dataset(mini, **LOW)
     assert any("traces.jsonl" in x and "secret" in x for x in rep.problems)
 
@@ -498,3 +511,82 @@ def test_refusal_exception_never_contains_the_secret(tmp_path: Path) -> None:
     text = str(info.value)
     assert "stripe_key" in text and f"{len(_TOKEN)} chars" in text
     assert _TOKEN[:12] not in text and "Zq9Zq9" not in text
+
+
+# -- secret patterns: boundaries, bearer length, configured values (FR1 minors) ------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "risk_test_x1",
+        "task_live_abc",
+        "disk_test_volume",
+        "the bearer of bad news",
+        "Bearer short_token_19ch",
+    ],
+)
+def test_scan_secrets_no_false_positive_on_prose_and_identifiers(text: str) -> None:
+    assert scan_secrets(text) == [], text
+
+
+def test_scan_secrets_still_finds_bounded_stripe_keys() -> None:
+    assert scan_secrets("key=sk_test_abc123") == ["sk_test_abc123"]
+    assert scan_secrets('"sk_live_abc"') == ["sk_live_abc"]
+    assert scan_secrets("Bearer " + "x" * 20) == ["Bearer " + "x" * 20]
+
+
+def _sandbox_cfg(tmp_path: Path, **over: str) -> SandboxConfig:
+    env = {n.upper(): "placeholder-value" for n in SandboxConfig.REQUIRED_ENV}
+    env.update(
+        STRIPE_SECRET_KEY="sk_test_cfgsecret",
+        LLM_USD_BUDGET="1",
+        PRICE_IN_PER_M="1",
+        PRICE_OUT_PER_M="1",
+        DATA_DIR=str(tmp_path),
+    )
+    env.update(over)
+    return SandboxConfig.from_env(env)
+
+
+_PASSWORD = "Hunter2-plain-password-no-pattern"
+
+
+def test_configured_secret_values_block_packaging_without_echo(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    made = _write_run(run, {"s0": (AGENT_IDS[0], [1000])})
+    raw = run / "raw" / "s0.jsonl"
+    raw.write_bytes(raw.read_bytes().replace(b"T-1", _PASSWORD.encode(), 1))
+    assert made and scan_secrets(_PASSWORD) == []  # no pattern would catch it
+    cfg = _sandbox_cfg(tmp_path, SF_PASSWORD=_PASSWORD)
+    with pytest.raises(ValueError, match="configured secret") as info:
+        package([run], tmp_path / "out", cfg=cfg)
+    assert "sf_password" in str(info.value) and _PASSWORD not in str(info.value)
+    assert "Hunter2" not in str(info.value)
+    package([run], tmp_path / "ok")  # without a config only the patterns apply
+
+
+def test_validate_flags_configured_secret_values(mini: Path, tmp_path: Path) -> None:
+    p = mini / "traces.jsonl"
+    p.write_bytes(p.read_bytes().replace(b"T-1", _PASSWORD.encode(), 1))
+    rep = validate_dataset(mini, **LOW, cfg=_sandbox_cfg(tmp_path, SF_PASSWORD=_PASSWORD))
+    hits = [x for x in rep.problems if "configured secret" in x]
+    assert hits and all("sf_password" in x and "Hunter2" not in x for x in hits)
+    assert not any("configured secret" in x for x in validate_dataset(mini, **LOW).problems)
+
+
+def test_cli_uses_the_environment_config_for_secret_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run = tmp_path / "run"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])})
+    raw = run / "raw" / "s0.jsonl"
+    raw.write_bytes(raw.read_bytes().replace(b"T-1", _PASSWORD.encode(), 1))
+    cfg = _sandbox_cfg(tmp_path, SF_PASSWORD=_PASSWORD)
+    for name in type(cfg).model_fields:
+        v = getattr(cfg, name)
+        monkeypatch.setenv(
+            name.upper(), v.get_secret_value() if hasattr(v, "get_secret_value") else str(v)
+        )
+    with pytest.raises(ValueError, match="configured secret sf_password"):
+        main(["build", "--runs", str(run), "--out", str(tmp_path / "out")])

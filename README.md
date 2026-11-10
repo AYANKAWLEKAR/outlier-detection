@@ -27,6 +27,23 @@ uv run python -m agentfw.sandbox.package validate dataset/v1
 Offline check of the same commands: add `--fake` to the run, and pass lowered `--min-*` values to
 `validate`.
 
+Live-run notes (read before the collection):
+
+* The Salesforce org must be a Developer Edition or a sandbox. The seeder and the live backend
+  check `Organization` first and refuse anything else.
+* Developer Edition orgs ship with sample Contacts on real email domains. These trip the
+  reserved-domain check (D-016) and packaging refuses. Delete them before the run, or keep only
+  records whose `Description` starts with `afw-seed:`.
+* Stripe refunds persist across runs and retries. A failed session that is retried may already
+  have refunded its charge, so the retry's refund check can fail.
+* The Mailhog listing returns 50 messages by default. With `max_concurrency=4`, concurrent sessions
+  can satisfy each other's fixed-recipient mail checks.
+* The two points above only affect the ledger's `checks` health numbers, not traces or labels.
+* The Salesforce budget reservation over-counts while sessions are running (each running session
+  holds its full estimate). It errs on the conservative side.
+* `package build` / `validate` also scan for the literal secret values of the sandbox config
+  when the full config is in the environment.
+
 ### Benchmark dataset/v1 (Tier-2 exit)
 
 Once `dataset/v1` validates, run every detector on the full by-time test split into

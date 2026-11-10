@@ -14,8 +14,9 @@ Families that leave the call itself untouched are forwarded as normal:
 * ``exfil_volume`` overrides the read's ``response_meta.item_count`` (``round(V * baseline)`` where
   the baseline is the median item_count of earlier calls to that tool, else
   ``DEFAULT_EXFIL_BASELINE``) and labels the read, the call right after it and the first outbound
-  write after that, matching the offline generator. The override replaces the whole extracted
-  ``response_meta`` (the proxy's contract), so that read carries no ``bytes``/``ids``.
+  write after that, matching the offline generator. The override is MERGED into the extracted
+  ``response_meta`` (ruling EX1, the proxy's contract): only ``item_count`` is replaced, so the
+  read keeps its real ``bytes``/``ids``/``error``.
 
 **Prompt level** (``PromptInjector`` + ``label_prompt_session``): payload text is planted in a
 fake / local backend's business data before the session; ``cleanup`` restores the exact prior state.
@@ -403,9 +404,17 @@ class PlantHandle:
 class PromptInjector:
     """Plants payload text into fake/local backends (``zendesk`` / ``salesforce`` / ``slack``)."""
 
-    def __init__(self, backends: Mapping[str, Any], clock_ms: Callable[[], int] = wall_ms) -> None:
+    def __init__(
+        self,
+        backends: Mapping[str, Any],
+        clock_ms: Callable[[], int] = wall_ms,
+        id_map: Mapping[str, str] | None = None,
+    ) -> None:
+        """``id_map`` ({company key: live id}, a live run's seeded ids) fills ``{charge_id}`` with
+        the real Stripe charge; without it (fake mode) the fake Stripe ids are used."""
         self._backends = dict(backends)
         self._clock_ms = clock_ms
+        self._id_map = dict(id_map or {})
 
     def plant(
         self, plan: InjectionPlan, company: Company, *, record_key: str | None = None
@@ -436,7 +445,7 @@ class PromptInjector:
             if not accounts:
                 raise ValueError(f"no account {record_key!r} in the company")
             account = accounts[0]
-        charge_id = fake_stripe_ids(company)[ticket.charge_key]
+        charge_id = {**fake_stripe_ids(company), **self._id_map}[ticket.charge_key]
         text = payload.text.replace("{charge_id}", charge_id)
         snap = be.snapshot()
         try:

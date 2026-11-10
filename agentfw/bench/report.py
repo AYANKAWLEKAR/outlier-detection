@@ -77,10 +77,12 @@ def _headline(m: Metrics, warm_only: bool) -> dict[str, Any]:
     return {
         "auprc": m.auprc,
         "auprc_ci": m.auprc_ci,
+        "auprc_ci_n_dropped": m.auprc_ci_n_dropped,  # NaN bootstrap resamples skipped
         "fpr95_global": m.fpr95_global,
         "recall_at_global_thr": m.recall_at_global_thr,
         "fpr95_per_agent": m.fpr95_per_agent,
         "fpr95_per_agent_ci": m.fpr95_per_agent_ci,
+        "fpr95_per_agent_ci_n_dropped": m.fpr95_per_agent_ci_n_dropped,
         # A per-agent FPR is only meaningful at the recall it was achieved at.
         "per_agent_recall": m.per_agent_recall,
         "per_agent_alpha": m.per_agent_alpha,

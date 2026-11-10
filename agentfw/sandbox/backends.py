@@ -34,7 +34,6 @@ from agentfw.sandbox.tools import (
     stripe_server,
     zendesk_server,
 )
-from agentfw.sandbox.tools.common import tool_error
 
 __all__ = [
     "BUILDERS",
@@ -70,7 +69,7 @@ class BudgetedSalesforce:
         try:
             self._budget.charge(1)
         except BudgetExceeded as exc:
-            raise tool_error(f"budget exceeded: {exc}") from exc
+            raise salesforce_server.budget_error(exc) from exc
 
     def run_soql(self, query: str) -> list[dict[str, Any]]:
         self._charge()

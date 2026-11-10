@@ -130,6 +130,7 @@ def _family_recall(warm_test: list[ScoreRow], fam: str) -> float:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="Tier-1 gate not met (spec protocol, nor the oracle-reviewer protocol with the "
     "user-decision defaults); see docs/decisions/008-tier1-gate.md",
 )

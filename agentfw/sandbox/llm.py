@@ -11,11 +11,14 @@ which holds for every catalog id and every sandbox server tool (both are tested)
 
 from __future__ import annotations
 
+import logging
+import math
 import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol, cast
 
 import openai
+import orjson
 
 __all__ = [
     "ChatClient",
@@ -29,7 +32,17 @@ __all__ = [
     "to_fn_name",
 ]
 
+logger = logging.getLogger(__name__)
+
 _FN_NAME = re.compile(r"[a-zA-Z0-9_-]{1,64}")
+# A reply without ``usage`` is metered from text length at this many characters per token: about
+# half the usual ~4, so the estimate over-counts and the USD budget fails closed, never open.
+EST_CHARS_PER_TOKEN = 2.0
+
+
+def estimate_tokens(text: str) -> int:
+    """Conservative (over-)estimate of the token count of ``text``; at least 1."""
+    return max(1, math.ceil(len(text) / EST_CHARS_PER_TOKEN))
 
 
 def to_fn_name(tool_id: str) -> str:
@@ -103,7 +116,13 @@ class OpenAICompatClient:
             if tc.type == "function"
         ]
         u = resp.usage
-        usage = Usage(u.prompt_tokens, u.completion_tokens) if u is not None else Usage(0, 0)
+        if u is not None:
+            usage = Usage(u.prompt_tokens, u.completion_tokens)
+        else:  # never meter a turn as free: estimate from what was sent and received
+            logger.warning("provider reply has no usage; estimating tokens conservatively")
+            sent = orjson.dumps([messages, tools], default=str).decode()
+            got = (msg.content or "") + "".join(c.name + c.arguments_json for c in calls)
+            usage = Usage(estimate_tokens(sent), estimate_tokens(got))
         return ChatTurn(content=msg.content, tool_calls=calls, usage=usage)
 
 

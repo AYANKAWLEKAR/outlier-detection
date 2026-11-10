@@ -38,6 +38,16 @@ _RESERVED_FIELDS = frozenset({"id", "attributes"})
 
 
 ORG_QUERY = "SELECT OrganizationType, IsSandbox FROM Organization"
+# The error code every budget refusal starts with; the runner matches it to mark a session
+# ``budget_truncated`` (never a substring of arbitrary tool output).
+BUDGET_ERROR_CODE = "SF_API_BUDGET_EXCEEDED"
+
+
+def budget_error(exc: BudgetExceeded) -> ToolError:
+    """The tool error for a spent budget: ``SF_API_BUDGET_EXCEEDED: budget exceeded: ...``."""
+    return tool_error(f"{BUDGET_ERROR_CODE}: budget exceeded: {exc}")
+
+
 DEVELOPER_EDITION = "Developer Edition"
 
 
@@ -277,7 +287,7 @@ class LiveSalesforceBackend:
         try:
             self._budget.charge(1)
         except BudgetExceeded as exc:
-            raise tool_error(f"budget exceeded: {exc}") from exc
+            raise budget_error(exc) from exc
         try:
             return fn(*args, **kwargs)
         except Exception as exc:

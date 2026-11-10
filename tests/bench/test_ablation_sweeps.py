@@ -40,7 +40,9 @@ def test_ablation_returns_one_row_per_variant_in_order(ablation: list[AblationRo
 # outrank attacks. Kept as a strict xfail so the property is re-checked automatically (an XPASS
 # fails the run) -- see docs/decisions/007-ablation-dominance.md.
 _MAG_HURTS = pytest.mark.xfail(
-    strict=True, reason="Task 1.14 finding: engine-no-magnitude beats engine on tiny_dataset"
+    strict=True,
+    raises=AssertionError,
+    reason="Task 1.14 finding: engine-no-magnitude beats engine on tiny_dataset",
 )
 
 

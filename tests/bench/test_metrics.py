@@ -550,3 +550,31 @@ def test_compute_all_breakdown_threshold_modes() -> None:
     )
     assert none.breakdown_mode == "row"
     assert none.per_family_attack["magnitude_spike"]["all"].recall == 0.0
+
+
+def test_bootstrap_records_dropped_nan_replicates() -> None:
+    from agentfw.bench.metrics import bootstrap_ci_counted
+
+    rows = _sessions()
+
+    def nan_unless_s0(rs: Sequence[ScoreRow]) -> float:
+        return 1.0 if any(r.session_id == "S0" for r in rs) else math.nan
+
+    ci = bootstrap_ci_counted(rows, nan_unless_s0, n=100, seed=0)
+    assert 0 < ci.n_dropped < 100
+    assert (ci.lo, ci.hi) == bootstrap_ci(rows, nan_unless_s0, n=100, seed=0) == (1.0, 1.0)
+    assert bootstrap_ci_counted(rows, lambda rs: math.nan, n=10).n_dropped == 10
+    assert bootstrap_ci_counted(rows, _auprc_rows, n=10).n_dropped == 0
+
+
+def test_metrics_and_report_carry_the_dropped_counts() -> None:
+    from agentfw.bench.report import _headline
+
+    # one attack session among 40: resamples that miss it have no attack (AUPRC NaN)
+    rows = [_row(session_id=f"B{k}", fused_score=0.1 * (k % 7)) for k in range(40)]
+    rows.append(_row(session_id="ATK", fused_score=0.9, label="attack"))
+    m = compute_all(rows, warm_only=False, n_boot=200)
+    assert 0 < m.auprc_ci_n_dropped < 200
+    h = _headline(m, warm_only=False)
+    assert h["auprc_ci_n_dropped"] == m.auprc_ci_n_dropped
+    assert h["fpr95_per_agent_ci_n_dropped"] == m.fpr95_per_agent_ci_n_dropped

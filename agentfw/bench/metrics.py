@@ -39,6 +39,7 @@ __all__ = [
     "GATE_RECALL",
     "RECALL_TARGET",
     "STRENGTH_BUCKETS",
+    "BootstrapCI",
     "BucketCell",
     "DriftDelay",
     "GateCell",
@@ -50,6 +51,7 @@ __all__ = [
     "auprc",
     "benign_fpr",
     "bootstrap_ci",
+    "bootstrap_ci_counted",
     "cold_start_curve",
     "compute_all",
     "control_fpr",
@@ -180,6 +182,8 @@ class Metrics:
     latency_p99_us: float
     n_rows: int
     n_attack_rows: int
+    auprc_ci_n_dropped: int = 0  # bootstrap resamples skipped because the metric was NaN
+    fpr95_per_agent_ci_n_dropped: int = 0
 
 
 # --- helpers ------------------------------------------------------------------------------------
@@ -565,25 +569,33 @@ def per_agent_fpr_at_recall(
 # --- bootstrap ----------------------------------------------------------------------------------
 
 
-def bootstrap_ci(
+@dataclass(frozen=True, slots=True)
+class BootstrapCI:
+    lo: float
+    hi: float
+    n_dropped: int  # resamples skipped because the metric was NaN on them
+
+
+def bootstrap_ci_counted(
     rows: Sequence[ScoreRow],
     metric: Callable[[Sequence[ScoreRow]], float],
     n: int = BOOTSTRAP_N,
     seed: int = 0,
     level: float = 0.95,
-) -> tuple[float, float]:
-    """Percentile bootstrap over **sessions** (spec 5.4).
+) -> BootstrapCI:
+    """Percentile bootstrap over **sessions** (spec 5.4), with the count of dropped resamples.
 
     Each resample draws as many sessions as exist, with replacement (``np.random.default_rng``),
-    and keeps every row of each drawn session. Resamples where ``metric`` is NaN are skipped;
-    ``(nan, nan)`` if all are.
+    and keeps every row of each drawn session. Resamples where ``metric`` is NaN are skipped and
+    counted in ``n_dropped``; ``(nan, nan)`` if all are (``n_dropped == 0`` when there are no rows:
+    nothing was resampled).
     """
     groups: dict[str, list[ScoreRow]] = defaultdict(list)
     for r in rows:
         groups[r.session_id].append(r)
     sessions = [groups[k] for k in sorted(groups)]
     if not sessions:
-        return math.nan, math.nan
+        return BootstrapCI(math.nan, math.nan, 0)
     rng = np.random.default_rng(seed)
     vals: list[float] = []
     for _ in range(n):
@@ -591,10 +603,23 @@ def bootstrap_ci(
         v = metric(list(chain.from_iterable(sessions[int(i)] for i in pick)))
         if not math.isnan(v):
             vals.append(v)
+    dropped = n - len(vals)
     if not vals:
-        return math.nan, math.nan
+        return BootstrapCI(math.nan, math.nan, dropped)
     lo, hi = np.percentile(vals, [100 * (1 - level) / 2, 100 * (1 + level) / 2])
-    return float(lo), float(hi)
+    return BootstrapCI(float(lo), float(hi), dropped)
+
+
+def bootstrap_ci(
+    rows: Sequence[ScoreRow],
+    metric: Callable[[Sequence[ScoreRow]], float],
+    n: int = BOOTSTRAP_N,
+    seed: int = 0,
+    level: float = 0.95,
+) -> tuple[float, float]:
+    """``(lo, hi)`` of :func:`bootstrap_ci_counted` (NaN resamples skipped)."""
+    ci = bootstrap_ci_counted(rows, metric, n=n, seed=seed, level=level)
+    return ci.lo, ci.hi
 
 
 # --- everything ---------------------------------------------------------------------------------
@@ -645,20 +670,21 @@ def compute_all(
     pa = per_agent_fpr_at_recall(pool, RECALL_TARGET)
     thresholds: Thresholds = "row" if breakdown_thresholds == "row" else pa.thresholds
     pa_ci = (
-        (math.nan, math.nan)
+        BootstrapCI(math.nan, math.nan, 0)
         if math.isnan(pa.fpr)
-        else bootstrap_ci(pool, _per_agent_fpr, n=n_boot, seed=seed)
+        else bootstrap_ci_counted(pool, _per_agent_fpr, n=n_boot, seed=seed)
     )
+    auprc_ci = bootstrap_ci_counted(test, _auprc_rows, n=n_boot, seed=seed)
 
     p50, p99 = latency_summary(test)
     return Metrics(
         auprc=auprc(s, y),
-        auprc_ci=bootstrap_ci(test, _auprc_rows, n=n_boot, seed=seed),
+        auprc_ci=(auprc_ci.lo, auprc_ci.hi),
         thr95_global=thr_g,
         fpr95_global=fpr_g,
         recall_at_global_thr=recall_g,
         fpr95_per_agent=pa.fpr,
-        fpr95_per_agent_ci=pa_ci,
+        fpr95_per_agent_ci=(pa_ci.lo, pa_ci.hi),
         per_agent_alpha=pa.alpha,
         per_agent_recall=pa.recall,
         breakdown_mode=breakdown_thresholds,
@@ -671,4 +697,6 @@ def compute_all(
         latency_p99_us=p99,
         n_rows=len(test),
         n_attack_rows=n_atk,
+        auprc_ci_n_dropped=auprc_ci.n_dropped,
+        fpr95_per_agent_ci_n_dropped=pa_ci.n_dropped,
     )

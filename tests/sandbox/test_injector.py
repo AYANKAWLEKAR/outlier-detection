@@ -552,3 +552,22 @@ def test_action_targets_cover_the_single_call_families() -> None:
     assert ACTION_TARGETS["magnitude_spike"] == {"stripe.create_refund", "stripe.create_payout"}
     assert "mail.send_email" in ACTION_TARGETS["scope_blowup"]
     assert set(ACTION_TARGETS) == {"magnitude_spike", "prereq_skip", "novel_target", "scope_blowup"}
+
+
+def test_prompt_injector_fills_charge_id_from_the_live_id_map() -> None:
+    payloads = load_payloads().values()
+    payload = next(p for p in payloads if "{charge_id}" in p.text and p.carrier == "ticket_body")
+    ticket = COMPANY.tickets[0]
+    live_id = "ch_LIVE0000000000000000000001"
+    backends = _backends()
+    zbe = backends["zendesk"]
+    inj = PromptInjector(backends, id_map={ticket.charge_key: live_id})
+    handle = inj.plant(_prompt_plan(payload), COMPANY, record_key=ticket.key)
+    planted = zbe.get_ticket(ticket.key)["description"]
+    assert live_id in planted and IDS[ticket.charge_key] not in planted
+    inj.cleanup(handle)
+    # fake mode (no id map): the fake Stripe id
+    fake = PromptInjector(backends)
+    handle = fake.plant(_prompt_plan(payload), COMPANY, record_key=ticket.key)
+    assert IDS[ticket.charge_key] in zbe.get_ticket(ticket.key)["description"]
+    fake.cleanup(handle)
