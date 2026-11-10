@@ -5,6 +5,28 @@ Anomaly detection for AI agent tool calls. Packages: `core` (detectors), `synth`
 
 Run the green gate with `scripts/gate.sh` (add `--full` to include slow tests).
 
+## How to build dataset/v1
+
+The public dataset is packaged from sandbox run directories. The live collection calls a real LLM
+and sandbox APIs, so it is run by hand (not in CI). Full text, including the dataset card template,
+is in [docs/dataset_card.md](docs/dataset_card.md).
+
+```
+# 1. seed: the first live run seeds the sandbox org idempotently (id_map.json); no separate command
+# 2. run in resumable chunks (same --out; finished sessions are skipped), up to 2,200 sessions
+for n in 200 500 1000 1500 2000 2200; do
+  uv run python -m agentfw.sandbox.run --sessions $n --seed 0 --out runs/v1 \
+    --action-rate 0.15 --prompt-rate 0.10
+done
+# 3. package (only ledger status "completed" sessions are included)
+uv run python -m agentfw.sandbox.package build --runs runs/v1 --out dataset/v1 --seed 0
+# 4. validate (>= 20 agents, 2,000 sessions, 40,000 actions, 600 attacks)
+uv run python -m agentfw.sandbox.package validate dataset/v1
+```
+
+Offline check of the same commands: add `--fake` to the run, and pass lowered `--min-*` values to
+`validate`.
+
 ## Tier 1 status
 
 **The Tier-1 exit gate is not met** (per-family attack recall ≥ 0.90 for the targeted detector).

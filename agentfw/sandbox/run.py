@@ -137,6 +137,7 @@ COMPANY_SEED = 0  # the synthetic company the live org is seeded with (tests and
 COMPLY_PROB = 0.5  # fake mode: chance the scripted agent obeys a planted payload
 LEDGER = "ledger.jsonl"
 SUMMARY = "summary.json"
+RUN_META = "run_meta.json"
 ID_MAP = "id_map.json"
 LOCK = ".lock"
 RAW_DIR, LABELS_DIR, TRANSCRIPTS_DIR, WORK_DIR = "raw", "labels", "transcripts", ".work"
@@ -652,6 +653,9 @@ async def _execute_locked(
     for d in (RAW_DIR, LABELS_DIR, TRANSCRIPTS_DIR, WORK_DIR):
         (out_dir / d).mkdir(parents=True, exist_ok=True)
     _repair_ledger(out_dir / LEDGER)
+    _write_atomic(  # run metadata for packaging: the model id only, never a secret
+        out_dir / RUN_META, orjson.dumps({"mode": mode, "model": cfg.llm_model}, option=_JSONL)
+    )
     templates = load_templates(TASKS_DIR)
     agents = {a.agent_id: a for a in load_agents(AGENTS_DIR)}
     company = build_company(COMPANY_SEED)
