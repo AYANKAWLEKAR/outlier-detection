@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -121,3 +122,102 @@ def test_registry_entry(tmp_path: Path) -> None:
     client = ScriptedChatClient([])
     d = make_detector("llm_judge", client=client, cache_dir=tmp_path, model_id="m")
     assert isinstance(d, LlmJudge)
+
+
+class _LoopClient:
+    """Asserts every call runs on one live event loop (as a pooled httpx client requires)."""
+
+    def __init__(self) -> None:
+        self.loops: list[asyncio.AbstractEventLoop] = []
+
+    async def complete(
+        self, messages: list[dict[str, object]], tools: list[dict[str, object]]
+    ) -> ChatTurn:
+        loop = asyncio.get_running_loop()
+        assert not loop.is_closed()
+        self.loops.append(loop)
+        await asyncio.sleep(0)
+        return _turn('{"suspicion": 0.3}')
+
+
+def test_one_persistent_event_loop_across_scores(tmp_path: Path) -> None:
+    client = _LoopClient()
+    det = LlmJudge(client, tmp_path, "m")
+    for i in range(4):
+        det.score(make_env(args={"amount": float(i)}))
+    assert len(client.loops) == 4 and len({id(x) for x in client.loops}) == 1
+    first = client.loops[0]
+    det.reset()  # closes the loop; the next score starts a fresh one
+    assert first.is_closed()
+    det.score(make_env(args={"amount": 99.0}))
+    assert not client.loops[-1].is_closed() and client.loops[-1] is not first
+    det.close()
+    assert client.loops[-1].is_closed()
+
+
+def test_score_inside_running_loop(tmp_path: Path) -> None:
+    det, _ = _judge(tmp_path, '{"suspicion": 0.6}')
+
+    async def go() -> float:
+        return det.score(make_env(args={"amount": 1.0})).fused_score
+
+    assert asyncio.run(go()) == 0.6
+
+
+def test_relative_dt_in_prompt_without_absolute_time(tmp_path: Path) -> None:
+    det, client = _judge(tmp_path, '{"suspicion": 0.1}')
+    t0 = 1_700_000_000_000
+    det.update(make_env(args={"amount": 1.0}, ts_unix_ms=t0), Outcome.ALLOWED)
+    det.update(make_env(args={"amount": 2.0}, ts_unix_ms=t0 + 61_000), Outcome.ALLOWED)
+    det.score(make_env(args={"amount": 3.0}, ts_unix_ms=t0 + 61_000 + 2_340))
+    text = " ".join(str(m["content"]) for m in client.calls[0][0])
+    assert text.count('"dt_s":0.0') == 1  # first call of the session
+    assert '"dt_s":61.0' in text and '"dt_s":2.3' in text
+    assert "1700000" not in text and "ts_unix_ms" not in text
+
+
+def test_client_error_scores_half_and_is_not_cached(tmp_path: Path) -> None:
+    det, client = _judge(tmp_path)  # no scripted turns: every call raises
+    e = make_env(args={"amount": 1.0})
+    res = det.score(e)
+    assert res.fused_score == 0.5
+    assert res.per_detector[0].evidence == {"client_error": True}
+    client.turns.append(_turn('{"suspicion": 0.9}'))
+    assert det.score(e).fused_score == 0.9  # the failure was not cached
+
+
+def test_unreadable_cache_entry_is_a_miss_and_writes_are_atomic(tmp_path: Path) -> None:
+    det, client = _judge(tmp_path, *['{"suspicion": 0.7}'] * 3)
+    e = make_env(args={"amount": 1.0})
+    det.score(e)
+    (entry,) = tmp_path.glob("*.json")
+    assert [p.name for p in tmp_path.iterdir()] == [entry.name]  # no temp leftovers
+    entry.write_bytes(b"{trunc")
+    assert det.score(e).fused_score == 0.7
+    assert len(client.calls) == 2
+    entry.write_bytes(b"[1]")
+    assert det.score(e).fused_score == 0.7  # wrong shape -> miss again
+    assert len(client.calls) == 3
+
+
+def test_system_prompt_is_part_of_cache_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentfw.bench.baselines.llm_judge as mod
+
+    det, client = _judge(tmp_path, '{"suspicion": 0.1}', '{"suspicion": 0.2}')
+    e = make_env(args={"amount": 1.0})
+    assert det.score(e).fused_score == 0.1
+    monkeypatch.setattr(mod, "_SYSTEM", mod._SYSTEM + " Be strict.")
+    assert det.score(e).fused_score == 0.2
+    assert len(client.calls) == 2
+
+
+def test_config_record_excludes_client(tmp_path: Path) -> None:
+    det, _ = _judge(tmp_path)
+    assert det.config_record() == {
+        "model_id": "test-model",
+        "window": 8,
+        "prompt_version": "v1",
+        "cache_dir": str(tmp_path),
+    }

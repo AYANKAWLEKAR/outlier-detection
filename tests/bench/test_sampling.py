@@ -10,6 +10,7 @@ from agentfw.bench.replay import SplitSpec, assign_split, read_score_table
 from agentfw.bench.run import run
 from agentfw.bench.sampling import sample_counts, stratified_sample
 from agentfw.core.envelope import Label, RawCall
+from agentfw.sandbox.llm import ChatTurn, ScriptedChatClient, Usage
 from tests.factories import make_raw
 
 FAMILIES = ("magnitude_spike", "novel_target", "velocity_burst")
@@ -92,3 +93,76 @@ def test_run_sample_flag_records_spec_counts_and_caveats(
 def test_run_rejects_bad_sample_spec(tiny_dataset: Path, tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="stratified:N"):
         run(tiny_dataset, "random", SplitSpec(), tmp_path / "o", n_boot=5, sample="random:5")
+
+
+def test_run_llm_judge_offline_completes_and_records_safe_config(
+    tiny_dataset: Path, tmp_path: Path
+) -> None:
+    client = ScriptedChatClient(
+        [ChatTurn('{"suspicion": 0.4}', [], Usage(1, 1)) for _ in range(500)]
+    )
+    out = run(
+        tiny_dataset,
+        "llm_judge",
+        SplitSpec(),
+        tmp_path / "o",
+        n_boot=5,
+        sample="stratified:10",
+        client=client,
+        cache_dir=tmp_path / "cache",
+        model_id="stub-model",
+    )
+    rep = orjson.loads((out / "report.json").read_bytes())
+    cfg = rep["meta"]["detector_config"]
+    assert cfg == {
+        "model_id": "stub-model",
+        "window": 8,
+        "prompt_version": "v1",
+        "cache_dir": str(tmp_path / "cache"),
+    }
+    assert "batch" not in rep["extras"]
+    assert len(client.calls) >= 1
+    assert any("splits multi-envelope attacks" in n for n in rep["extras"]["notes"])
+
+
+def test_cli_judge_requires_env_and_builds_live_client_only_from_env(
+    tiny_dataset: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentfw.bench import run as run_mod
+
+    for k in ("JUDGE_BASE_URL", "JUDGE_API_KEY", "JUDGE_MODEL"):
+        monkeypatch.delenv(k, raising=False)
+    base = ["--traces", str(tiny_dataset), "--detector", "llm_judge", "--out", str(tmp_path / "o")]
+    with pytest.raises(SystemExit):
+        run_mod.main(base)
+
+    seen: dict[str, object] = {}
+
+    class _Stub:
+        def __init__(self, base_url: str, api_key: str, model: str) -> None:
+            seen.update(base_url=base_url, model=model)
+
+        async def complete(
+            self, messages: list[dict[str, object]], tools: list[dict[str, object]]
+        ) -> ChatTurn:
+            return ChatTurn('{"suspicion": 0.2}', [], Usage(1, 1))
+
+    monkeypatch.setattr(run_mod, "OpenAICompatClient", _Stub)
+    monkeypatch.setenv("JUDGE_BASE_URL", "http://judge.test/v1")
+    monkeypatch.setenv("JUDGE_API_KEY", "sk-should-never-be-recorded")
+    run_mod.main(
+        [
+            *base,
+            "--judge-model",
+            "m1",
+            "--judge-cache",
+            str(tmp_path / "c"),
+            "--sample",
+            "stratified:6",
+            "--n-boot",
+            "5",
+        ]
+    )
+    assert seen == {"base_url": "http://judge.test/v1", "model": "m1"}
+    text = (tmp_path / "o" / "report.json").read_text()
+    assert "sk-should-never-be-recorded" not in text and "judge.test" not in text

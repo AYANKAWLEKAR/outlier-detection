@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from collections.abc import Sequence
 from pathlib import Path
@@ -21,6 +22,7 @@ from agentfw.bench.registry import make_detector
 from agentfw.bench.replay import SplitSpec, canonical_hash, replay, write_score_table
 from agentfw.bench.report import RunMeta, build_report, git_sha, render_markdown, update_readme
 from agentfw.bench.sampling import sample_counts, stratified_sample
+from agentfw.sandbox.llm import OpenAICompatClient
 
 __all__ = ["main", "run"]
 
@@ -55,11 +57,17 @@ def run(
         extras["sample"] = {"spec": sample, "seed": seed, **sample_counts(raws, labels, sample_ids)}
         notes.append(
             f"sampled: scores cover a stratified test subsample ({sample}); attack prevalence is "
-            "far above the dataset's, so AUPRC is not comparable with a full replay."
+            "far above the dataset's, so AUPRC is not comparable with a full replay. Sampling "
+            "splits multi-envelope attacks, so per-attack recall counts only sampled envelopes."
         )
     if isinstance(det, BatchFit):
         extras["batch"] = True
-        notes.append("batch: fit offline on the whole train split, not an online/causal learner.")
+        notes.append(
+            "batch: fit offline on the whole train split, not an online/causal learner. "
+            "Isolation forest cannot score extrapolation above the train tail (a point far "
+            "outside the train range scores like the extremes already seen), which depresses "
+            "its recall on magnitude spikes."
+        )
     if notes:
         extras["notes"] = notes
     rows = replay(raws, labels, det, split, sample_ids=sample_ids)
@@ -72,7 +80,7 @@ def run(
         seed=seed,
         dataset_sha=manifest.files["traces.jsonl"],
         detector=detector,
-        detector_config=dict(detector_kw),
+        detector_config=_config_record(det, detector_kw),
         split=split,
         created_unix=int(time.time()),
     )
@@ -94,6 +102,39 @@ def run(
     return out_dir
 
 
+_SECRET_HINTS = ("key", "secret", "token", "password")
+
+
+def _config_record(det: object, kw: dict[str, Any]) -> dict[str, Any]:
+    """JSON-safe, credential-free record of the detector config for the report."""
+    rec = getattr(det, "config_record", None)
+    if callable(rec):
+        return dict(rec())
+    out: dict[str, Any] = {}
+    for k, v in kw.items():
+        if any(h in k.lower() for h in _SECRET_HINTS):
+            continue
+        out[k] = v if isinstance(v, str | int | float | bool | type(None)) else type(v).__name__
+    return out
+
+
+def _live_judge_kwargs(model: str | None, cache: Path) -> dict[str, Any]:
+    """Build the judge's live client from JUDGE_BASE_URL / JUDGE_API_KEY / JUDGE_MODEL.
+
+    Only called when actually running ``--detector llm_judge``; the key is never recorded.
+    """
+    env = os.environ
+    base, key = env.get("JUDGE_BASE_URL"), env.get("JUDGE_API_KEY")
+    model = model or env.get("JUDGE_MODEL")
+    if not (base and key and model):
+        raise SystemExit(
+            "llm_judge needs JUDGE_BASE_URL and JUDGE_API_KEY in the environment and a model "
+            "(--judge-model or JUDGE_MODEL)"
+        )
+    client = OpenAICompatClient(base_url=base, api_key=key, model=model)
+    return {"client": client, "cache_dir": cache, "model_id": model}
+
+
 def _parse_sample(spec: str) -> int:
     kind, _, n = spec.partition(":")
     if kind != "stratified" or not n.isdigit() or int(n) < 1:
@@ -111,6 +152,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument(
         "--sample", default=None, help="stratified:N test subsample, e.g. stratified:2000"
     )
+    p.add_argument("--judge-model", default=None, help="model id for --detector llm_judge")
+    p.add_argument("--judge-cache", type=Path, default=Path("bench/cache"))
     p.add_argument("--update-readme", action="store_true")
     p.add_argument(
         "--ablations",
@@ -119,6 +162,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         help="registry variants for the ablation table, e.g. engine,engine-no-novelty",
     )
     a = p.parse_args(argv)
+    kw: dict[str, Any] = {}
+    if a.detector == "llm_judge":
+        kw = _live_judge_kwargs(a.judge_model, a.judge_cache)
     out = run(
         a.traces,
         a.detector,
@@ -127,6 +173,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         n_boot=a.n_boot,
         ablations=a.ablations,
         sample=a.sample,
+        **kw,
     )
     if a.update_readme:
         update_readme(Path("README.md"), (out / "report.md").read_text())
