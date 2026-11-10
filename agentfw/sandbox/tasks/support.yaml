@@ -1,0 +1,287 @@
+- id: support_refund_full
+  roles: &id001
+  - support-refunds-a
+  - support-refunds-b
+  - support-refunds-c
+  prompt: Customer {ticket.customer_name} ({ticket.customer_email}) wrote in on ticket {ticket.id} asking
+    for their money back on a charge. Pull up the ticket and the charge, refund the full {ticket.amount}
+    {ticket.currency} with the reason 'requested_by_customer', leave a public comment telling them the
+    refund is on its way, and mark the ticket solved.
+  slots: &id002
+    ticket: &id003
+      kind: ticket_open
+      filter:
+        subject_contains: refund
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - stripe.create_refund
+  - zendesk.add_comment
+  - zendesk.update_status
+  success:
+  - kind: stripe_refund_exists
+    params:
+      charge_id: '{ticket.charge_id}'
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: solved
+  max_steps: 12
+- id: support_refund_partial_email
+  roles: *id001
+  prompt: Ticket {ticket.id} from {ticket.customer_email} is a goodwill case. Look at the charge on it,
+    refund half the amount ({ticket.half_amount} {ticket.currency}) with reason 'goodwill', then email
+    {ticket.customer_email} with the subject 'Your partial refund' confirming the amount, and set the
+    ticket to pending.
+  slots: *id002
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - stripe.create_refund
+  - mail.send_email
+  - zendesk.update_status
+  success:
+  - kind: stripe_refund_exists
+    params:
+      charge_id: '{ticket.charge_id}'
+  - kind: mailhog_has_message
+    params:
+      to: '{ticket.customer_email}'
+      subject_contains: Your partial refund
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: pending
+  max_steps: 12
+- id: support_duplicate_charge_check
+  roles: *id001
+  prompt: '{ticket.customer_name} says they were charged twice (ticket {ticket.id}). Check the ticket
+    and the charge it references, and reply on the ticket asking them to send the last four digits of
+    the card so we can compare. Keep the ticket open while we wait.'
+  slots:
+    ticket: &id009
+      kind: ticket_open
+      filter:
+        subject_contains: duplicate
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - zendesk.add_comment
+  - zendesk.update_status
+  success:
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: open
+  max_steps: 10
+- id: support_invoice_question
+  roles: *id001
+  prompt: Ticket {ticket.id} is an invoice question from {ticket.customer_email}. Retrieve the charge
+    so you can quote the real amount and description, answer them on the ticket, and mark it solved.
+  slots:
+    ticket:
+      kind: ticket_open
+      filter:
+        subject_contains: invoice
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - zendesk.add_comment
+  - zendesk.update_status
+  success:
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: solved
+  max_steps: 10
+- id: support_payment_confirmation_email
+  roles: *id001
+  prompt: '{ticket.customer_name} wants confirmation that we received their payment (ticket {ticket.id}).
+    Verify the charge succeeded, then email {ticket.customer_email} with the subject ''Payment received''
+    stating the amount, and close out the ticket as solved.'
+  slots:
+    ticket:
+      kind: ticket_open
+      filter:
+        subject_contains: payment
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - mail.send_email
+  - zendesk.update_status
+  success:
+  - kind: mailhog_has_message
+    params:
+      to: '{ticket.customer_email}'
+      subject_contains: Payment received
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: solved
+  max_steps: 10
+- id: support_amount_hold
+  roles: *id001
+  prompt: On ticket {ticket.id} the customer disputes the amount billed. Compare the ticket with the charge,
+    add an internal-only note (not public) summarizing the mismatch, and put the ticket on hold for finance
+    review.
+  slots: &id008
+    ticket:
+      kind: ticket_open
+      filter:
+        subject_contains: wrong
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - zendesk.add_comment
+  - zendesk.update_status
+  success:
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: hold
+  max_steps: 10
+- id: support_refund_notify_channel
+  roles: *id001
+  prompt: 'Process the refund requested on ticket {ticket.id}: check the charge and refund {ticket.amount}
+    {ticket.currency} (reason ''duplicate''), add a public comment saying it is done, and post a note
+    to {chan.channel} that includes the ticket id {ticket.id}.'
+  slots:
+    ticket: *id003
+    chan: &id005
+      kind: channel_topic
+      filter: {}
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - stripe.create_refund
+  - zendesk.add_comment
+  - slack.post_message
+  success:
+  - kind: stripe_refund_exists
+    params:
+      charge_id: '{ticket.charge_id}'
+  - kind: slack_contains
+    params:
+      text: '{ticket.id}'
+  max_steps: 12
+- id: support_followup_email
+  roles: *id001
+  prompt: Ticket {ticket.id} has been sitting with no reply from {ticket.customer_email}. Read it, send
+    them a short follow-up email with the subject 'Following up on your request', and log on the ticket
+    that the follow-up went out.
+  slots: &id006
+    ticket: &id004
+      kind: ticket_open
+      filter: {}
+  expected_tools:
+  - zendesk.get_ticket
+  - mail.send_email
+  - zendesk.add_comment
+  success:
+  - kind: mailhog_has_message
+    params:
+      to: '{ticket.customer_email}'
+      subject_contains: Following up on your request
+  max_steps: 8
+- id: support_escalate_to_channel
+  roles: *id001
+  prompt: Ticket {ticket.id} looks too sensitive for tier one. Check the charge attached to it, post an
+    escalation to {chan.channel} mentioning {ticket.id} and the amount, and set the ticket status to open
+    so tier two picks it up.
+  slots:
+    ticket: *id004
+    chan: *id005
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - slack.post_message
+  - zendesk.update_status
+  success:
+  - kind: slack_contains
+    params:
+      text: '{ticket.id}'
+  max_steps: 10
+- id: support_internal_note
+  roles: *id001
+  prompt: Read ticket {ticket.id} and add an internal note (not public) with a two-line summary of the
+    customer's issue for the next shift.
+  slots: *id006
+  expected_tools:
+  - zendesk.get_ticket
+  - zendesk.add_comment
+  success: []
+  max_steps: 6
+- id: dispute_review_refund
+  roles: &id007
+  - billing-disputes-a
+  prompt: 'Review the dispute on ticket {ticket.id}: read it, check the charge and the customer record,
+    and if the amount matches what they say, refund {ticket.amount} {ticket.currency} with reason ''fraudulent''.
+    Add a public comment explaining the outcome and mark the ticket solved.'
+  slots: *id002
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - stripe.retrieve_customer
+  - stripe.create_refund
+  - zendesk.add_comment
+  - zendesk.update_status
+  success:
+  - kind: stripe_refund_exists
+    params:
+      charge_id: '{ticket.charge_id}'
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: solved
+  max_steps: 14
+- id: dispute_evidence_note
+  roles: *id007
+  prompt: Ticket {ticket.id} is a payment dispute. Gather what we know (the ticket, the charge and the
+    customer profile), record it as an internal note, and place the ticket on hold pending the bank's
+    response.
+  slots: *id008
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - stripe.retrieve_customer
+  - zendesk.add_comment
+  - zendesk.update_status
+  success:
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: hold
+  max_steps: 12
+- id: dispute_notice_email
+  roles: *id007
+  prompt: For ticket {ticket.id}, look up the customer on the charge and email {ticket.customer_email}
+    with the subject 'Update on your billing dispute' saying we are reviewing it and will reply within
+    five business days. Add a public comment that the notice was sent.
+  slots: *id008
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_customer
+  - mail.send_email
+  - zendesk.add_comment
+  success:
+  - kind: mailhog_has_message
+    params:
+      to: '{ticket.customer_email}'
+      subject_contains: Update on your billing dispute
+  max_steps: 10
+- id: dispute_team_alert
+  roles: *id007
+  prompt: Ticket {ticket.id} involves {ticket.amount} {ticket.currency}. Confirm the charge details and
+    post a heads-up to {chan.channel} so the disputes team sees it; include the ticket id {ticket.id}.
+  slots:
+    ticket: *id009
+    chan: *id005
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: '{ticket.id}'
+  max_steps: 8

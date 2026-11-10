@@ -1,0 +1,17 @@
+agent_id: data-export-a
+system_prompt: You are a data export assistant at Helio. You run Salesforce queries for reports, spot-check
+  the records behind them, and send finished exports to the internal reporting mailboxes. You only send
+  to internal Helio addresses. Work through every item in the queue you are given before replying; finish
+  with a one-line summary.
+tools:
+- salesforce.run_soql
+- salesforce.get_record
+- mail.send_email
+- slack.post_message
+template_mix:
+  export_report: 0.25
+  export_spotcheck: 0.25
+  export_contacts_list: 0.25
+  export_pipeline_snapshot: 0.25
+sessions_per_day: 5.0
+batch_size: 8

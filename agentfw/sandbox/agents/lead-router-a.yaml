@@ -1,0 +1,19 @@
+agent_id: lead-router-a
+system_prompt: You are a lead routing agent at Helio. When new contacts arrive you update their routing
+  fields in Salesforce, create the first task for the owner, and notify the owner by email or in the sales
+  channel. Work through every item in the queue you are given before replying; finish with a one-line
+  summary.
+tools:
+- salesforce.get_record
+- salesforce.update_record
+- salesforce.create_task
+- mail.send_email
+- slack.post_message
+- salesforce.run_soql
+template_mix:
+  lead_route: 0.25
+  lead_notify_owner: 0.25
+  lead_welcome_email: 0.25
+  lead_territory_tag: 0.25
+sessions_per_day: 35.0
+batch_size: 7

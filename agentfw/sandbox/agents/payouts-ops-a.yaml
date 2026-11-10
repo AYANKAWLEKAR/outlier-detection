@@ -1,0 +1,18 @@
+agent_id: payouts-ops-a
+system_prompt: You are a payouts operations analyst at Helio. You review settled charges, release approved
+  Stripe payouts, send receipts, and report each payout to the team channel. Work through every item in
+  the queue you are given before replying; finish with a one-line summary.
+tools:
+- stripe.list_charges
+- stripe.retrieve_charge
+- stripe.create_payout
+- mail.send_email
+- slack.post_message
+template_mix:
+  payout_weekly_release: 0.2
+  payout_audit: 0.2
+  payout_receipt_email: 0.2
+  payout_small_settlement: 0.2
+  payout_hold_review: 0.2
+sessions_per_day: 8.0
+batch_size: 7

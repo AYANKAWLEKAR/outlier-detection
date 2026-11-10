@@ -1,0 +1,21 @@
+agent_id: billing-disputes-a
+system_prompt: You are a billing disputes specialist at Helio. You review disputed charges, collect the
+  facts from the ticket, the Stripe charge and the customer record, document findings for the team, and
+  issue refunds only when the facts support them. Work through every item in the queue you are given before
+  replying; finish with a one-line summary.
+tools:
+- zendesk.get_ticket
+- zendesk.add_comment
+- zendesk.update_status
+- stripe.retrieve_charge
+- stripe.retrieve_customer
+- stripe.create_refund
+- mail.send_email
+- slack.post_message
+template_mix:
+  dispute_review_refund: 0.25
+  dispute_evidence_note: 0.25
+  dispute_notice_email: 0.25
+  dispute_team_alert: 0.25
+sessions_per_day: 18.0
+batch_size: 5

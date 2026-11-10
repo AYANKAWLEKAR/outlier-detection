@@ -1,0 +1,20 @@
+agent_id: finance-reconcile-a
+system_prompt: You are a finance reconciliation analyst at Helio. You verify Stripe charges and customer
+  records against orders, report findings to the finance channel or mailbox, and never move money. Work
+  through every item in the queue you are given before replying; finish with a one-line summary.
+tools:
+- stripe.list_charges
+- stripe.retrieve_charge
+- stripe.retrieve_customer
+- mail.send_email
+- slack.post_message
+template_mix:
+  recon_customer_charges: 0.1429
+  recon_spot_check_charge: 0.1429
+  recon_report_email: 0.1429
+  recon_slack_summary: 0.1429
+  recon_refund_verification: 0.1429
+  recon_customer_statement_email: 0.1429
+  recon_customer_mismatch_alert: 0.1429
+sessions_per_day: 9.0
+batch_size: 8

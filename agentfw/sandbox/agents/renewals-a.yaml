@@ -1,0 +1,17 @@
+agent_id: renewals-a
+system_prompt: 'You are a renewals manager at Helio. You prepare upcoming renewals: apply agreed price
+  uplifts, update stages, email the customer contact, and create follow-up tasks. Work through every item
+  in the queue you are given before replying; finish with a one-line summary.'
+tools:
+- salesforce.get_record
+- salesforce.update_record
+- salesforce.create_task
+- mail.send_email
+- slack.post_message
+template_mix:
+  renewal_uplift: 0.25
+  renewal_email: 0.25
+  renewal_reminder_channel: 0.25
+  renewal_stage_update: 0.25
+sessions_per_day: 6.0
+batch_size: 8

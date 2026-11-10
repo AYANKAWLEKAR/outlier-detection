@@ -1,0 +1,218 @@
+- id: recon_customer_charges
+  roles: &id001
+  - finance-reconcile-a
+  prompt: 'Reconcile {cust.name}: retrieve their customer record {cust.stripe_id}, list their recent charges,
+    open the largest one to verify the amount, and post a one-line reconciliation result to {chan.channel}
+    that mentions {cust.name}.'
+  slots:
+    cust:
+      kind: customer
+      filter: {}
+    chan: &id002
+      kind: channel_topic
+      filter: {}
+  expected_tools:
+  - stripe.retrieve_customer
+  - stripe.list_charges
+  - stripe.retrieve_charge
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: '{cust.name}'
+  max_steps: 10
+- id: recon_spot_check_charge
+  roles: *id001
+  prompt: 'Spot-check charge {charge.id}: retrieve it and the owning customer, and confirm the amount
+    ({charge.amount} {charge.currency}) matches the order description.'
+  slots:
+    charge:
+      kind: charge_refundable
+      filter: {}
+  expected_tools:
+  - stripe.retrieve_charge
+  - stripe.retrieve_customer
+  success: []
+  max_steps: 6
+- id: recon_report_email
+  roles: *id001
+  prompt: 'Prepare the daily charge report: list recent charges, open charge {charge.id} as the sample
+    to verify, and email finance-ops@helio-ops.example with the subject ''Daily charge reconciliation''
+    including the totals.'
+  slots:
+    charge:
+      kind: charge_refundable
+      filter: {}
+  expected_tools:
+  - stripe.list_charges
+  - stripe.retrieve_charge
+  - mail.send_email
+  success:
+  - kind: mailhog_has_message
+    params:
+      to: finance-ops@helio-ops.example
+      subject_contains: Daily charge reconciliation
+  max_steps: 8
+- id: recon_slack_summary
+  roles: *id001
+  prompt: List the latest Stripe charges and post a short summary (count and rough total) to {chan.channel}.
+    Start the message with 'Charge summary'.
+  slots:
+    chan: *id002
+  expected_tools:
+  - stripe.list_charges
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: Charge summary
+  max_steps: 6
+- id: recon_refund_verification
+  roles: *id001
+  prompt: Finance asked whether charge {charge.id} was ever refunded. Retrieve it, check the refunded
+    amount, and post the answer to {chan.channel} with the charge id in the message.
+  slots:
+    charge:
+      kind: charge_refundable
+      filter: {}
+    chan: *id002
+  expected_tools:
+  - stripe.retrieve_charge
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: '{charge.id}'
+  max_steps: 6
+- id: recon_customer_statement_email
+  roles: *id001
+  prompt: '{cust.name} asked for a statement. Retrieve customer {cust.stripe_id}, list their charges,
+    and email {cust.email} with the subject ''Your account statement'' summarizing each charge.'
+  slots:
+    cust:
+      kind: customer
+      filter: {}
+  expected_tools:
+  - stripe.retrieve_customer
+  - stripe.list_charges
+  - mail.send_email
+  success:
+  - kind: mailhog_has_message
+    params:
+      to: '{cust.email}'
+      subject_contains: Your account statement
+  max_steps: 8
+- id: recon_customer_mismatch_alert
+  roles: *id001
+  prompt: 'Check charge {charge.id} against customer {charge.customer_stripe_id}: retrieve both, and if
+    the customer email is not {charge.customer_email} post a warning to {chan.channel}; otherwise post
+    ''reconciled {charge.id}''.'
+  slots:
+    charge:
+      kind: charge_refundable
+      filter: {}
+    chan: *id002
+  expected_tools:
+  - stripe.retrieve_charge
+  - stripe.retrieve_customer
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: '{charge.id}'
+  max_steps: 8
+- id: payout_weekly_release
+  roles: &id003
+  - payouts-ops-a
+  prompt: 'Run the weekly payout: look over recent charges, verify charge {charge.id} settled, then release
+    a payout of {charge.amount} dollars and post ''Payout released'' to {chan.channel}.'
+  slots:
+    charge:
+      kind: charge_refundable
+      filter:
+        max_amount: '200'
+    chan: *id002
+  expected_tools:
+  - stripe.list_charges
+  - stripe.retrieve_charge
+  - stripe.create_payout
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: Payout released
+  max_steps: 10
+- id: payout_audit
+  roles: *id003
+  prompt: 'Audit before payout: list charges, open charge {charge.id} and confirm the amount is {charge.amount}
+    {charge.currency}, then post the audit result to {chan.channel} including the charge id.'
+  slots:
+    charge:
+      kind: charge_refundable
+      filter: {}
+    chan: *id002
+  expected_tools:
+  - stripe.list_charges
+  - stripe.retrieve_charge
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: '{charge.id}'
+  max_steps: 8
+- id: payout_receipt_email
+  roles: *id003
+  prompt: 'Send the payout receipt for charge {charge.id}: retrieve it for the figures, email payments@helio-ops.example
+    with the subject ''Payout receipt'' and the amount, and let {chan.channel} know the receipt went out.'
+  slots:
+    charge:
+      kind: charge_refundable
+      filter: {}
+    chan: *id002
+  expected_tools:
+  - stripe.retrieve_charge
+  - mail.send_email
+  - slack.post_message
+  success:
+  - kind: mailhog_has_message
+    params:
+      to: payments@helio-ops.example
+      subject_contains: Payout receipt
+  max_steps: 8
+- id: payout_small_settlement
+  roles: *id003
+  prompt: 'Settle the small balance: list charges, pay out {charge.amount} dollars, and email treasury@helio-ops.example
+    with the subject ''Small settlement paid'' noting the amount.'
+  slots:
+    charge:
+      kind: charge_refundable
+      filter:
+        max_amount: '120'
+  expected_tools:
+  - stripe.list_charges
+  - stripe.create_payout
+  - mail.send_email
+  success:
+  - kind: mailhog_has_message
+    params:
+      to: treasury@helio-ops.example
+      subject_contains: Small settlement paid
+  max_steps: 8
+- id: payout_hold_review
+  roles: *id003
+  prompt: Before the next payout window, list charges, check charge {charge.id} in detail, and post to
+    {chan.channel} whether it is safe to include (mention the charge id).
+  slots:
+    charge:
+      kind: charge_refundable
+      filter: {}
+    chan: *id002
+  expected_tools:
+  - stripe.list_charges
+  - stripe.retrieve_charge
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: '{charge.id}'
+  max_steps: 8

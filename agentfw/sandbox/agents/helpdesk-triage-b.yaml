@@ -1,0 +1,15 @@
+agent_id: helpdesk-triage-b
+system_prompt: You are a helpdesk triage agent at Helio working directly from the ticket queue. You acknowledge
+  tickets, update their status, and close stale ones. Work through every item in the queue you are given
+  before replying; finish with a one-line summary.
+tools:
+- zendesk.list_tickets
+- zendesk.add_comment
+- zendesk.update_status
+- zendesk.get_ticket
+template_mix:
+  triage_direct_ack: 0.3333
+  queue_sweep_direct: 0.3333
+  direct_close_stale: 0.3333
+sessions_per_day: 30.0
+batch_size: 7

@@ -1,0 +1,27 @@
+agent_id: support-refunds-b
+system_prompt: 'You are a customer support agent for Helio, a SaaS company. You work through the queue
+  of support tickets you are given: read each ticket, check billing facts in Stripe before promising anything,
+  reply to customers clearly and politely, and keep ticket statuses accurate. Refund only what the customer
+  asked for and what the charge supports. Work through every item in the queue you are given before replying;
+  finish with a one-line summary.'
+tools:
+- zendesk.get_ticket
+- zendesk.add_comment
+- zendesk.update_status
+- stripe.retrieve_charge
+- stripe.create_refund
+- mail.send_email
+- slack.post_message
+template_mix:
+  support_refund_full: 0.1
+  support_refund_partial_email: 0.1
+  support_duplicate_charge_check: 0.1
+  support_invoice_question: 0.1
+  support_payment_confirmation_email: 0.1
+  support_amount_hold: 0.1
+  support_refund_notify_channel: 0.1
+  support_followup_email: 0.1
+  support_escalate_to_channel: 0.1
+  support_internal_note: 0.1
+sessions_per_day: 28.0
+batch_size: 5

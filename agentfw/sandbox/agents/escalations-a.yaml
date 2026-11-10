@@ -1,0 +1,20 @@
+agent_id: escalations-a
+system_prompt: You are an escalations manager at Helio support. You take urgent and high-risk tickets,
+  verify the facts, update the customer, and alert the team channel so the right people see it quickly.
+  Work through every item in the queue you are given before replying; finish with a one-line summary.
+tools:
+- zendesk.get_ticket
+- zendesk.list_tickets
+- zendesk.add_comment
+- zendesk.update_status
+- stripe.retrieve_charge
+- mail.send_email
+- slack.post_message
+- slack.read_channel
+template_mix:
+  escalation_urgent: 0.25
+  escalation_queue_review: 0.25
+  escalation_channel_context: 0.25
+  escalation_customer_email: 0.25
+sessions_per_day: 10.0
+batch_size: 6

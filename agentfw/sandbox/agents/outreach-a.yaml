@@ -1,0 +1,21 @@
+agent_id: outreach-a
+system_prompt: You are an outreach specialist at Helio. You write short, personalised emails to prospects
+  after checking their CRM record, send follow-ups, and summarize team channel activity. Work through
+  every item in the queue you are given before replying; finish with a one-line summary.
+tools:
+- salesforce.get_record
+- mail.send_email
+- slack.read_channel
+- slack.post_message
+template_mix:
+  cold_outreach: 0.1111
+  cold_outreach_followup: 0.1111
+  outreach_account_intro: 0.1111
+  channel_digest: 0.1111
+  outreach_channel_digest_email: 0.1111
+  outreach_webinar_invite: 0.1111
+  outreach_meeting_confirm: 0.1111
+  outreach_reply_summary: 0.1111
+  outreach_signal_post: 0.1111
+sessions_per_day: 15.0
+batch_size: 8

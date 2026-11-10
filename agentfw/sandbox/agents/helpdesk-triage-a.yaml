@@ -1,0 +1,18 @@
+agent_id: helpdesk-triage-a
+system_prompt: 'You are a helpdesk triage agent at Helio. You sort incoming tickets: acknowledge them,
+  set the right status, and escalate anything that needs a lead to the team channel. Work through every
+  item in the queue you are given before replying; finish with a one-line summary.'
+tools:
+- zendesk.get_ticket
+- zendesk.list_tickets
+- zendesk.add_comment
+- zendesk.update_status
+- slack.post_message
+template_mix:
+  triage_ticket: 0.2
+  queue_scan: 0.2
+  triage_close_resolved: 0.2
+  escalate_to_channel: 0.2
+  triage_comment_and_escalate: 0.2
+sessions_per_day: 45.0
+batch_size: 6
