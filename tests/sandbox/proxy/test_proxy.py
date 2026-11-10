@@ -335,7 +335,7 @@ async def test_invalid_mutator_output_is_error_not_a_bad_line(bad_extra: bool) -
         assert [c.seq_no for c in sink.calls] == [0, 1]
 
 
-async def test_forwarded_unmutated_call_keeps_mutator_response_meta() -> None:
+async def test_forwarded_unmutated_call_merges_mutator_response_meta() -> None:
     meta = ResponseMeta(item_count=500, bytes=10, error=False)
     mut = RefundMutator(
         forward=True, change_args=False, synthetic=None, meta=meta, target="flaky.ok"
@@ -343,7 +343,9 @@ async def test_forwarded_unmutated_call_keeps_mutator_response_meta() -> None:
     async with make_proxy(mutator=mut) as (proxy, sink, spies):
         res = await proxy.call_tool("flaky.ok", {})
         assert not res.is_error and spies["flaky"].forwarded == [("ok", {})]
-        assert sink.calls[-1].response_meta == meta
+        got = sink.calls[-1].response_meta
+        assert got is not None and got.item_count == 500 and got.bytes == 10  # EX1: merged
+        assert got.ids  # the extracted ids survive the mutation's meta
         assert len(sink.labels) == 1
 
 

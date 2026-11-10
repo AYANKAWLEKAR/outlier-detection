@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from mcp.server.mcpserver import MCPServer
 
 from agentfw.sandbox.config import ALLOWED_SMTP_HOSTS, SandboxConfig, UnsafeConfigError
-from agentfw.sandbox.tools.common import tool_error
+from agentfw.sandbox.tools.common import mark_fake, tool_error
 
 _ADDR = re.compile(r"^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$")
 _SENDER = "agent@sandbox.example"
@@ -34,6 +34,8 @@ def _validate(to: list[str], subject: str, cc: list[str]) -> None:
 
 
 class FakeMailBackend:
+    is_fake = True
+
     def __init__(self) -> None:
         self.sent: list[dict[str, Any]] = []
         self._lock = threading.Lock()
@@ -80,4 +82,4 @@ def build_server(backend: MailBackend) -> MCPServer:
         """Send an email."""
         return backend.send_email(to, subject, body, cc or [])
 
-    return server
+    return mark_fake(server, backend)

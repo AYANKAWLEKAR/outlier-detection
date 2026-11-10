@@ -63,7 +63,19 @@ __all__ = [
     "AttackContext",
     "AttackFn",
     "AttackResult",
+    "BURST_MAX",
+    "BURST_MIN",
+    "BURST_W_MAX_S",
+    "BURST_W_MIN_S",
+    "M_MAX",
+    "M_MIN",
+    "SCOPE_MAX",
+    "SCOPE_MIN",
+    "V_MAX",
+    "V_MIN",
     "applicable",
+    "blow_up_list",
+    "burst_duplicates",
     "eligible",
     "fabricate_id",
     "inject",
@@ -480,6 +492,43 @@ def novel_target(
     )
 
 
+def blow_up_list(
+    orig: Sequence[str], ids: bool, n: int, prefix: str, rng: np.random.Generator
+) -> list[JsonValue]:
+    """``orig`` grown to ``n`` entries: fabricated ids with ``prefix`` (``ids``), else addresses
+    reusing ``orig``'s email domains (D-016). Shared by ``scope_blowup`` and the sandbox
+    injector."""
+    m = n - len(orig)
+    extra: list[str]
+    if ids:
+        extra = [fabricate_id(prefix, rng) for _ in range(m)]
+    else:
+        domains = sorted({d for x in orig if (d := email_domain(x))})
+        users = rng.choice(1_000_000, size=m, replace=False)
+        dom = rng.integers(len(domains), size=m)
+        extra = [f"user{int(u):06d}@{domains[int(d)]}" for u, d in zip(users, dom, strict=True)]
+    return [*orig, *extra]
+
+
+def burst_duplicates(orig: RawCall, r: int, w_ms: int, rng: np.random.Generator) -> list[RawCall]:
+    """``r`` copies of ``orig`` at sorted uniform offsets in (0, ``w_ms``] ms. Shared by
+    ``velocity_burst`` and the sandbox injector."""
+    offsets = np.sort(rng.integers(1, w_ms + 1, size=r))
+    dups = []
+    for off in offsets:
+        ts = orig.ts_unix_ms + int(off)
+        dups.append(
+            orig.model_copy(
+                update={
+                    "envelope_id": new_ulid(ts, rng),
+                    "ts_unix_ms": ts,
+                    "args": copy.deepcopy(orig.args),
+                }
+            )
+        )
+    return dups
+
+
 def _scope_cands(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, str]]:
     cands: list[tuple[int, str]] = []
     for i, c in enumerate(session):
@@ -508,16 +557,9 @@ def scope_blowup(
     orig = [str(x) for x in session[i].args[name]]  # type: ignore[union-attr]
     n = int(round(np.exp(rng.uniform(np.log(SCOPE_MIN), np.log(SCOPE_MAX)))))
     n = max(n, len(orig) + 1)
-    m = n - len(orig)
-    extra: list[str]
-    if a.type == "list_of_id":
-        extra = [fabricate_id(a.prefix or "nx_", rng) for _ in range(m)]
-    else:
-        domains = sorted({d for x in orig if (d := email_domain(x))})
-        users = rng.choice(1_000_000, size=m, replace=False)
-        dom = rng.integers(len(domains), size=m)
-        extra = [f"user{int(u):06d}@{domains[int(d)]}" for u, d in zip(users, dom, strict=True)]
-    new = mutate_replace(session[i], name, [*orig, *extra])
+    new = mutate_replace(
+        session[i], name, blow_up_list(orig, a.type == "list_of_id", n, a.prefix or "nx_", rng)
+    )
     return AttackResult(
         _replace_call(session, i, new), [_label(ctx, "scope_blowup", new.envelope_id, float(n))]
     )
@@ -536,19 +578,7 @@ def velocity_burst(
     orig = session[cands[int(rng.integers(len(cands)))]]
     r = int(rng.integers(BURST_MIN, BURST_MAX + 1))
     w_ms = int(round(rng.uniform(BURST_W_MIN_S, BURST_W_MAX_S) * 1000))
-    offsets = np.sort(rng.integers(1, w_ms + 1, size=r))
-    dups = []
-    for off in offsets:
-        ts = orig.ts_unix_ms + int(off)
-        dups.append(
-            orig.model_copy(
-                update={
-                    "envelope_id": new_ulid(ts, rng),
-                    "ts_unix_ms": ts,
-                    "args": copy.deepcopy(orig.args),
-                }
-            )
-        )
+    dups = burst_duplicates(orig, r, w_ms, rng)
     merged = _renumber(sorted([*session, *dups], key=lambda c: c.ts_unix_ms))  # stable: dups last
     return AttackResult(
         merged, [_label(ctx, "velocity_burst", d.envelope_id, float(r)) for d in dups]

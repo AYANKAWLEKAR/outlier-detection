@@ -112,7 +112,8 @@ class ActionMutator(Protocol):
         """Return ``None`` to pass ``raw`` through untouched.
 
         ``history`` is this session's earlier final calls (with ``response_meta``). If the
-        returned ``raw`` carries a ``response_meta``, it replaces the extracted one.
+        returned ``raw`` carries a ``response_meta``, its set, non-None fields override the
+        extracted ones (the rest, e.g. ``ids`` and ``bytes``, are kept).
         ``extra_calls`` are logged after the call, never forwarded, and get fresh ``seq_no``\\s.
         """
         ...
@@ -233,8 +234,16 @@ class FirewallProxy:
         else:
             result = error_result(f"{name}: injected call not forwarded (D-014)")
 
+        meta = extract_response_meta(result)
         override = mutation.raw.response_meta if mutation is not None else None
-        meta = override if override is not None else extract_response_meta(result)
+        if override is not None:  # EX1: merge; only fields the mutation set (non-None) win
+            meta = meta.model_copy(
+                update={
+                    k: v
+                    for k in override.model_fields_set
+                    if (v := getattr(override, k)) is not None
+                }
+            )
         self._record(raw.model_copy(update={"response_meta": meta}))
         if mutation is not None:
             self.sink.write_labels(mutation.labels)

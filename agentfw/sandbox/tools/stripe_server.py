@@ -12,7 +12,7 @@ from mcp.server.mcpserver import MCPServer
 
 from agentfw.sandbox.config import SandboxConfig, UnsafeConfigError
 from agentfw.sandbox.seed.company import Company
-from agentfw.sandbox.tools.common import ok, tool_error
+from agentfw.sandbox.tools.common import mark_fake, ok, tool_error
 
 _STRIPE_REASONS = frozenset({"duplicate", "fraudulent", "requested_by_customer"})
 
@@ -69,6 +69,8 @@ class _State:
 
 class FakeStripeBackend:
     """In-memory, deterministic Stripe stand-in mirroring the semantics the sandbox relies on."""
+
+    is_fake = True
 
     def __init__(self, company: Company) -> None:
         ids = fake_stripe_ids(company)
@@ -274,4 +276,4 @@ def build_server(backend: StripeBackend) -> MCPServer:
         """Pay out `amount` dollars from the available balance."""
         return ok(backend.create_payout(amount, destination, currency))
 
-    return server
+    return mark_fake(server, backend)

@@ -13,7 +13,7 @@ from mcp.server.mcpserver import MCPServer
 from agentfw.sandbox.config import SandboxConfig
 from agentfw.sandbox.seed.company import Company
 from agentfw.sandbox.seed.zendesk_seed import SCHEMA, seed_zendesk
-from agentfw.sandbox.tools.common import ok, tool_error
+from agentfw.sandbox.tools.common import mark_fake, ok, tool_error
 from agentfw.sandbox.tools.stripe_server import fake_stripe_ids
 
 STATUSES = ("new", "open", "pending", "hold", "solved", "closed")
@@ -146,6 +146,8 @@ def _connect(path: str | Path) -> sqlite3.Connection:
 class FakeZendeskBackend(SqliteZendeskBackend):
     """In-memory, deterministic, built from `Company` via the real zendesk seeder."""
 
+    is_fake = True
+
     def __init__(self, company: Company) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / DB_NAME
@@ -190,4 +192,4 @@ def build_server(backend: ZendeskBackend) -> MCPServer:
         """Set a ticket's status."""
         return ok(backend.update_status(ticket_id, status))
 
-    return server
+    return mark_fake(server, backend)

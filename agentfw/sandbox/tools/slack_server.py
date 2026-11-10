@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from mcp.server.mcpserver import MCPServer
 
 from agentfw.sandbox.config import SandboxConfig
-from agentfw.sandbox.tools.common import ok, tool_error
+from agentfw.sandbox.tools.common import mark_fake, ok, tool_error
 
 
 class SlackBackend(Protocol):
@@ -28,6 +28,8 @@ def _check_limit(limit: int) -> int:
 
 
 class FakeSlackBackend:
+    is_fake = True
+
     def __init__(self, channel_id: str) -> None:
         self._channel = channel_id
         self._msgs: list[dict[str, Any]] = []
@@ -102,4 +104,4 @@ def build_server(backend: SlackBackend) -> MCPServer:
         """Read recent messages from the sandbox channel (newest first)."""
         return ok(backend.read_channel(limit))
 
-    return server
+    return mark_fake(server, backend)

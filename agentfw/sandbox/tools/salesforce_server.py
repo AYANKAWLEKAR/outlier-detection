@@ -14,7 +14,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from agentfw.sandbox.config import ApiBudget, BudgetExceeded, SandboxConfig
 from agentfw.sandbox.seed.company import Company
-from agentfw.sandbox.tools.common import ok, tool_error
+from agentfw.sandbox.tools.common import mark_fake, ok, tool_error
 
 SOQL_MAX_LIMIT = 2000
 COLLECTION_CHUNK = 200  # sObject Collections accept at most 200 records per request
@@ -99,6 +99,8 @@ def sf_id(obj: str, seed: str) -> str:
 
 class FakeSalesforceBackend:
     """In-memory, deterministic org built from `Company` (same shape as the seeder writes)."""
+
+    is_fake = True
 
     def __init__(self, company: Company) -> None:
         self._lock = threading.Lock()
@@ -340,4 +342,4 @@ def build_server(backend: SalesforceBackend) -> MCPServer:
         """Create a Task related to a record."""
         return ok(backend.create_task(check_record_id(what_id), subject))
 
-    return server
+    return mark_fake(server, backend)

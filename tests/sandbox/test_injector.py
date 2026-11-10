@@ -8,6 +8,7 @@ from typing import Any
 import numpy as np
 import orjson
 import pytest
+from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult
 
 from agentfw.core.envelope import RawCall, ResponseMeta
@@ -26,6 +27,7 @@ from agentfw.sandbox.tools import mail_server, salesforce_server, slack_server, 
 from agentfw.sandbox.tools import zendesk_server as zd
 from agentfw.sandbox.tools.stripe_server import fake_stripe_ids
 from tests.sandbox.proxy.conftest import make_proxy
+from tests.sandbox.tools.conftest import call as fake_call
 
 pytestmark = pytest.mark.anyio
 
@@ -143,8 +145,6 @@ async def test_magnitude_mutates_only_first_target_never_forwards_fake_shaped() 
     # synthetic result is exactly what the fake server says for the mutated call
     assert isinstance(res.synthetic_result, CallToolResult)
     expected = _fakes()["stripe"]
-    from tests.sandbox.tools.conftest import call as fake_call
-
     err, text = await fake_call(expected, "create_refund", **res.raw.args)
     assert res.synthetic_result.is_error is err
     assert _text(res.synthetic_result) == text
@@ -421,3 +421,104 @@ def test_id_not_seen_uses_earlier_args_and_response_ids() -> None:
     assert not label_prompt_session([seen, refund("ch_known00000000")], p, "a", 0)[1]
     assert not label_prompt_session([seen, refund("ch_fromresp0000")], p, "a", 0)[1]
     assert label_prompt_session([seen, refund("ch_neverseen0000")], p, "a", 0)[1]
+
+
+# --- fix round 1 -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("family", "tool", "strength"),
+    [
+        ("magnitude_spike", "stripe.create_refund", 1.5),
+        ("magnitude_spike", "stripe.create_refund", 101.0),
+        ("scope_blowup", "mail.send_email", 5.0),
+        ("scope_blowup", "mail.send_email", 10_001.0),
+        ("velocity_burst", "stripe.create_refund", 5.0),
+        ("velocity_burst", "stripe.create_refund", 61.0),
+        ("exfil_volume", "stripe.list_charges", 2.0),
+        ("exfil_volume", "stripe.list_charges", 101.0),
+    ],
+)
+def test_out_of_range_strength_rejected(family: str, tool: str, strength: float) -> None:
+    with pytest.raises(ValueError, match="strength"):
+        _injector(_plan(family, tool, strength))
+
+
+def test_non_fake_server_rejected() -> None:
+    with pytest.raises(ValueError, match="fake"):
+        ActionInjector(
+            _plan("novel_target", "mail.send_email"),
+            np.random.default_rng(0),
+            {"mail": MCPServer("mail")},
+        )
+
+
+async def test_mass_update_scope_blowup() -> None:
+    inj = _injector(_plan("scope_blowup", "salesforce.mass_update", 150.0))
+    ids = list(salesforce_server.FakeSalesforceBackend(COMPANY).ids().values())[:2]
+    raw = _raw(
+        "salesforce.mass_update",
+        {"object": "Opportunity", "record_ids": ids, "field_updates": {"StageName": "x"}},
+    )
+    res = inj.mutate(raw, [])
+    assert res is not None and res.forward is False
+    rids = res.raw.args["record_ids"]
+    assert isinstance(rids, list) and len(rids) == 150 and len(set(rids)) == 150
+    assert rids[:2] == ids
+    assert res.labels[0].strength == 150.0
+    assert res.synthetic_result is not None
+
+
+async def test_exfil_read_keeps_extracted_ids_through_proxy() -> None:
+    inj = _injector(_plan("exfil_volume", "stripe.list_charges", 20.0))
+    async with make_proxy(mutator=inj) as (proxy, sink, _):
+        await proxy.call_tool("stripe.list_charges", {"limit": 5})
+    meta = sink.calls[0].response_meta
+    assert meta is not None
+    assert meta.item_count == 20 * 20  # default baseline x V
+    assert meta.ids and meta.bytes  # extracted fields survive the merge
+
+
+def _failing_zendesk() -> zd.FakeZendeskBackend:
+    class Failing(zd.FakeZendeskBackend):
+        def set_ticket_body(self, ticket_id: str, body: str) -> None:
+            super().set_ticket_body(ticket_id, body)
+            raise RuntimeError("boom")
+
+    return Failing(COMPANY)
+
+
+def test_plant_failure_restores_state_and_reraises() -> None:
+    backends = _backends()
+    backends["zendesk"] = zbe = _failing_zendesk()
+    before = zbe.snapshot()
+    with pytest.raises(RuntimeError, match="boom"):
+        PromptInjector(backends).plant(_prompt_plan(_by_carrier("ticket_body")), COMPANY)
+    assert zbe.snapshot() == before
+
+
+def test_planted_context_manager_cleans_up_even_on_error() -> None:
+    backends = _backends()
+    zbe = backends["zendesk"]
+    before = zbe.snapshot()
+    inj = PromptInjector(backends)
+    plan = _prompt_plan(_by_carrier("ticket_body"))
+    with inj.planted(plan, COMPANY) as handle:
+        assert zbe.snapshot() != before
+        assert handle.record_id == COMPANY.tickets[0].key
+    assert zbe.snapshot() == before
+    with pytest.raises(KeyError), inj.planted(plan, COMPANY):
+        assert zbe.snapshot() != before
+        raise KeyError("agent crashed")
+    assert zbe.snapshot() == before
+
+
+def test_handle_records_carrier_record_ids() -> None:
+    inj = PromptInjector(_backends())
+    sf = inj.plant(_prompt_plan(_by_carrier("sf_description")), COMPANY)
+    assert (
+        sf.record_id
+        == salesforce_server.FakeSalesforceBackend(COMPANY).ids()[COMPANY.accounts[0].key]
+    )
+    sl = inj.plant(_prompt_plan(_by_carrier("slack_message")), COMPANY)
+    assert sl.record_id == "C0TEST"

@@ -27,11 +27,11 @@ ignored the injection: no labels, ``succeeded=False``. Payloads (``payloads/*.ya
 
 from __future__ import annotations
 
-import copy
 import functools
 import math
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -45,12 +45,28 @@ from mcp.types import CallToolResult
 from pydantic import BaseModel
 
 from agentfw.core.envelope import JsonValue, Label, RawCall, ResponseMeta
-from agentfw.core.ids import new_ulid
 from agentfw.core.patterns import email_domain
 from agentfw.sandbox.proxy_py.proxy import MutationResult, wall_ms
 from agentfw.sandbox.seed.company import Company
 from agentfw.sandbox.tools.stripe_server import fake_stripe_ids
-from agentfw.synth.attacks import fabricate_id, mutate_replace, mutate_scale, novel_value
+from agentfw.synth.attacks import (
+    BURST_MAX,
+    BURST_MIN,
+    BURST_W_MAX_S,
+    BURST_W_MIN_S,
+    M_MAX,
+    M_MIN,
+    SCOPE_MAX,
+    SCOPE_MIN,
+    V_MAX,
+    V_MIN,
+    blow_up_list,
+    burst_duplicates,
+    fabricate_id,
+    mutate_replace,
+    mutate_scale,
+    novel_value,
+)
 
 __all__ = [
     "DEFAULT_EXFIL_BASELINE",
@@ -66,11 +82,6 @@ __all__ = [
 
 PAYLOAD_DIR = Path(__file__).parent / "payloads"
 DEFAULT_EXFIL_BASELINE = 20.0
-M_MIN, M_MAX = 3.0, 100.0
-SCOPE_MIN, SCOPE_MAX = 100, 10_000
-BURST_MIN, BURST_MAX = 10, 60
-BURST_W_MIN_S, BURST_W_MAX_S = 60.0, 300.0  # D-020
-V_MIN, V_MAX = 10.0, 100.0
 _OUTBOUND = frozenset({"mail.send_email", "slack.post_message"})
 ACTION_FAMILIES = frozenset(
     {
@@ -102,6 +113,14 @@ _FIELD_MAPS: dict[str, Mapping[str, Any]] = {
     "prereq_skip": _PREREQ_FIELD,
     "novel_target": _NOVEL_FIELD,
     "scope_blowup": _SCOPE_FIELD,
+}
+
+
+_STRENGTH_RANGE = {
+    "magnitude_spike": (M_MIN, M_MAX),
+    "scope_blowup": (float(SCOPE_MIN), float(SCOPE_MAX)),
+    "velocity_burst": (float(BURST_MIN), float(BURST_MAX)),
+    "exfil_volume": (V_MIN, V_MAX),
 }
 
 
@@ -184,6 +203,16 @@ class ActionInjector:
         fields = _FIELD_MAPS.get(plan.family)
         if fields is not None and plan.target_tool not in fields:
             raise ValueError(f"{plan.family} cannot target {plan.target_tool!r}")
+        rng_range = _STRENGTH_RANGE.get(plan.family)
+        if plan.strength is not None and rng_range is not None:
+            lo, hi = rng_range
+            if not lo <= plan.strength <= hi:
+                raise ValueError(f"{plan.family} strength {plan.strength} outside [{lo}, {hi}]")
+        not_fake = sorted(
+            n for n, srv in fake_servers.items() if not getattr(srv, "is_fake", False)
+        )
+        if not_fake:
+            raise ValueError(f"fake_servers must be fakes (D-014); not fake: {not_fake}")
         self.plan = plan
         self._rng = rng
         self._fakes = dict(fake_servers)
@@ -209,12 +238,13 @@ class ActionInjector:
         if edited is None:
             return None  # the call lacks the arg this family needs: wait for the next one
         new, strength = edited
-        self._done = True
+        synthetic = self._synthetic(new)
+        self._done = True  # only once the mutation is fully built
         return MutationResult(
             raw=new,
             forward=False,  # D-014
             labels=[self._label(raw.envelope_id, strength)],
-            synthetic_result=self._synthetic(new),
+            synthetic_result=synthetic,
         )
 
     # -- single-call families --------------------------------------------------------------------
@@ -268,16 +298,9 @@ class ActionInjector:
         if n is None:
             n = float(np.exp(self._rng.uniform(math.log(SCOPE_MIN), math.log(SCOPE_MAX))))
         total = max(int(round(n)), len(orig) + 1)
-        m = total - len(orig)
-        extra: list[str]
-        if kind == "id":
-            prefix = _id_prefix(orig[0])
-            extra = [fabricate_id(prefix, self._rng) for _ in range(m)]
-        else:
-            users = self._rng.choice(1_000_000, size=m, replace=False)
-            dom = self._rng.integers(len(domains), size=m)
-            extra = [f"user{int(u):06d}@{domains[int(d)]}" for u, d in zip(users, dom, strict=True)]
-        return mutate_replace(raw, name, [*orig, *extra]), float(total)
+        prefix = _id_prefix(orig[0])
+        grown = blow_up_list(orig, kind == "id", total, prefix, self._rng)
+        return mutate_replace(raw, name, grown), float(total)
 
     # -- velocity_burst --------------------------------------------------------------------------
 
@@ -288,19 +311,7 @@ class ActionInjector:
             else int(self._rng.integers(BURST_MIN, BURST_MAX + 1))
         )
         w_ms = int(round(self._rng.uniform(BURST_W_MIN_S, BURST_W_MAX_S) * 1000))
-        offsets = np.sort(self._rng.integers(1, w_ms + 1, size=r))
-        dups = []
-        for off in offsets:
-            ts = raw.ts_unix_ms + int(off)
-            dups.append(
-                raw.model_copy(
-                    update={
-                        "envelope_id": new_ulid(ts, self._rng),
-                        "ts_unix_ms": ts,
-                        "args": copy.deepcopy(raw.args),
-                    }
-                )
-            )
+        dups = burst_duplicates(raw, r, w_ms, self._rng)
         self._done = True
         # The original is untouched, so the proxy forwards it; the duplicates are never forwarded.
         return MutationResult(
@@ -383,6 +394,7 @@ class PlantHandle:
     planted_at_ms: int
     backend: str
     snapshot: Any
+    record_id: str  # the carrier record (ticket key, Salesforce Id or Slack channel)
 
 
 class PromptInjector:
@@ -404,20 +416,41 @@ class PromptInjector:
             raise ValueError(f"no {name} backend for carrier {payload.carrier}")
         if not (hasattr(be, "snapshot") and hasattr(be, "restore")):
             raise TypeError(f"{name} backend is not a fake/local backend (no snapshot/restore)")
-        ticket = company.tickets[0]
-        text = payload.text.replace("{charge_id}", fake_stripe_ids(company)[ticket.charge_key])
+        charge_id = fake_stripe_ids(company)[company.tickets[0].charge_key]
+        text = payload.text.replace("{charge_id}", charge_id)
         snap = be.snapshot()
+        try:
+            record_id = self._write(be, payload, text, company)
+        except BaseException:
+            be.restore(snap)  # never leave a half-planted state behind
+            raise
+        return PlantHandle(plan, payload, self._clock_ms(), name, snap, record_id)
+
+    @staticmethod
+    def _write(be: Any, payload: PayloadSpec, text: str, company: Company) -> str:
+        ticket = company.tickets[0]
         if payload.carrier == "ticket_body":
             body = be.get_ticket(ticket.key)["description"]
             be.set_ticket_body(ticket.key, f"{body}\n\n{text}")
-        elif payload.carrier == "ticket_comment":
+            return str(ticket.key)
+        if payload.carrier == "ticket_comment":
             be.add_comment(ticket.key, text, True)
-        elif payload.carrier == "sf_description":
-            account = company.accounts[0]
-            be.update_record("Account", be.ids()[account.key], {"Description": text})
-        else:
-            be.post_message(be.channel_id, text)
-        return PlantHandle(plan, payload, self._clock_ms(), name, snap)
+            return str(ticket.key)
+        if payload.carrier == "sf_description":
+            rid = str(be.ids()[company.accounts[0].key])
+            be.update_record("Account", rid, {"Description": text})
+            return rid
+        be.post_message(be.channel_id, text)
+        return str(be.channel_id)
+
+    @contextmanager
+    def planted(self, plan: InjectionPlan, company: Company) -> Iterator[PlantHandle]:
+        """Plant for the duration of the block; state is restored on any exit."""
+        handle = self.plant(plan, company)
+        try:
+            yield handle
+        finally:
+            self.cleanup(handle)
 
     def cleanup(self, handle: PlantHandle) -> None:
         self._backends[handle.backend].restore(handle.snapshot)
