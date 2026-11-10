@@ -10,13 +10,14 @@ from __future__ import annotations
 import dataclasses
 import math
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
-from agentfw.bench.metrics import Metrics
+from agentfw.bench.ablation import AblationRow
+from agentfw.bench.metrics import GATE_RECALL, GatePreview, Metrics
 from agentfw.bench.replay import SplitSpec
 
 __all__ = [
@@ -90,13 +91,21 @@ def _headline(m: Metrics, warm_only: bool) -> dict[str, Any]:
 
 
 def build_report(
-    all_: Metrics, warm: Metrics, meta: RunMeta, extras: Mapping[str, object] | None = None
+    all_: Metrics,
+    warm: Metrics,
+    meta: RunMeta,
+    extras: Mapping[str, object] | None = None,
+    *,
+    ablations: Sequence[AblationRow] | None = None,
+    gate: GatePreview | None = None,
 ) -> dict[str, object]:
     """Assemble the report. ``all`` / ``warm`` are the all-rows and warm-only metric sets.
 
     Per-family, control, cold-start, drift and latency come from the all-rows metrics (the warm-only
     cold-start table would be empty by construction); ``extras["state_bytes"]`` is lifted to the
-    top level.
+    top level. ``ablations`` (one row per detector variant) and ``gate`` (the Tier-1 gate preview:
+    attack-level recall on warm test rows at live thresholds) are stored as given, ``None`` when
+    not run.
     """
     ex = dict(extras or {})
     notes = list(ex.pop("notes", []) or [])  # type: ignore[call-overload]
@@ -119,6 +128,8 @@ def build_report(
         "drift": all_.drift,
         "latency": {"p50_us": all_.latency_p50_us, "p99_us": all_.latency_p99_us},
         "state_bytes": state_bytes,
+        "gate": gate,
+        "ablations": None if ablations is None else list(ablations),
         "meta": meta,
         "extras": ex,
     }
@@ -215,6 +226,8 @@ def render_markdown(report: Mapping[str, object]) -> str:
         f"Control (benign-unusual) FPR: {_f(ctrl['all'])} all, {_f(ctrl['warm'])} warm.",
         "",
     ]
+    lines += _gate_md(report.get("gate"))
+    lines += _ablations_md(report.get("ablations"))
 
     lines += [
         "#### Cold start",
@@ -239,14 +252,82 @@ def render_markdown(report: Mapping[str, object]) -> str:
     lat = _dict(report["latency"])
     lines += [
         "",
-        f"Drift delay (sessions): median {_f(d['median'], 1)}, p90 {_f(d['p90'], 1)}, "
-        f"miss rate {_f(d['miss_rate'])}, n={d['n']}.",
+        "#### Drift",
+        "",
+        f"Thresholds: `{pf['mode']}`. Delay in sessions from onset to the first flagged envelope "
+        "of each `slow_drift` attack; misses count as k.",
+        "",
+        _row(["Median delay", "p90 delay", "Miss rate", "Attacks"]),
+        _sep(4),
+        _row([_f(d["median"], 1), _f(d["p90"], 1), _f(d["miss_rate"]), str(d["n"])]),
         "",
         f"Latency: p50 {_f(lat['p50_us'], 1)} us, p99 {_f(lat['p99_us'], 1)} us; "
         f"detector state {report['state_bytes']} bytes.",
         "",
     ]
     return "\n".join(lines)
+
+
+def _gate_md(gate: object) -> list[str]:
+    lines = ["#### Tier-1 gate preview", ""]
+    if not isinstance(gate, dict):
+        return [*lines, "Not computed for this run.", ""]
+    lines += [
+        f"Warm test rows, live per-agent thresholds, attack level; gate = recall >= "
+        f"{GATE_RECALL:g} per family (slow_drift excluded). Share = top-reason share of the "
+        "targeted detector among detected attacks.",
+        "",
+        _row(["Family", "Bucket", "Detector", "Attack recall", "Top-reason share"]),
+        _sep(5),
+    ]
+    for fam, c in sorted(_dict(gate["cells"]).items()):
+        lines.append(
+            _row(
+                [
+                    fam,
+                    c["bucket"],
+                    c["detector"],
+                    f"{_f(c['recall'])} ({c['n_detected']}/{c['n_total']})",
+                    _f(c["top_reason_share"]),
+                ]
+            )
+        )
+    lines += [
+        "",
+        f"Benign FPR {_f(gate['benign_fpr'], 4)}, control FPR {_f(gate['control_fpr'])}; "
+        f"min recall {_f(gate['min_recall'])}: gate {'PASS' if gate['passed'] else 'FAIL'}.",
+        "",
+    ]
+    return lines
+
+
+def _ablations_md(ablations: object) -> list[str]:
+    lines = ["#### Ablations", ""]
+    if not isinstance(ablations, list) or not ablations:
+        return [*lines, "No ablations in this run.", ""]
+    fams = sorted({f for a in ablations for f in _dict(a["per_family_recall"])})
+    lines += [
+        "Warm test rows. FPR@95 per-agent with the per-agent recall it achieved; family recall is "
+        "attack level at live thresholds.",
+        "",
+        _row(["Variant", "AUPRC", "FPR@95 per-agent", "per-agent recall", *fams, "State bytes"]),
+        _sep(5 + len(fams)),
+    ]
+    for a in ablations:
+        fr = _dict(a["per_family_recall"])
+        lines.append(
+            _row(
+                [
+                    a["variant"],
+                    _f(a["auprc"]),
+                    _f(a["fpr95_per_agent"]),
+                    _f(a["per_agent_recall"]),
+                    *(_f(fr.get(f)) for f in fams),
+                    str(a["state_bytes"]),
+                ]
+            )
+        )
+    return [*lines, ""]
 
 
 def update_readme(readme: Path, md: str) -> None:

@@ -6,7 +6,8 @@ money field, for flat paths whose hint is ``money``, or (no hint) whose last seg
 ``items[].amount``; not ``account``, ``discount``, ``subtotal``); such names always have
 ``direction_for == "up"``. A ``count`` hint makes a path not money.
 A money field contributes the sum of its finite values (``try_number``; NaN/±inf/non-numbers
-skipped); a call with no finite value does not touch that money key.
+skipped); a call with no finite value does not touch that money key. With
+``vel_sum_signal=False`` (Task 1.14 sweep) no money key is scored or kept: count signal only.
 
 Clock: envelope time only, ``minute = ts_unix_ms // 60_000``. A timestamp earlier than the
 record's ``last_minute`` (out of order) is treated as ``last_minute``: it never rewinds the clock.
@@ -204,6 +205,8 @@ class VelocityDetector:
 
     def _money_sums(self, e: ActionEnvelope) -> list[tuple[str, float]]:
         """``(path, finite sum of its values)`` for each money path carrying a finite value."""
+        if not self._cfg.vel_sum_signal:
+            return []
         h = self._hints.get(e.tool_id)
         hints: Mapping[str, str] = h.field_hints if h is not None else {}
         out: list[tuple[str, float]] = []

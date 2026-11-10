@@ -13,7 +13,8 @@ or denied action never moves a baseline). Otherwise, in order:
    score computed *before* anything below mutates state;
 2. sub-detector updates (with the same pre-envelope types as ``score``);
 3. pooled priors (§6.10): every finite NUMERIC value as ``signed_log1p(x)`` (and the previous
-   response's ``item_count`` under magnitude's ``__resp__.item_count``) when magnitude is enabled;
+   response's ``item_count`` under magnitude's ``__resp__.item_count``, unless
+   ``mag_resp_signal`` is off) when magnitude is enabled;
    every CATEGORICAL / ID value (derived ``__domain__`` / ``__host__`` / ``__prefix__`` included)
    under novelty's key ``value_key(v)`` when novelty is enabled. ``PooledPriors`` applies
    ``priors_mode``;
@@ -191,5 +192,7 @@ class Engine:
                         if v is not None:
                             priors.observe_categorical(tool, path, value_key(v, max_len))
         prev = e.prev_response  # magnitude learns the same value under the same field
-        if num and prev is not None and (y := _finite_y(prev.item_count)) is not None:
+        if not (num and self.cfg.mag_resp_signal) or prev is None:
+            return
+        if (y := _finite_y(prev.item_count)) is not None:
             priors.observe_numeric(prev.tool_id, RESP_FIELD, y)

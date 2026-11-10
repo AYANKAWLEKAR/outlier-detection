@@ -17,7 +17,8 @@ the next call under field ``__resp__.item_count`` against
 count into the same key. Score and update of the response signal therefore happen on one
 envelope (call k+1), so a blocked k+1 never moves the response baseline ("score before
 update"). The envelope's own ``response_meta.item_count`` is never pushed directly; as a
-consequence a session's last response is never learned (accepted trade-off).
+consequence a session's last response is never learned (accepted trade-off). With
+``mag_resp_signal=False`` (Open Decision 5 sweep) the response signal is neither scored nor learned.
 
 Every score's evidence carries ``n`` (0 when no record exists), ``direction`` and
 ``prior_used``, including cold and non-finite scores.
@@ -32,9 +33,9 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, ClassVar, Literal, Self
+from typing import Any, ClassVar, Self
 
-from agentfw.core.config import EngineConfig
+from agentfw.core.config import Direction, EngineConfig
 from agentfw.core.detectors.base import (
     IQR_TO_SIGMA,
     PriorSource,
@@ -54,7 +55,6 @@ from agentfw.core.stats.p2 import P2Quantiles
 
 __all__ = ["RESP_FIELD", "Direction", "MagRecord", "MagnitudeDetector", "direction_for"]
 
-Direction = Literal["up", "both"]
 RESP_FIELD = "__resp__.item_count"
 NAME = "magnitude"
 
@@ -62,13 +62,14 @@ _UP_NAME = re.compile(r"(?i)(^|_)(amount|count|qty|total|len|strlen)")
 _UP_HINTS = frozenset({"money", "count"})
 
 
-def direction_for(path: str, hints: Mapping[str, str]) -> Direction:
+def direction_for(path: str, hints: Mapping[str, str], default: Direction = "both") -> Direction:
     """``up`` for money/count-hinted fields, or when a keyword (amount, count, qty, total, len)
     (or strlen) starts the last path segment or follows an ``_`` in it (``item_count``, ``__len__``,
-    ``total_amount``; not ``account``, ``discount``, ``calendar``); else ``both``."""
+    ``total_amount``; not ``account``, ``discount``, ``calendar``); else ``default``
+    (``EngineConfig.mag_direction_default``, Open Decision 2)."""
     if hints.get(path) in _UP_HINTS:
         return "up"
-    return "up" if _UP_NAME.search(path.rsplit(".", 1)[-1]) else "both"
+    return "up" if _UP_NAME.search(path.rsplit(".", 1)[-1]) else default
 
 
 @register_record
@@ -169,7 +170,9 @@ class MagnitudeDetector:
         if rec is not None:
             direction = rec.direction
         else:
-            direction = direction_for(path, self._field_hints(tool))
+            direction = direction_for(
+                path, self._field_hints(tool), self._cfg.mag_direction_default
+            )
         n = rec.n if rec is not None else 0
         if rec is not None and n >= self._cfg.mag_cold_n:
             return _Ref(rec, direction, prior_used=False, n=n)
@@ -237,7 +240,7 @@ class MagnitudeDetector:
             if ds is not None:
                 out.append(ds)
         prev = e.prev_response
-        if prev is not None and prev.item_count is not None:
+        if self._cfg.mag_resp_signal and prev is not None and prev.item_count is not None:
             ref = self._ref(agent, prev.tool_id, RESP_FIELD)
             ds = self._score_values(ref, (prev.item_count,), RESP_FIELD, {"tool": prev.tool_id})
             if ds is not None:
@@ -251,7 +254,10 @@ class MagnitudeDetector:
         key = key_mag(agent, tool, path)
         rec = self._record(key)
         if rec is None:
-            rec = MagRecord.new(self._cfg, direction_for(path, self._field_hints(tool)))
+            cfg = self._cfg
+            rec = MagRecord.new(
+                cfg, direction_for(path, self._field_hints(tool), cfg.mag_direction_default)
+            )
             self._store.put(key, rec)
         for x in xs:
             rec.push(x)
@@ -262,5 +268,5 @@ class MagnitudeDetector:
             if types(path) is FieldType.NUMERIC:
                 self._push(agent, tool, path, values)
         prev = e.prev_response  # same value score() saw; never this call's own response
-        if prev is not None and prev.item_count is not None:
+        if self._cfg.mag_resp_signal and prev is not None and prev.item_count is not None:
             self._push(agent, prev.tool_id, RESP_FIELD, (prev.item_count,))

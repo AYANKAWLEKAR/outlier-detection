@@ -37,7 +37,7 @@ class PooledPriors:
         key = key_prior_mag(tool, path)
         rec = self._store.get(key)
         if not isinstance(rec, MagRecord):
-            rec = MagRecord.new(self._cfg, direction_for(path, {}))
+            rec = MagRecord.new(self._cfg, direction_for(path, {}, self._cfg.mag_direction_default))
             self._store.put(key, rec)
         rec.push_y(y)
 

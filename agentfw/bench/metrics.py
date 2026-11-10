@@ -35,10 +35,14 @@ from agentfw.bench.replay import ScoreRow
 __all__ = [
     "BOOTSTRAP_N",
     "COLD_START_BUCKETS",
+    "GATE_FAMILIES",
+    "GATE_RECALL",
     "RECALL_TARGET",
     "STRENGTH_BUCKETS",
     "BucketCell",
     "DriftDelay",
+    "GateCell",
+    "GatePreview",
     "Metrics",
     "PerAgentResult",
     "RecallCell",
@@ -51,6 +55,7 @@ __all__ = [
     "control_fpr",
     "drift_delay",
     "fpr_at_recall",
+    "gate_preview",
     "latency_summary",
     "per_agent_fpr_at_recall",
     "recall_by_family",
@@ -81,6 +86,18 @@ COLD_START_BUCKETS: tuple[tuple[float, float], ...] = (
     (30, 100),
     (100, math.inf),
 )
+
+#: Tier-1 exit gate (spec §9, D-009): family -> (strength bucket, targeted detector).
+#: ``slow_drift`` is excluded (D-009); ``magnitude_spike`` gates on m >= 10.
+GATE_FAMILIES: dict[str, tuple[str, str]] = {
+    "magnitude_spike": ("10-100", "magnitude"),
+    "scope_blowup": ("all", "magnitude"),
+    "exfil_volume": ("all", "magnitude"),
+    "prereq_skip": ("all", "sequence"),
+    "novel_target": ("all", "novelty"),
+    "velocity_burst": ("all", "velocity"),
+}
+GATE_RECALL = 0.90
 
 Thresholds = float | Mapping[str, float] | Literal["row"]
 BreakdownMode = Literal["per_agent", "row"]
@@ -120,6 +137,25 @@ class PerAgentResult:
     fpr: float
     recall: float
     thresholds: Mapping[str, float]
+
+
+@dataclass(slots=True, frozen=True)
+class GateCell:
+    bucket: str
+    detector: str
+    recall: float
+    n_detected: int
+    n_total: int
+    top_reason_share: float
+
+
+@dataclass(slots=True, frozen=True)
+class GatePreview:
+    cells: dict[str, GateCell]
+    benign_fpr: float
+    control_fpr: float
+    min_recall: float
+    passed: bool
 
 
 @dataclass(slots=True)
@@ -398,6 +434,38 @@ def latency_summary(rows: Sequence[ScoreRow]) -> tuple[float, float]:
         return math.nan, math.nan
     p50, p99 = np.percentile(lat, [50, 99])
     return float(p50), float(p99)
+
+
+def gate_preview(rows: Sequence[ScoreRow], thresholds: Thresholds = "row") -> GatePreview:
+    """Tier-1 exit-gate preview on **warm test** rows (spec §9, D-008, D-009).
+
+    For every :data:`GATE_FAMILIES` family present: attack-level recall in its gate bucket and the
+    :func:`top_reason_share` of its targeted detector (over all detected attacks of the family);
+    plus benign and control FPR on the same rows. Thresholds default to ``"row"``, the engine's
+    live per-agent thresholds. ``passed`` means every present gated family reaches
+    :data:`GATE_RECALL` (``min_recall`` is NaN and ``passed`` False when none is present). The
+    top-reason share is reported but is not part of ``passed``.
+    """
+    warm = [r for r in _valid(rows) if r.split == "test" and r.is_warm]
+    by_family = recall_by_family(warm, thresholds, "attack")
+    cells: dict[str, GateCell] = {}
+    for family, (bucket, detector) in GATE_FAMILIES.items():
+        cell = by_family.get(family, {}).get(bucket)
+        if cell is None or cell.n_total == 0:
+            continue
+        share = top_reason_share(warm, family, detector, thresholds)
+        cells[family] = GateCell(
+            bucket, detector, cell.recall, cell.n_detected, cell.n_total, share
+        )
+    recalls = [c.recall for c in cells.values()]
+    min_recall = min(recalls) if recalls else math.nan
+    return GatePreview(
+        cells=cells,
+        benign_fpr=benign_fpr(warm, thresholds),
+        control_fpr=control_fpr(warm, thresholds),
+        min_recall=min_recall,
+        passed=bool(recalls) and min_recall >= GATE_RECALL - _EPS,
+    )
 
 
 # --- per-agent calibration ----------------------------------------------------------------------

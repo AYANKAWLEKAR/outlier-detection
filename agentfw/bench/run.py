@@ -14,7 +14,7 @@ from typing import Any
 import orjson
 
 from agentfw.bench.dataset import load_dir
-from agentfw.bench.metrics import BOOTSTRAP_N, compute_all
+from agentfw.bench.metrics import BOOTSTRAP_N, compute_all, gate_preview
 from agentfw.bench.registry import make_detector
 from agentfw.bench.replay import SplitSpec, canonical_hash, replay, write_score_table
 from agentfw.bench.report import RunMeta, build_report, git_sha, render_markdown, update_readme
@@ -54,6 +54,7 @@ def run(
         warm,
         meta,
         {"state_bytes": det.state_bytes(), "score_hash": canonical_hash(rows), "n_boot": n_boot},
+        gate=gate_preview(rows),
     )
     (out_dir / "report.json").write_bytes(orjson.dumps(report, option=orjson.OPT_INDENT_2))
     (out_dir / "report.md").write_text(render_markdown(report))

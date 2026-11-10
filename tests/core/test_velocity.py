@@ -419,3 +419,17 @@ def test_roll_running_total_matches_recompute(seed: int) -> None:
     count_only, (cnt2, total2) = _roll(list(ring), last, to, with_sum=False)
     assert [c for c, _ in count_only] == [c for c, _ in expected] and total2 == 0.0
     assert cnt2 == cnt
+
+
+# -- Task 1.14 sweep switch ----------------------------------------------------------------------
+
+
+def test_sum_signal_off_scores_count_only_and_keeps_no_money_keys() -> None:
+    det = VelocityDetector(DictStore(), dataclasses.replace(CFG, vel_sum_signal=False))
+    rng = np.random.default_rng(5)
+    for ts in cadence(T0, 2 * 24 * 60, 5):
+        step(det, env(ts, {"amount": round(float(rng.uniform(30.0, 45.0)), 2)}))
+    huge = step(det, env(T0 + 2 * 24 * 60 * MIN + 30_000, {"amount": 1e7}))
+    assert huge.evidence["signal"] == "count" and huge.field is None
+    assert huge.score < 0.5  # one call at normal cadence; the money total is not a signal
+    assert det._store.get(key_vel(AGENT, TOOL, "amount")) is None

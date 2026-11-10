@@ -47,9 +47,24 @@ GLOBAL_CONSTRAINT_VALUES: dict[str, object] = {
     "cal_delta": 0.1,
 }
 
+# Task 1.14 sweep switches (Open Decisions 2 and 5, velocity sum signal): defaults keep the
+# spec's behaviour.
+SWEEP_SWITCH_DEFAULTS: dict[str, object] = {
+    "mag_direction_default": "both",
+    "mag_resp_signal": True,
+    "vel_sum_signal": True,
+}
+
+
+# Defaults changed by an open-decision record (Task 1.14), overriding the spec value above.
+DECISION_OVERRIDES: dict[str, object] = {
+    "prereq_rate": 0.90,  # docs/decisions/003-prereq-threshold.md
+}
+
 
 def test_engine_config_defaults_match_global_constraints() -> None:
-    assert dataclasses.asdict(EngineConfig()) == GLOBAL_CONSTRAINT_VALUES
+    expected = GLOBAL_CONSTRAINT_VALUES | SWEEP_SWITCH_DEFAULTS | DECISION_OVERRIDES
+    assert dataclasses.asdict(EngineConfig()) == expected
 
 
 def test_engine_config_frozen_slots_and_replace() -> None:

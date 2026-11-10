@@ -5,9 +5,10 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Literal
 
-__all__ = ["EngineConfig", "PriorsMode"]
+__all__ = ["Direction", "EngineConfig", "PriorsMode"]
 
 PriorsMode = Literal["all", "money_count_only", "off"]
+Direction = Literal["up", "both"]
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -27,6 +28,11 @@ class EngineConfig:
     z0: float = 3.0
     tau: float = 0.75
     mag_eps: float = 0.05
+    # Sweep switches (Task 1.14, Open Decisions 2 and 5). ``mag_direction_default``: direction of
+    # numeric fields with no money/count hint and no up-keyword in their name.
+    # ``mag_resp_signal``: score/learn the previous response's ``item_count`` (§2.3).
+    mag_direction_default: Direction = "both"
+    mag_resp_signal: bool = True
     # Pooled priors (§6.10)
     prior_iqr_inflate: float = 1.5
     prior_novelty_discount: float = 0.67
@@ -36,6 +42,7 @@ class EngineConfig:
     vel_long_min: int = 1440
     vel_eps: float = 0.25
     vel_cold_n: int = 30
+    vel_sum_signal: bool = True  # money-sum windows next to the call count (Task 1.14 sweep)
     # Novelty (§6.5)
     novelty_lru: int = 10_000
     novelty_full_n: int = 200
@@ -45,7 +52,7 @@ class EngineConfig:
     trans_min_ctx: int = 20
     trans_smoothing: float = 0.5
     prereq_min_n: int = 50
-    prereq_rate: float = 0.95
+    prereq_rate: float = 0.90  # docs/decisions/003-prereq-threshold.md (spec: 0.95)
     # Id flow (§6.7-6.8)
     flow_min_obs: int = 20
     # Fusion (§6.11)

@@ -138,18 +138,23 @@ def test_prereq_appears_exactly_at_50th_obs(seq: SequenceDetector) -> None:
     assert prereqs(seq, "Y") == frozenset({tid("X")})
 
 
-def test_prereq_not_mined_at_94_percent(seq: SequenceDetector) -> None:
+# Boundary of the default prereq_rate (0.90 since docs/decisions/003-prereq-threshold.md).
+_RATE_PCT = round(100 * EngineConfig().prereq_rate)
+
+
+def test_prereq_not_mined_just_below_prereq_rate(seq: SequenceDetector) -> None:
     for i in range(100):
-        if i < 94:
+        if i < _RATE_PCT - 1:
             obs_y_with_x(seq)
         else:
             run_session(seq, ["Z", "Y"])
     assert prereqs(seq, "Y") == frozenset()
 
 
-def test_prereq_mined_at_95_percent(seq: SequenceDetector) -> None:
+def test_prereq_mined_exactly_at_prereq_rate(seq: SequenceDetector) -> None:
+    assert _RATE_PCT == 90
     for i in range(100):
-        obs_y_with_x(seq) if i < 95 else run_session(seq, ["Z", "Y"])
+        obs_y_with_x(seq) if i < _RATE_PCT else run_session(seq, ["Z", "Y"])
     assert prereqs(seq, "Y") == frozenset({tid("X")})
 
 

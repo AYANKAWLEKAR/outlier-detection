@@ -422,3 +422,40 @@ def test_blocked_next_call_never_moves_response_baseline() -> None:
     assert rec.n == n_before + 1
     assert orjson.dumps(rec.to_dict()) == snapshot
     assert rec.q.quantile(1.0) < signed_log1p(1000)  # 1000 never entered the baseline
+
+
+# --- Task 1.14 sweep switches -----------------------------------------------------------------
+
+
+def test_direction_default_up_applies_only_to_unhinted_unnamed_fields() -> None:
+    assert direction_for("latitude", {}) == "both"
+    assert direction_for("latitude", {}, default="up") == "up"
+    assert direction_for("amount", {}, default="both") == "up"  # name rule still wins
+    up = EngineConfig(mag_direction_default="up")
+    store = DictStore()
+    t = Trained(MagnitudeDetector(store, up), TypeInference(store, up), store)
+    for v in np.random.default_rng(3).normal(50.0, 2.0, 200):
+        _learn(t, make_env(agent_id=AGENT, tool_id=TOOL, args={"latitude": float(v)}))
+    rec = store.get(key_mag(AGENT, TOOL, "latitude"))
+    assert isinstance(rec, MagRecord) and rec.direction == "up"
+    assert score_field(t, "latitude", 1.0) < 0.05  # far below: one-sided up ignores it
+
+
+def test_response_signal_off_neither_scores_nor_learns_response_counts() -> None:
+    store = DictStore()
+    off = EngineConfig(mag_resp_signal=False)
+    t = Trained(MagnitudeDetector(store, off), TypeInference(store, off), store)
+    tracker = SessionTracker()
+    for i in range(60):
+        e = make_env(
+            tracker=tracker,
+            agent_id=AGENT,
+            tool_id=SF,
+            seq_no=i,
+            args={"soql": "select id"},
+            response_meta={"item_count": 20 if i < 59 else 5000},
+        )
+        scores = _step(t, e, allowed=True)
+        assert all(s.field != "__resp__.item_count" for s in scores)
+        tracker.observe(e)
+    assert store.get(RESP_KEY) is None
