@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import orjson
+import pytest
 
 from agentfw.bench.dataset import load_labels, load_traces
 from agentfw.core.envelope import (
@@ -93,3 +94,27 @@ def test_jsonl_sink_verdict_serializes_detector_result(tmp_path: Path) -> None:
     assert r["reasons"][0]["baseline_summary"] == {"median": 1.0, "iqr": 0.5, "n": 40}
     assert r["reasons"][0]["observed"] is None  # non-finite floats become null
     assert r["field_types"] == {"amount": "numeric"}
+
+
+def test_jsonl_sink_rejects_unserializable_values(tmp_path: Path) -> None:
+    sink = JsonlSink(tmp_path)
+    res = DetectorResult(
+        fused_score=0.1,
+        per_detector=(DetectorScore("novelty", "x", 0.1, {"odd": object()}),),
+        reasons=(),
+        latency_us=1.0,
+    )
+    with pytest.raises(TypeError):
+        sink.write_verdict("env_1", res)
+    assert not (tmp_path / "verdicts.jsonl").exists()
+    sink.write_verdict(
+        "env_2",
+        DetectorResult(
+            fused_score=0.1,
+            per_detector=(DetectorScore("novelty", "x", 0.1, {"seen": frozenset({"b", "a"})}),),
+            reasons=(),
+            latency_us=1.0,
+        ),
+    )
+    v = orjson.loads((tmp_path / "verdicts.jsonl").read_bytes())
+    assert v["result"]["per_detector"][0]["evidence"] == {"seen": ["a", "b"]}

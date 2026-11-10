@@ -22,7 +22,11 @@ call is forwarded and learned as ``ALLOWED`` (§2.2), and a detector that raises
 skipped. Unknown tools return an error result and produce no envelope.
 
 Calls are serialized per proxy (one agent session), so ``seq_no``, the mutator's history and the
-session tracker stay causal.
+session tracker stay causal. Once admitted, a call runs shielded from upstream cancellation (an MCP
+client that gives up sends ``notifications/cancelled``): the forward is still bounded by
+``timeout_s`` and the call is always recorded, so there is no lost envelope or ``seq_no`` gap.
+Mutator output is re-validated as ``RawCall``; invalid output is rejected (fail closed: the
+original call is recorded with an error result and nothing is forwarded or labelled).
 """
 
 from __future__ import annotations
@@ -46,6 +50,7 @@ from mcp.types import (
     TextContent,
     Tool,
 )
+from pydantic import ValidationError
 
 from agentfw.bench.protocol import Detector
 from agentfw.core.envelope import Label, Outcome, RawCall
@@ -110,6 +115,16 @@ class ActionMutator(Protocol):
         ``extra_calls`` are logged after the call, never forwarded, and get fresh ``seq_no``\\s.
         """
         ...
+
+
+def _invalid_mutation(m: MutationResult) -> str | None:
+    """Re-validate mutator output (``model_copy`` skips validation); the error text, or None."""
+    try:
+        for r in (m.raw, *m.extra_calls):
+            RawCall.model_validate(r.model_dump())
+    except ValidationError as exc:
+        return str(exc)
+    return None
 
 
 def error_result(message: str) -> CallToolResult:
@@ -179,7 +194,11 @@ class FirewallProxy:
         if route is None:
             return error_result(f"unknown tool {name!r}")
         async with self._lock:
-            return await self._call(name, route, dict(arguments or {}))
+            # Shielded: once a call is admitted it is always recorded, even if the upstream client
+            # cancels (notifications/cancelled) mid-forward; fail_after(timeout_s) bounds it.
+            with anyio.CancelScope(shield=True):
+                result = await self._call(name, route, dict(arguments or {}))
+        return result
 
     async def _call(
         self, name: str, route: tuple[str, str], arguments: dict[str, Any]
@@ -188,9 +207,19 @@ class FirewallProxy:
         mutation = (
             self.mutator.mutate(raw, tuple(self._history)) if self.mutator is not None else None
         )
+        if mutation is not None and (invalid := _invalid_mutation(mutation)) is not None:
+            logger.error("rejecting mutator output for %s: %s", raw.envelope_id, invalid)
+            self._shadow_score(raw)
+            result = error_result(f"{name}: mutator produced an invalid call; not forwarded")
+            self._record(raw.model_copy(update={"response_meta": extract_response_meta(result)}))
+            return result
         forward = True
         if mutation is not None:
             mutated = mutation.raw.tool_id != raw.tool_id or mutation.raw.args != raw.args
+            if mutation.forward and mutated:
+                logger.warning(
+                    "D-014: %s was mutated; not forwarding despite forward=True", raw.envelope_id
+                )
             forward = mutation.forward and not mutated  # D-014
             raw = mutation.raw.model_copy(update={"response_meta": None})
 

@@ -35,7 +35,7 @@ def _default(obj: object) -> object:
         return dict(obj)
     if isinstance(obj, set | frozenset):
         return sorted(obj, key=str)
-    return str(obj)
+    raise TypeError(f"cannot serialize {type(obj).__name__} to JSON")
 
 
 class JsonlSink:

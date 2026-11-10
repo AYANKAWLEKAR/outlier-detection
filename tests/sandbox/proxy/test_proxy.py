@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import anyio
 import orjson
 import pytest
 from mcp import Client
@@ -258,14 +260,53 @@ async def test_unforwarded_mutation_without_synthetic_is_error() -> None:
         assert sink.calls[-1].response_meta.error is True
 
 
-async def test_mutated_args_are_never_forwarded_even_if_mutator_says_so() -> None:
+async def test_mutated_args_are_never_forwarded_even_if_mutator_says_so(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     async with make_proxy(mutator=RefundMutator(forward=True)) as (proxy, sink, spies):
-        res = await proxy.call_tool(
-            "stripe.create_refund", {"charge_id": CHARGE_ID, "amount": 1.0, "reason": "x"}
-        )
+        with caplog.at_level(logging.WARNING, logger="agentfw.sandbox.proxy_py.proxy"):
+            res = await proxy.call_tool(
+                "stripe.create_refund", {"charge_id": CHARGE_ID, "amount": 1.0, "reason": "x"}
+            )
         assert res is SYNTH
         assert spies["stripe"].forwarded == []
         assert sink.calls[-1].args["amount"] == 50.0
+    assert any("D-014" in r.getMessage() for r in caplog.records)
+
+
+class BadMutator(RefundMutator):
+    """Returns output that skips pydantic validation (model_copy does not validate)."""
+
+    def __init__(self, *, bad_extra: bool) -> None:
+        super().__init__(n_extra=1)
+        self.bad_extra = bad_extra
+
+    def mutate(self, raw: RawCall, history: Sequence[RawCall]) -> MutationResult | None:
+        m = super().mutate(raw, history)
+        if m is None:
+            return None
+        if self.bad_extra:
+            m.extra_calls[0] = m.extra_calls[0].model_copy(update={"tool_id": "Bad-Tool"})
+        else:
+            m.raw = m.raw.model_copy(update={"tool_id": "Bad-Tool"})
+        return m
+
+
+@pytest.mark.parametrize("bad_extra", [False, True])
+async def test_invalid_mutator_output_is_error_not_a_bad_line(bad_extra: bool) -> None:
+    async with make_proxy(mutator=BadMutator(bad_extra=bad_extra)) as (proxy, sink, spies):
+        res = await proxy.call_tool(
+            "stripe.create_refund", {"charge_id": CHARGE_ID, "amount": 1.0, "reason": "x"}
+        )
+        assert res.is_error and "mutator" in _text(res)
+        assert spies["stripe"].forwarded == []  # fail closed: never forwarded
+        assert len(sink.calls) == 1 and sink.labels == []
+        call = sink.calls[0]
+        assert RawCall.model_validate(call.model_dump()) == call
+        assert call.tool_id == "stripe.create_refund" and call.args["amount"] == 1.0
+        assert call.response_meta.error is True
+        await proxy.call_tool("flaky.ok", {})
+        assert [c.seq_no for c in sink.calls] == [0, 1]
 
 
 async def test_forwarded_unmutated_call_keeps_mutator_response_meta() -> None:
@@ -348,6 +389,37 @@ async def test_shadow_scores_before_update() -> None:
     assert sink.events.index(f"verdict:{s0.envelope_id}") < sink.events.index(
         f"call:{s0.envelope_id}"
     )
+
+
+@pytest.mark.parametrize("mode", ["auto", "legacy"])  # direct dispatch / JSON-RPC streams
+async def test_upstream_cancel_still_records_the_call(mode: str) -> None:
+    """An MCP client giving up mid-forward must not lose the envelope, seq_no or session context."""
+    sink = MemorySink()
+    async with make_proxy(sink=sink, timeout_s=0.6) as (proxy, _, spies):
+        spy = SpyDetector(dict(spies), sink)
+        proxy.shadow = spy
+        async with Client(proxy.build_server(), mode=mode) as client:
+            # The client's own deadline cancels the in-flight request. Depending on the transport
+            # it raises, or (direct dispatch) waits for the shielded handler's error result.
+            try:
+                res = await client.call_tool("flaky.hang", {}, read_timeout_seconds=0.1)
+            except Exception:
+                pass
+            else:
+                assert res.is_error
+            with anyio.fail_after(5):
+                while not sink.calls:
+                    await anyio.sleep(0.02)
+            assert not (await client.call_tool("flaky.ok", {})).is_error
+
+    hung, ok = sink.calls
+    assert (hung.tool_id, hung.seq_no, ok.seq_no) == ("flaky.hang", 0, 1)
+    assert hung.response_meta is not None and hung.response_meta.error is True
+    assert spies["flaky"].forwarded == [("hang", {}), ("ok", {})]
+    kinds = [entry[0] for entry in spy.log]
+    assert kinds == ["score", "update", "score", "update"]
+    assert spy.log[2][1].prior_tools == ("flaky.hang",)
+    assert [eid for eid, _ in sink.verdicts] == [hung.envelope_id, ok.envelope_id]
 
 
 async def test_shadow_failure_never_blocks() -> None:
