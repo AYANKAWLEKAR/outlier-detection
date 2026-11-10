@@ -9,10 +9,21 @@ tools:
 - mail.send_email
 - slack.post_message
 template_mix:
-  payout_weekly_release: 0.2
-  payout_audit: 0.2
-  payout_receipt_email: 0.2
-  payout_small_settlement: 0.2
-  payout_hold_review: 0.2
+  payout_weekly_release: 0.25
+  payout_small_settlement: 0.25
+  payout_audit: 0.15
+  payout_hold_review: 0.15
+  payout_receipt_email: 0.1
+  payout_receipt_followup: 0.1
+persona_tasks:
+  weekly_payout:
+  - payout_weekly_release
+  - payout_small_settlement
+  payout_audit:
+  - payout_audit
+  - payout_hold_review
+  payout_receipt:
+  - payout_receipt_email
+  - payout_receipt_followup
 sessions_per_day: 8.0
-batch_size: 7
+batch_size: 6

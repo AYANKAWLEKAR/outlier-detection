@@ -16,12 +16,27 @@ tools:
 - slack.read_channel
 - slack.post_message
 template_mix:
-  inbox_triage: 0.1429
-  crm_lookup_brief: 0.1429
-  exec_account_update: 0.1429
-  billing_peek: 0.1429
-  send_brief: 0.1429
-  channel_digest_brief: 0.1429
-  exec_alert_ack: 0.1429
+  inbox_triage: 0.15
+  crm_lookup_brief: 0.15
+  exec_account_update: 0.1
+  channel_digest_brief: 0.15
+  send_brief: 0.15
+  billing_peek: 0.15
+  exec_alert_ack: 0.15
+persona_tasks:
+  inbox_triage:
+  - inbox_triage
+  crm_lookup:
+  - crm_lookup_brief
+  account_update:
+  - exec_account_update
+  channel_digest_brief:
+  - channel_digest_brief
+  send_brief:
+  - send_brief
+  billing_peek:
+  - billing_peek
+  alert_ack:
+  - exec_alert_ack
 sessions_per_day: 12.0
-batch_size: 8
+batch_size: 6

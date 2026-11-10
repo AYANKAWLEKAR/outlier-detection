@@ -9,10 +9,23 @@ tools:
 - zendesk.update_status
 - slack.post_message
 template_mix:
-  triage_ticket: 0.2
-  queue_scan: 0.2
-  triage_close_resolved: 0.2
-  escalate_to_channel: 0.2
-  triage_comment_and_escalate: 0.2
+  triage_ticket: 0.19999999999999998
+  triage_close_resolved: 0.19999999999999998
+  triage_request_info: 0.19999999999999998
+  queue_scan: 0.15
+  queue_scan_stale_pending: 0.15
+  escalate_to_channel: 0.05
+  triage_comment_and_escalate: 0.05
+persona_tasks:
+  triage_ticket:
+  - triage_ticket
+  - triage_close_resolved
+  - triage_request_info
+  queue_scan:
+  - queue_scan
+  - queue_scan_stale_pending
+  escalate_to_slack:
+  - escalate_to_channel
+  - triage_comment_and_escalate
 sessions_per_day: 45.0
 batch_size: 6

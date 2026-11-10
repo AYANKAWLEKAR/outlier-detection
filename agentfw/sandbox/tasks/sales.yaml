@@ -1,15 +1,15 @@
 - id: pipeline_review
-  roles: &id001
+  roles:
   - sales-ops-a
   - sales-ops-b
   prompt: 'Pipeline review: pull every opportunity currently in {deals.stage}, open the first one ({deals.first_name})
-    to check the details, and post a stage summary to {chan.channel} starting with ''Pipeline update''.'
+    to check the details, and post a stage summary to {chan.channel} starting with ''Pipeline update {chan.ref}''.'
   slots:
     deals:
       kind: soql_object
       filter:
         object: Opportunity
-    chan: &id002
+    chan:
       kind: channel_topic
       filter: {}
   expected_tools:
@@ -19,10 +19,12 @@
   success:
   - kind: slack_contains
     params:
-      text: Pipeline update
+      text: Pipeline update {chan.ref}
   max_steps: 8
 - id: reprice_opportunity
-  roles: *id001
+  roles:
+  - sales-ops-a
+  - sales-ops-b
   prompt: 'Reprice {opp.name}: look at the record, update its Amount to {opp.new_amount} and set Description
     to ''Repriced after quote review'', then log a follow-up task ''Send revised quote''.'
   slots:
@@ -38,11 +40,19 @@
     params:
       object: Opportunity
       record_id: '{opp.sf_id}'
+      field: Amount
+      value: '{opp.new_amount}'
+  - kind: sf_field_equals
+    params:
+      object: Opportunity
+      record_id: '{opp.sf_id}'
       field: Description
       value: Repriced after quote review
   max_steps: 8
 - id: bulk_stage_update
-  roles: *id001
+  roles:
+  - sales-ops-a
+  - sales-ops-b
   prompt: 'Move every opportunity in {deals.stage} to Qualification: query them, apply the stage change
     in one bulk update, and tell {chan.channel} how many were updated (start with ''Bulk stage update'').'
   slots:
@@ -50,7 +60,9 @@
       kind: soql_object
       filter:
         object: Opportunity
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.run_soql
   - salesforce.mass_update
@@ -64,20 +76,31 @@
       value: Qualification
   max_steps: 8
 - id: log_followup_task
-  roles: *id001
-  prompt: Open {opp.name} and log a follow-up task 'Call {opp.account_name} about next steps' against
-    it.
+  roles:
+  - sales-ops-a
+  - sales-ops-b
+  prompt: Open {opp.name}, log a follow-up task 'Call {opp.account_name} about next steps' against it,
+    and tell {chan.channel} 'Follow-up logged for {opp.name}'.
   slots:
     opp:
       kind: opportunity
       filter: {}
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.get_record
   - salesforce.create_task
-  success: []
-  max_steps: 6
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: Follow-up logged for {opp.name}
+  max_steps: 8
 - id: advance_stage_with_note
-  roles: *id001
+  roles:
+  - sales-ops-a
+  - sales-ops-b
   prompt: '{opp.name} had a good call. Check the record, move it to Negotiation, and create a task ''Prepare
     contract for {opp.account_name}''.'
   slots:
@@ -97,7 +120,9 @@
       value: Negotiation
   max_steps: 8
 - id: pipeline_risk_flag
-  roles: *id001
+  roles:
+  - sales-ops-a
+  - sales-ops-b
   prompt: Review the deals in {deals.stage}, look at {deals.first_name} in detail, note 'At risk - no
     recent activity' in its NextStep field, and warn {chan.channel} with the opportunity name.
   slots:
@@ -105,7 +130,9 @@
       kind: soql_object
       filter:
         object: Opportunity
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.run_soql
   - salesforce.get_record
@@ -117,7 +144,9 @@
       text: '{deals.first_name}'
   max_steps: 10
 - id: account_health_summary
-  roles: *id001
+  roles:
+  - sales-ops-a
+  - sales-ops-b
   prompt: 'Pull the account record for {acct.name} (SOQL on its website {acct.domain}), then email the
     account owner at sales-managers@helio-ops.example with the subject ''Account health: {acct.name}''.'
   slots:
@@ -136,14 +165,18 @@
       subject_contains: Account health
   max_steps: 8
 - id: closed_won_announce
-  roles: *id001
+  roles:
+  - sales-ops-a
+  - sales-ops-b
   prompt: We just closed {opp.name}. Verify the record, announce it in {chan.channel} (include '{opp.name}'),
     and create a task to start onboarding.
   slots:
     opp:
       kind: opportunity
       filter: {}
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.get_record
   - slack.post_message
@@ -154,15 +187,18 @@
       text: '{opp.name}'
   max_steps: 8
 - id: quarter_end_close_sweep
-  roles: *id001
+  roles:
+  - sales-ops-a
   prompt: 'Quarter-end sweep: find opportunities in {deals.stage}, mark them all ''Closed Lost'' in one
-    update, and post the count to {chan.channel} starting with ''Quarter-end sweep''.'
+    update, and post the count to {chan.channel} starting with ''Quarter-end sweep {chan.ref}''.'
   slots:
     deals:
       kind: soql_object
       filter:
         object: Opportunity
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.run_soql
   - salesforce.mass_update
@@ -170,10 +206,11 @@
   success:
   - kind: slack_contains
     params:
-      text: Quarter-end sweep
+      text: Quarter-end sweep {chan.ref}
   max_steps: 8
+  quarter_end_only: true
 - id: crm_hygiene_fix_title
-  roles: &id003
+  roles:
   - crm-hygiene-a
   prompt: Contact {c.first_name} {c.last_name} at {c.account_name} has no job title. Open the record and
     set Title to 'Procurement Manager'.
@@ -193,7 +230,8 @@
       value: Procurement Manager
   max_steps: 6
 - id: crm_dedupe_sweep
-  roles: *id003
+  roles:
+  - crm-hygiene-a
   prompt: Check {acct.account_name} for duplicate contacts (SOQL on its account), open the first contact,
     and flag it by setting Description to 'Possible duplicate - review'.
   slots:
@@ -214,7 +252,8 @@
       value: Possible duplicate - review
   max_steps: 8
 - id: crm_assign_followups
-  roles: *id003
+  roles:
+  - crm-hygiene-a
   prompt: 'Create follow-up tasks for the first contact at {acct.account_name}: query the contacts, then
     add tasks ''Confirm contact details'' and ''Verify billing address''.'
   slots:
@@ -229,15 +268,18 @@
   success: []
   max_steps: 8
 - id: crm_quarter_end_cleanup
-  roles: *id003
+  roles:
+  - crm-hygiene-a
   prompt: 'Quarter-end cleanup: select opportunities in {deals.stage}, set their NextStep to ''Review
-    at quarter close'' in a single bulk update, then post ''Cleanup finished'' to {chan.channel}.'
+    at quarter close'' in a single bulk update, then post ''Cleanup finished {chan.ref}'' to {chan.channel}.'
   slots:
     deals:
       kind: soql_object
       filter:
         object: Opportunity
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.run_soql
   - salesforce.mass_update
@@ -245,10 +287,12 @@
   success:
   - kind: slack_contains
     params:
-      text: Cleanup finished
+      text: Cleanup finished {chan.ref}
   max_steps: 8
+  quarter_end_only: true
 - id: crm_account_note
-  roles: *id003
+  roles:
+  - crm-hygiene-a
   prompt: Look up the account at {acct.domain} by SOQL, open it, and set its Description to 'Verified
     by data team'. Let {chan.channel} know with a message that includes '{acct.name}'.
   slots:
@@ -256,7 +300,9 @@
       kind: soql_object
       filter:
         object: Account
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.run_soql
   - salesforce.get_record
@@ -271,7 +317,7 @@
       value: Verified by data team
   max_steps: 10
 - id: renewal_uplift
-  roles: &id004
+  roles:
   - renewals-a
   prompt: '{opp.name} is up for renewal. Open it, apply a 10% uplift by setting Amount to {opp.new_amount}
     and Description to ''Renewal uplift applied'', and create a task ''Send renewal paperwork''.'
@@ -288,11 +334,18 @@
     params:
       object: Opportunity
       record_id: '{opp.sf_id}'
+      field: Amount
+      value: '{opp.new_amount}'
+  - kind: sf_field_equals
+    params:
+      object: Opportunity
+      record_id: '{opp.sf_id}'
       field: Description
       value: Renewal uplift applied
   max_steps: 8
 - id: renewal_email
-  roles: *id004
+  roles:
+  - renewals-a
   prompt: Email {opp.contact_email} about the upcoming renewal of {opp.name} with the subject 'Your renewal
     is coming up', after opening the opportunity to confirm the amount ({opp.amount}). Then create a task
     'Await renewal reply'.
@@ -311,24 +364,29 @@
       subject_contains: Your renewal is coming up
   max_steps: 8
 - id: renewal_reminder_channel
-  roles: *id004
-  prompt: Check {opp.name} and post a renewal reminder to {chan.channel} starting with 'Renewal reminder'
-    and naming the opportunity.
+  roles:
+  - renewals-a
+  prompt: Check {opp.name}, create a task 'Confirm renewal date', and post a renewal reminder to {chan.channel}
+    starting with 'Renewal reminder {chan.ref}' and naming the opportunity ({opp.name}).
   slots:
     opp:
       kind: opportunity
       filter: {}
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.get_record
+  - salesforce.create_task
   - slack.post_message
   success:
   - kind: slack_contains
     params:
-      text: Renewal reminder
-  max_steps: 6
+      text: Renewal reminder {chan.ref}
+  max_steps: 8
 - id: renewal_stage_update
-  roles: *id004
+  roles:
+  - renewals-a
   prompt: '{opp.name} renewed. Open it, set StageName to ''Closed Won'', and create a task ''Schedule
     kickoff''.'
   slots:
@@ -348,7 +406,7 @@
       value: Closed Won
   max_steps: 8
 - id: lead_route
-  roles: &id005
+  roles:
   - lead-router-a
   prompt: 'Route new contact {c.first_name} {c.last_name} ({c.account_name}): open the record, set Department
     to ''Enterprise Sales'', create a task ''Intro call with {c.first_name}'', and tell {chan.channel}
@@ -357,7 +415,9 @@
     c:
       kind: contact
       filter: {}
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.get_record
   - salesforce.update_record
@@ -375,14 +435,17 @@
       text: '{c.last_name}'
   max_steps: 10
 - id: lead_notify_owner
-  roles: *id005
+  roles:
+  - lead-router-a
   prompt: 'Check contact {c.first_name} {c.last_name}, email the sales owner at lead-owners@helio-ops.example
     with the subject ''New lead: {c.account_name}'', and post the same lead name to {chan.channel}.'
   slots:
     c:
       kind: contact
       filter: {}
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.get_record
   - mail.send_email
@@ -394,7 +457,8 @@
       subject_contains: New lead
   max_steps: 8
 - id: lead_welcome_email
-  roles: *id005
+  roles:
+  - lead-router-a
   prompt: 'Welcome new lead {c.first_name} {c.last_name}: open their contact record, email {c.email} with
     the subject ''Welcome to Helio'', and add a task ''Qualify {c.account_name}''.'
   slots:
@@ -412,7 +476,8 @@
       subject_contains: Welcome to Helio
   max_steps: 8
 - id: lead_territory_tag
-  roles: *id005
+  roles:
+  - lead-router-a
   prompt: Contact {c.first_name} {c.last_name} works at {c.account_name}. Open the record, set Department
     to 'Mid-Market', and create a task 'Confirm territory'.
   slots:
@@ -430,4 +495,107 @@
       record_id: '{c.sf_id}'
       field: Department
       value: Mid-Market
+  max_steps: 8
+- id: crm_contact_department_fix
+  roles:
+  - crm-hygiene-a
+  prompt: Contact {c.first_name} {c.last_name} ({c.account_name}) has no department. Open the record and
+    set Department to 'Finance'.
+  slots:
+    c:
+      kind: contact
+      filter: {}
+  expected_tools:
+  - salesforce.get_record
+  - salesforce.update_record
+  success:
+  - kind: sf_field_equals
+    params:
+      object: Contact
+      record_id: '{c.sf_id}'
+      field: Department
+      value: Finance
+  max_steps: 6
+- id: crm_opportunity_nextstep
+  roles:
+  - crm-hygiene-a
+  prompt: Opportunity {opp.name} has an empty next step. Open it and set NextStep to 'Confirm budget with
+    customer'.
+  slots:
+    opp:
+      kind: opportunity
+      filter: {}
+  expected_tools:
+  - salesforce.get_record
+  - salesforce.update_record
+  success:
+  - kind: sf_field_equals
+    params:
+      object: Opportunity
+      record_id: '{opp.sf_id}'
+      field: NextStep
+      value: Confirm budget with customer
+  max_steps: 6
+- id: crm_duplicate_alert
+  roles:
+  - crm-hygiene-a
+  prompt: Check the contacts at {acct.account_name} with a SOQL query, open {acct.first_name}, and tell
+    {chan.channel} 'Possible duplicate {acct.first_id}'.
+  slots:
+    acct:
+      kind: soql_object
+      filter:
+        object: Contact
+    chan:
+      kind: channel_topic
+      filter: {}
+  expected_tools:
+  - salesforce.run_soql
+  - salesforce.get_record
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: Possible duplicate {acct.first_id}
+  max_steps: 8
+- id: crm_stale_opportunity_task
+  roles:
+  - crm-hygiene-a
+  - sales-ops-b
+  prompt: Opportunity {opp.name} has had no activity for a month. Open it, create a task 'Re-engage {opp.account_name}',
+    and tell {chan.channel} 'Stale deal {opp.name}'.
+  slots:
+    opp:
+      kind: opportunity
+      filter: {}
+    chan:
+      kind: channel_topic
+      filter: {}
+  expected_tools:
+  - salesforce.get_record
+  - salesforce.create_task
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: Stale deal {opp.name}
+  max_steps: 8
+- id: lead_owner_task_notice
+  roles:
+  - lead-router-a
+  prompt: Open contact {c.first_name} {c.last_name}, create a task 'Call {c.first_name} within 24 hours',
+    and email lead-owners@helio-ops.example with the subject 'Task created for {c.last_name}'.
+  slots:
+    c:
+      kind: contact
+      filter: {}
+  expected_tools:
+  - salesforce.get_record
+  - salesforce.create_task
+  - mail.send_email
+  success:
+  - kind: mailhog_has_message
+    params:
+      to: lead-owners@helio-ops.example
+      subject_contains: Task created for {c.last_name}
   max_steps: 8

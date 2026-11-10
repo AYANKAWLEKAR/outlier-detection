@@ -11,14 +11,29 @@ tools:
 - mail.send_email
 - slack.post_message
 template_mix:
-  pipeline_review: 0.1111
-  reprice_opportunity: 0.1111
-  bulk_stage_update: 0.1111
-  log_followup_task: 0.1111
-  advance_stage_with_note: 0.1111
-  pipeline_risk_flag: 0.1111
-  account_health_summary: 0.1111
-  closed_won_announce: 0.1111
-  quarter_end_close_sweep: 0.1111
+  pipeline_review: 0.1125
+  pipeline_risk_flag: 0.1125
+  account_health_summary: 0.1125
+  closed_won_announce: 0.1125
+  reprice_opportunity: 0.15
+  advance_stage_with_note: 0.15
+  bulk_stage_update: 0.15
+  log_followup_task: 0.1
+  quarter_end_close_sweep: 0.0
+persona_tasks:
+  pipeline_review:
+  - pipeline_review
+  - pipeline_risk_flag
+  - account_health_summary
+  - closed_won_announce
+  reprice_opportunity:
+  - reprice_opportunity
+  - advance_stage_with_note
+  bulk_stage_update:
+  - bulk_stage_update
+  log_followup:
+  - log_followup_task
+  quarter_end_mass_update:
+  - quarter_end_close_sweep
 sessions_per_day: 25.0
-batch_size: 7
+batch_size: 6

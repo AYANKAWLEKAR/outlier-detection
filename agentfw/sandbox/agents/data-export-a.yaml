@@ -9,9 +9,16 @@ tools:
 - mail.send_email
 - slack.post_message
 template_mix:
-  export_report: 0.25
-  export_spotcheck: 0.25
-  export_contacts_list: 0.25
-  export_pipeline_snapshot: 0.25
+  export_report: 0.35
+  export_contacts_list: 0.35
+  export_spotcheck: 0.15
+  export_pipeline_snapshot: 0.15
+persona_tasks:
+  export_report:
+  - export_report
+  - export_contacts_list
+  export_spotcheck:
+  - export_spotcheck
+  - export_pipeline_snapshot
 sessions_per_day: 5.0
-batch_size: 8
+batch_size: 6

@@ -7,9 +7,16 @@ tools:
 - slack.read_channel
 - slack.post_message
 template_mix:
-  status_broadcast: 0.25
-  alert_ack: 0.25
-  backlog_update: 0.25
-  notifier_digest: 0.25
+  status_broadcast: 0.3
+  backlog_update: 0.3
+  alert_ack: 0.2
+  notifier_digest: 0.2
+persona_tasks:
+  status_broadcast:
+  - status_broadcast
+  - backlog_update
+  alert_ack:
+  - alert_ack
+  - notifier_digest
 sessions_per_day: 60.0
-batch_size: 8
+batch_size: 6

@@ -91,7 +91,7 @@ def _check_object(obj: str) -> None:
         raise tool_error(f"unsupported object {obj!r}; supported: {', '.join(OBJECTS)}")
 
 
-def _sf_id(obj: str, seed: str) -> str:
+def sf_id(obj: str, seed: str) -> str:
     """15-char Salesforce-style id: 3-char key prefix (has a digit) + 12 hex chars."""
     return _KEY_PREFIX[obj] + hashlib.sha1(f"{obj}:{seed}".encode()).hexdigest()[:12].upper()
 
@@ -130,7 +130,7 @@ class FakeSalesforceBackend:
             )
 
     def _add(self, obj: str, key: str, fields: dict[str, Any]) -> None:
-        rid = _sf_id(obj, key)
+        rid = sf_id(obj, key)
         self._ids[key] = rid
         self._rows[obj][rid] = {"Id": rid, **fields}
 
@@ -202,7 +202,7 @@ class FakeSalesforceBackend:
             if not any(what_id in rows for rows in self._rows.values()):
                 raise tool_error(f"NOT_FOUND: no record with id {what_id!r}")
             self._n_tasks += 1
-            rid = _sf_id("Task", str(self._n_tasks))
+            rid = sf_id("Task", str(self._n_tasks))
             self._rows["Task"][rid] = {"Id": rid, "WhatId": what_id, "Subject": subject}
         return {"id": rid, "success": True}
 

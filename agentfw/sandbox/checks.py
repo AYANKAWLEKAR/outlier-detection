@@ -57,11 +57,23 @@ def stripe_refund_exists(stripe: StripeBackend, charge_id: str) -> bool:
     return float(charge.get("amount_refunded", 0)) > 0
 
 
+def _same(actual: Any, expected: Any) -> bool:
+    """Equality that also treats numbers and their string forms alike (`33770` == `"33770.0"`)."""
+    if actual == expected:
+        return True
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return False
+    try:
+        return float(actual) == float(expected)
+    except (TypeError, ValueError):
+        return False
+
+
 def sf_field_equals(
     sf: SalesforceBackend, obj: str, record_id: str, field_: str, value: Any
 ) -> bool:
     try:
-        return bool(sf.get_record(obj, record_id).get(field_) == value)
+        return _same(sf.get_record(obj, record_id).get(field_), value)
     except ToolError:
         return False
 

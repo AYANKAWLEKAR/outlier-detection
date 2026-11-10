@@ -1,10 +1,10 @@
 - id: triage_ticket
-  roles: &id001
+  roles:
   - helpdesk-triage-a
   prompt: 'Triage ticket {ticket.id}: read it, leave a public comment that we have received it and are
     looking into it, and move it to pending.'
-  slots: &id002
-    ticket: &id003
+  slots:
+    ticket:
       kind: ticket_open
       filter: {}
   expected_tools:
@@ -18,10 +18,14 @@
       status: pending
   max_steps: 8
 - id: queue_scan
-  roles: *id001
-  prompt: 'Scan the new queue: list new tickets, open ticket {ticket.id} to read the details, and move
-    it to open.'
-  slots: *id002
+  roles:
+  - helpdesk-triage-a
+  prompt: 'Scan the open queue: list open tickets, open ticket {ticket.id} to read the details, and move
+    it to pending.'
+  slots:
+    ticket:
+      kind: ticket_open
+      filter: {}
   expected_tools:
   - zendesk.list_tickets
   - zendesk.get_ticket
@@ -30,13 +34,17 @@
   - kind: zendesk_status
     params:
       ticket_id: '{ticket.id}'
-      status: open
+      status: pending
   max_steps: 8
 - id: triage_close_resolved
-  roles: *id001
+  roles:
+  - helpdesk-triage-a
   prompt: Ticket {ticket.id} appears resolved. Read it, add a public closing comment thanking {ticket.customer_first_name},
     and mark it solved.
-  slots: *id002
+  slots:
+    ticket:
+      kind: ticket_open
+      filter: {}
   expected_tools:
   - zendesk.get_ticket
   - zendesk.add_comment
@@ -48,12 +56,15 @@
       status: solved
   max_steps: 8
 - id: escalate_to_channel
-  roles: *id001
+  roles:
+  - helpdesk-triage-a
   prompt: Ticket {ticket.id} needs a lead's attention. Read it, post an escalation to {chan.channel} naming
     {ticket.id}, and set the status to hold.
   slots:
-    ticket: *id003
-    chan: &id004
+    ticket:
+      kind: ticket_open
+      filter: {}
+    chan:
       kind: channel_topic
       filter: {}
   expected_tools:
@@ -70,12 +81,17 @@
       status: hold
   max_steps: 8
 - id: triage_comment_and_escalate
-  roles: *id001
+  roles:
+  - helpdesk-triage-a
   prompt: Review the open tickets, read {ticket.id}, add a note asking the customer for a screenshot,
     post to {chan.channel} that it is waiting on the customer (include {ticket.id}), and set it to pending.
   slots:
-    ticket: *id003
-    chan: *id004
+    ticket:
+      kind: ticket_open
+      filter: {}
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - zendesk.list_tickets
   - zendesk.get_ticket
@@ -92,11 +108,14 @@
       status: pending
   max_steps: 12
 - id: triage_direct_ack
-  roles: &id005
+  roles:
   - helpdesk-triage-b
   prompt: 'From the open queue, pick up ticket {ticket.id}: acknowledge it with a public comment and set
     it to pending.'
-  slots: *id002
+  slots:
+    ticket:
+      kind: ticket_open
+      filter: {}
   expected_tools:
   - zendesk.list_tickets
   - zendesk.add_comment
@@ -108,11 +127,16 @@
       status: pending
   max_steps: 8
 - id: queue_sweep_direct
-  roles: *id005
-  prompt: 'List the new tickets and take ticket {ticket.id}: comment that an agent is on it and move it
-    to open.'
-  slots: *id002
+  roles:
+  - helpdesk-triage-b
+  prompt: List the new tickets and then the open ones, find ticket {ticket.id}, comment that an agent
+    is on it and move it to pending.
+  slots:
+    ticket:
+      kind: ticket_open
+      filter: {}
   expected_tools:
+  - zendesk.list_tickets
   - zendesk.list_tickets
   - zendesk.add_comment
   - zendesk.update_status
@@ -120,13 +144,17 @@
   - kind: zendesk_status
     params:
       ticket_id: '{ticket.id}'
-      status: open
-  max_steps: 8
+      status: pending
+  max_steps: 10
 - id: direct_close_stale
-  roles: *id005
+  roles:
+  - helpdesk-triage-b
   prompt: Ticket {ticket.id} has gone quiet. Find it in the pending list, add a comment asking if the
     issue is still occurring, and set it to solved.
-  slots: *id002
+  slots:
+    ticket:
+      kind: ticket_open
+      filter: {}
   expected_tools:
   - zendesk.list_tickets
   - zendesk.add_comment
@@ -138,14 +166,18 @@
       status: solved
   max_steps: 8
 - id: escalation_urgent
-  roles: &id006
+  roles:
   - escalations-a
   prompt: 'URGENT ticket {ticket.id} from {ticket.customer_email}: read it, verify the related charge,
     add a public comment that a senior agent owns it, post to {chan.channel} naming {ticket.id}, and email
     {ticket.customer_email} with the subject ''We are on it''.'
   slots:
-    ticket: *id003
-    chan: *id004
+    ticket:
+      kind: ticket_open
+      filter: {}
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - zendesk.get_ticket
   - stripe.retrieve_charge
@@ -162,12 +194,17 @@
       subject_contains: We are on it
   max_steps: 12
 - id: escalation_queue_review
-  roles: *id006
+  roles:
+  - escalations-a
   prompt: 'Review the open queue for anything that needs escalation: list open tickets, read {ticket.id}
     in detail, and post the result to {chan.channel} including the id.'
   slots:
-    ticket: *id003
-    chan: *id004
+    ticket:
+      kind: ticket_open
+      filter: {}
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - zendesk.list_tickets
   - zendesk.get_ticket
@@ -178,12 +215,17 @@
       text: '{ticket.id}'
   max_steps: 8
 - id: escalation_channel_context
-  roles: *id006
+  roles:
+  - escalations-a
   prompt: 'Read the last messages in {chan.channel} for context, then handle ticket {ticket.id}: add a
     public comment with the update and set it to solved.'
   slots:
-    ticket: *id003
-    chan: *id004
+    ticket:
+      kind: ticket_open
+      filter: {}
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - slack.read_channel
   - zendesk.get_ticket
@@ -196,10 +238,14 @@
       status: solved
   max_steps: 10
 - id: escalation_customer_email
-  roles: *id006
+  roles:
+  - escalations-a
   prompt: Ticket {ticket.id} was escalated. Read it, email {ticket.customer_email} with the subject 'Your
-    escalated request', and set it to open.
-  slots: *id002
+    escalated request', and set it to pending while we investigate.
+  slots:
+    ticket:
+      kind: ticket_open
+      filter: {}
   expected_tools:
   - zendesk.get_ticket
   - mail.send_email
@@ -212,41 +258,17 @@
   - kind: zendesk_status
     params:
       ticket_id: '{ticket.id}'
-      status: open
+      status: pending
   max_steps: 8
 - id: status_broadcast
-  roles: &id007
+  roles:
   - slack-notifier-a
-  prompt: List the open tickets and post a status broadcast to {chan.channel} beginning 'Queue status'
-    with the number of open tickets.
-  slots: &id008
-    chan: *id004
-  expected_tools:
-  - zendesk.list_tickets
-  - slack.post_message
-  success:
-  - kind: slack_contains
-    params:
-      text: Queue status
-  max_steps: 6
-- id: alert_ack
-  roles: *id007
-  prompt: 'Read {chan.channel}, and acknowledge the latest alert by posting ''Ack: {chan.topic}'' to the
-    same channel.'
-  slots: *id008
-  expected_tools:
-  - slack.read_channel
-  - slack.post_message
-  success:
-  - kind: slack_contains
-    params:
-      text: 'Ack: {chan.topic}'
-  max_steps: 6
-- id: backlog_update
-  roles: *id007
-  prompt: Check the open and then the pending ticket lists, and post a backlog update to {chan.channel}
-    that starts with 'Backlog update'.
-  slots: *id008
+  prompt: List the open tickets and then the ones on hold, and post a status broadcast to {chan.channel}
+    beginning 'Queue status {chan.ref}' with the counts.
+  slots:
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - zendesk.list_tickets
   - zendesk.list_tickets
@@ -254,13 +276,17 @@
   success:
   - kind: slack_contains
     params:
-      text: Backlog update
+      text: Queue status {chan.ref}
   max_steps: 8
-- id: notifier_digest
-  roles: *id007
-  prompt: Read {chan.channel}, list pending tickets, and post a combined digest there starting with 'Shift
-    digest'.
-  slots: *id008
+- id: alert_ack
+  roles:
+  - slack-notifier-a
+  prompt: 'Read {chan.channel}, check how many tickets are open, and acknowledge the latest alert by posting
+    ''Ack: {chan.topic} {chan.ref}'' to the same channel.'
+  slots:
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - slack.read_channel
   - zendesk.list_tickets
@@ -268,5 +294,149 @@
   success:
   - kind: slack_contains
     params:
-      text: Shift digest
+      text: 'Ack: {chan.topic} {chan.ref}'
+  max_steps: 8
+- id: backlog_update
+  roles:
+  - slack-notifier-a
+  prompt: Check the new, open and then pending ticket lists, and post a backlog update to {chan.channel}
+    that starts with 'Backlog update {chan.ref}'.
+  slots:
+    chan:
+      kind: channel_topic
+      filter: {}
+  expected_tools:
+  - zendesk.list_tickets
+  - zendesk.list_tickets
+  - zendesk.list_tickets
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: Backlog update {chan.ref}
+  max_steps: 10
+- id: notifier_digest
+  roles:
+  - slack-notifier-a
+  prompt: Read {chan.channel}, list the pending tickets, then the open ones, and post a combined digest
+    there starting with 'Shift digest {chan.ref}'.
+  slots:
+    chan:
+      kind: channel_topic
+      filter: {}
+  expected_tools:
+  - slack.read_channel
+  - zendesk.list_tickets
+  - zendesk.list_tickets
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: Shift digest {chan.ref}
+  max_steps: 10
+- id: escalation_urgent_channel
+  roles:
+  - escalations-a
+  prompt: Ticket {ticket.id} is urgent. Read it, check the charge on it, post 'Urgent {ticket.id}' to
+    {chan.channel}, and put the ticket on hold for the senior queue.
+  slots:
+    ticket:
+      kind: ticket_open
+      filter: {}
+    chan:
+      kind: channel_topic
+      filter: {}
+  expected_tools:
+  - zendesk.get_ticket
+  - stripe.retrieve_charge
+  - slack.post_message
+  - zendesk.update_status
+  success:
+  - kind: slack_contains
+    params:
+      text: Urgent {ticket.id}
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: hold
+  max_steps: 10
+- id: escalation_pending_sweep
+  roles:
+  - escalations-a
+  prompt: 'Sweep the pending tickets: list them, read {ticket.id}, add a public comment asking for an
+    update, and tell {chan.channel} ''Chased {ticket.id}''.'
+  slots:
+    ticket:
+      kind: ticket_open
+      filter: {}
+    chan:
+      kind: channel_topic
+      filter: {}
+  expected_tools:
+  - zendesk.list_tickets
+  - zendesk.get_ticket
+  - zendesk.add_comment
+  - slack.post_message
+  success:
+  - kind: slack_contains
+    params:
+      text: Chased {ticket.id}
+  max_steps: 10
+- id: triage_request_info
+  roles:
+  - helpdesk-triage-a
+  prompt: Ticket {ticket.id} is missing details. Read it, ask {ticket.customer_first_name} for the order
+    number in a public comment, and set the ticket to hold.
+  slots:
+    ticket:
+      kind: ticket_open
+      filter: {}
+  expected_tools:
+  - zendesk.get_ticket
+  - zendesk.add_comment
+  - zendesk.update_status
+  success:
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: hold
+  max_steps: 8
+- id: queue_scan_stale_pending
+  roles:
+  - helpdesk-triage-a
+  prompt: List the pending tickets, read {ticket.id}, comment that we are closing it unless we hear back,
+    and mark it solved.
+  slots:
+    ticket:
+      kind: ticket_open
+      filter: {}
+  expected_tools:
+  - zendesk.list_tickets
+  - zendesk.get_ticket
+  - zendesk.add_comment
+  - zendesk.update_status
+  success:
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: solved
+  max_steps: 10
+- id: direct_hold_vendor
+  roles:
+  - helpdesk-triage-b
+  prompt: Ticket {ticket.id} is waiting on a vendor. Find it in the open list, add a comment explaining
+    the wait, and set it to hold.
+  slots:
+    ticket:
+      kind: ticket_open
+      filter: {}
+  expected_tools:
+  - zendesk.list_tickets
+  - zendesk.add_comment
+  - zendesk.update_status
+  success:
+  - kind: zendesk_status
+    params:
+      ticket_id: '{ticket.id}'
+      status: hold
   max_steps: 8

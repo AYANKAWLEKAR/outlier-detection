@@ -13,8 +13,20 @@ tools:
 - slack.read_channel
 template_mix:
   escalation_urgent: 0.25
-  escalation_queue_review: 0.25
-  escalation_channel_context: 0.25
-  escalation_customer_email: 0.25
+  escalation_urgent_channel: 0.25
+  escalation_queue_review: 0.15
+  escalation_channel_context: 0.15
+  escalation_customer_email: 0.1
+  escalation_pending_sweep: 0.1
+persona_tasks:
+  urgent_escalation:
+  - escalation_urgent
+  - escalation_urgent_channel
+  escalation_review:
+  - escalation_queue_review
+  - escalation_channel_context
+  escalation_queue:
+  - escalation_customer_email
+  - escalation_pending_sweep
 sessions_per_day: 10.0
-batch_size: 6
+batch_size: 5

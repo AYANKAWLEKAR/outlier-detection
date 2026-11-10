@@ -6,10 +6,17 @@ tools:
 - zendesk.list_tickets
 - zendesk.add_comment
 - zendesk.update_status
-- zendesk.get_ticket
 template_mix:
-  triage_direct_ack: 0.3333
-  queue_sweep_direct: 0.3333
-  direct_close_stale: 0.3333
+  triage_direct_ack: 0.2333333333333333
+  direct_close_stale: 0.2333333333333333
+  direct_hold_vendor: 0.2333333333333333
+  queue_sweep_direct: 0.3
+persona_tasks:
+  triage_direct:
+  - triage_direct_ack
+  - direct_close_stale
+  - direct_hold_vendor
+  queue_scan:
+  - queue_sweep_direct
 sessions_per_day: 30.0
-batch_size: 7
+batch_size: 6

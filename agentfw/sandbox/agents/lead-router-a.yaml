@@ -9,11 +9,19 @@ tools:
 - salesforce.create_task
 - mail.send_email
 - slack.post_message
-- salesforce.run_soql
 template_mix:
   lead_route: 0.25
-  lead_notify_owner: 0.25
-  lead_welcome_email: 0.25
   lead_territory_tag: 0.25
+  lead_welcome_email: 0.25
+  lead_notify_owner: 0.125
+  lead_owner_task_notice: 0.125
+persona_tasks:
+  route_lead:
+  - lead_route
+  - lead_territory_tag
+  - lead_welcome_email
+  notify_lead_owner:
+  - lead_notify_owner
+  - lead_owner_task_notice
 sessions_per_day: 35.0
-batch_size: 7
+batch_size: 6

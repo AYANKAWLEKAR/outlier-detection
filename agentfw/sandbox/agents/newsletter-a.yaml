@@ -12,5 +12,12 @@ template_mix:
   newsletter_product_update: 0.2
   newsletter_segment_report: 0.2
   newsletter_vip_edition: 0.2
+persona_tasks:
+  newsletter_send:
+  - newsletter_send
+  - newsletter_test_send
+  - newsletter_product_update
+  - newsletter_segment_report
+  - newsletter_vip_edition
 sessions_per_day: 4.0
-batch_size: 8
+batch_size: 6

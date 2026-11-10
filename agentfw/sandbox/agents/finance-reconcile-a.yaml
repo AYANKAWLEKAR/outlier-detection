@@ -9,12 +9,22 @@ tools:
 - mail.send_email
 - slack.post_message
 template_mix:
-  recon_customer_charges: 0.1429
-  recon_spot_check_charge: 0.1429
-  recon_report_email: 0.1429
-  recon_slack_summary: 0.1429
-  recon_refund_verification: 0.1429
-  recon_customer_statement_email: 0.1429
-  recon_customer_mismatch_alert: 0.1429
+  recon_customer_charges: 0.1875
+  recon_spot_check_charge: 0.1875
+  recon_refund_verification: 0.1875
+  recon_customer_mismatch_alert: 0.1875
+  recon_report_email: 0.08333333333333333
+  recon_slack_summary: 0.08333333333333333
+  recon_customer_statement_email: 0.08333333333333333
+persona_tasks:
+  reconcile_batch:
+  - recon_customer_charges
+  - recon_spot_check_charge
+  - recon_refund_verification
+  - recon_customer_mismatch_alert
+  reconcile_report:
+  - recon_report_email
+  - recon_slack_summary
+  - recon_customer_statement_email
 sessions_per_day: 9.0
-batch_size: 8
+batch_size: 6

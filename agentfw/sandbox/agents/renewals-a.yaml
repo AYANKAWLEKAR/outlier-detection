@@ -9,9 +9,16 @@ tools:
 - mail.send_email
 - slack.post_message
 template_mix:
-  renewal_uplift: 0.25
-  renewal_email: 0.25
-  renewal_reminder_channel: 0.25
-  renewal_stage_update: 0.25
+  renewal_uplift: 0.225
+  renewal_stage_update: 0.225
+  renewal_email: 0.275
+  renewal_reminder_channel: 0.275
+persona_tasks:
+  renewal_uplift:
+  - renewal_uplift
+  - renewal_stage_update
+  renewal_email:
+  - renewal_email
+  - renewal_reminder_channel
 sessions_per_day: 6.0
-batch_size: 8
+batch_size: 6

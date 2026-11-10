@@ -111,3 +111,12 @@ def test_success_check_dispatch() -> None:
         SuccessCheck("bogus", {}).evaluate(ctx)
     with pytest.raises(ValueError):
         SuccessCheck("slack_contains", {"text": "x"}).evaluate(ctx)  # slack backend missing
+
+
+def test_sf_field_equals_numeric_normalization() -> None:
+    be = FakeSalesforceBackend(COMPANY)
+    rid = be.run_soql("SELECT Id FROM Opportunity LIMIT 1")[0]["Id"]
+    be.update_record("Opportunity", rid, {"Amount": 33770})
+    assert sf_field_equals(be, "Opportunity", rid, "Amount", "33770")  # spec params are strings
+    assert sf_field_equals(be, "Opportunity", rid, "Amount", "33770.0")
+    assert not sf_field_equals(be, "Opportunity", rid, "Amount", "33771")

@@ -14,8 +14,20 @@ tools:
 - slack.post_message
 template_mix:
   dispute_review_refund: 0.25
-  dispute_evidence_note: 0.25
-  dispute_notice_email: 0.25
-  dispute_team_alert: 0.25
+  support_refund_partial_email: 0.25
+  dispute_evidence_note: 0.15
+  support_amount_hold: 0.15
+  dispute_notice_email: 0.1
+  dispute_team_alert: 0.1
+persona_tasks:
+  dispute_refund:
+  - dispute_review_refund
+  - support_refund_partial_email
+  dispute_note:
+  - dispute_evidence_note
+  - support_amount_hold
+  dispute_notice:
+  - dispute_notice_email
+  - dispute_team_alert
 sessions_per_day: 18.0
-batch_size: 5
+batch_size: 4

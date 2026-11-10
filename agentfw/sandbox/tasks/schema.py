@@ -2,14 +2,23 @@
 
 Template prompts and success params use ``str.format`` with attribute access on each slot:
 ``"Refund ticket {ticket.id} for {ticket.customer_email}"``. Every slot value is a string;
-fields per ``SlotSource.kind`` are listed in ``_RESOLVERS``. Ids (``charge_id``, ``sf_id``,
-``stripe_id``) are the deterministic fake-backend ids; a live run can pass ``id_map``
-({company record key: backend id}) to ``render`` to substitute the seeders' real ids.
+the fields available per ``SlotSource.kind`` are listed in ``SLOT_FIELDS`` (checked when a
+template is loaded).
+
+``AgentDef.persona_tasks`` maps each synth persona task to the templates implementing it;
+``template_mix`` gives each task its persona weight, split evenly among its templates.
+Templates flagged ``quarter_end_only`` carry weight 0 in the normal mix (their persona task has
+weight 0): a runner may schedule them directly (``render``) on quarter-end days.
+
+Ids (``charge_id``, ``sf_id``, ``stripe_id``) are the deterministic fake-backend ids;
+a live run can pass ``id_map`` ({company record key: backend id}) to ``render``
+to substitute the seeders' real ids.
 """
 
 from __future__ import annotations
 
 import math
+import string
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,10 +27,10 @@ from typing import Literal
 
 import numpy as np
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from agentfw.sandbox.seed.company import Company
-from agentfw.sandbox.tools.salesforce_server import _sf_id
+from agentfw.sandbox.tools.salesforce_server import sf_id
 from agentfw.sandbox.tools.stripe_server import fake_stripe_ids
 
 TASKS_DIR = Path(__file__).parent
@@ -46,6 +55,105 @@ CheckKind = Literal[
 ]
 
 
+SLOT_FIELDS: dict[str, frozenset[str]] = {
+    "ticket_open": frozenset(
+        [
+            "key",
+            "id",
+            "subject",
+            "body",
+            "customer_name",
+            "customer_first_name",
+            "customer_email",
+            "charge_id",
+            "amount",
+            "half_amount",
+            "currency",
+        ]
+    ),
+    "customer": frozenset(["key", "name", "first_name", "email", "stripe_id"]),
+    "charge_refundable": frozenset(
+        [
+            "key",
+            "id",
+            "amount",
+            "half_amount",
+            "currency",
+            "description",
+            "customer_name",
+            "customer_email",
+            "customer_stripe_id",
+        ]
+    ),
+    "contact": frozenset(
+        [
+            "key",
+            "first_name",
+            "last_name",
+            "email",
+            "sf_id",
+            "account_name",
+            "account_domain",
+            "account_sf_id",
+        ]
+    ),
+    "account": frozenset(
+        [
+            "key",
+            "name",
+            "domain",
+            "sf_id",
+            "contact_email",
+            "contact_first_name",
+            "contact_last_name",
+            "contact_sf_id",
+            "customer_email",
+            "customer_name",
+        ]
+    ),
+    "opportunity": frozenset(
+        [
+            "key",
+            "name",
+            "stage",
+            "amount",
+            "new_amount",
+            "sf_id",
+            "account_name",
+            "account_sf_id",
+            "contact_email",
+            "contact_first_name",
+        ]
+    ),
+    "soql_object": frozenset(
+        [
+            "key",
+            "object",
+            "stage",
+            "query",
+            "count",
+            "first_id",
+            "first_name",
+            "account_name",
+            "name",
+            "domain",
+            "first_email",
+            "second_email",
+            "contact_email",
+        ]
+    ),
+    "channel_topic": frozenset(["key", "channel", "topic", "note", "ref"]),
+}
+CHECK_PARAMS: dict[str, frozenset[str]] = {
+    "mailhog_has_message": frozenset({"to", "subject_contains"}),
+    "stripe_refund_exists": frozenset({"charge_id"}),
+    "sf_field_equals": frozenset({"object", "record_id", "field", "value"}),
+    "slack_contains": frozenset({"text"}),
+    "zendesk_status": frozenset({"ticket_id", "status"}),
+}
+MAX_BATCH = 6
+
+
 class SlotSource(BaseModel):
     kind: SlotKind
     filter: dict[str, str] = Field(default_factory=dict)
@@ -55,15 +163,46 @@ class SuccessCheckSpec(BaseModel):
     kind: CheckKind
     params: dict[str, str]
 
+    @model_validator(mode="after")
+    def _params_match_kind(self) -> SuccessCheckSpec:
+        want = CHECK_PARAMS[self.kind]
+        if set(self.params) != want:
+            raise ValueError(f"{self.kind} params must be exactly {sorted(want)}")
+        return self
+
+
+def _placeholders(text: str) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for _lit, name, _spec, _conv in string.Formatter().parse(text):
+        if name is None:
+            continue
+        slot, dot, attr = name.partition(".")
+        if not dot or not attr or "." in attr or "[" in name:
+            raise ValueError(f"placeholder {{{name}}} must look like {{slot.field}}")
+        out.append((slot, attr))
+    return out
+
 
 class TaskTemplate(BaseModel):
     id: str
     roles: list[str]
     prompt: str
     slots: dict[str, SlotSource]
-    expected_tools: list[str]
+    expected_tools: list[str] = Field(min_length=1)
     success: list[SuccessCheckSpec] = Field(default_factory=list)
-    max_steps: int = 25
+    max_steps: int = Field(default=25, ge=1)
+    quarter_end_only: bool = False
+
+    @model_validator(mode="after")
+    def _placeholders_resolve(self) -> TaskTemplate:
+        texts = [self.prompt] + [v for c in self.success for v in c.params.values()]
+        for text in texts:
+            for slot, attr in _placeholders(text):
+                if slot not in self.slots:
+                    raise ValueError(f"{self.id}: placeholder uses undeclared slot {slot!r}")
+                if attr not in SLOT_FIELDS[self.slots[slot].kind]:
+                    raise ValueError(f"{self.id}: {slot}.{attr} is not a field of that slot kind")
+        return self
 
 
 class AgentDef(BaseModel):
@@ -71,8 +210,23 @@ class AgentDef(BaseModel):
     system_prompt: str
     tools: list[str]
     template_mix: dict[str, float]
-    sessions_per_day: float
-    batch_size: int = 1
+    sessions_per_day: float = Field(gt=0)
+    batch_size: int = Field(default=1, ge=1, le=MAX_BATCH)  # items per session (R1)
+    persona_tasks: dict[str, list[str]] = Field(default_factory=dict)
+
+    @field_validator("tools")
+    @classmethod
+    def _namespaced(cls, v: list[str]) -> list[str]:
+        if len(set(v)) != len(v) or any(t.count(".") != 1 for t in v):
+            raise ValueError("tools must be unique `server.tool` ids")
+        return v
+
+    @field_validator("template_mix")
+    @classmethod
+    def _mix(cls, v: dict[str, float]) -> dict[str, float]:
+        if not v or any(w < 0 for w in v.values()) or sum(v.values()) <= 0:
+            raise ValueError("template_mix needs non-negative weights with a positive sum")
+        return v
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,8 +275,20 @@ class _Ctx:
     company: Company
     rng: np.random.Generator
     used: set[str]
-    ids: dict[str, str]  # company record key -> backend id (stripe or salesforce)
+    ids: dict[str, str]  # company record key -> backend id (stripe; overrides from id_map)
     channel: str
+
+
+def _make_ctx(
+    company: Company,
+    rng: np.random.Generator,
+    used: set[str] | None,
+    id_map: dict[str, str] | None,
+    channel: str,
+) -> _Ctx:
+    """Stripe ids are computed once per context (one `render` call or one session)."""
+    ids = {**fake_stripe_ids(company), **(id_map or {})}
+    return _Ctx(company, rng, used if used is not None else set(), ids, channel)
 
 
 Fields = dict[str, str]
@@ -145,7 +311,7 @@ def _pick[T](ctx: _Ctx, kind: str, items: list[T], key: Callable[[T], str]) -> T
 
 
 def _sfid(ctx: _Ctx, obj: str, key: str) -> str:
-    return ctx.ids.get(key) or _sf_id(obj, key)
+    return ctx.ids.get(key) or sf_id(obj, key)
 
 
 def _customer_fields(ctx: _Ctx, key: str) -> Fields:
@@ -155,7 +321,7 @@ def _customer_fields(ctx: _Ctx, key: str) -> Fields:
         "name": c.name,
         "first_name": c.name.split()[0],
         "email": c.email,
-        "stripe_id": ctx.ids.get(c.key) or fake_stripe_ids(ctx.company)[c.key],
+        "stripe_id": ctx.ids[c.key],
     }
 
 
@@ -164,7 +330,7 @@ def _charge_fields(ctx: _Ctx, key: str) -> Fields:
     cust = _customer_fields(ctx, p.customer_key)
     return {
         "key": p.key,
-        "id": ctx.ids.get(p.key) or fake_stripe_ids(ctx.company)[p.key],
+        "id": ctx.ids[p.key],
         "amount": _money(p.amount_cents),
         "half_amount": _money(math.floor(p.amount_cents / 2)),
         "currency": p.currency.upper(),
@@ -266,6 +432,20 @@ def _opportunity(ctx: _Ctx, f: dict[str, str]) -> Fields:
     }
 
 
+def _soql_base(ctx: _Ctx, account_key: str) -> Fields:
+    a = next(x for x in ctx.company.accounts if x.key == account_key)
+    emails = [c.email for c in ctx.company.contacts if c.account_key == account_key]
+    return {
+        "stage": "",
+        "name": a.name,
+        "domain": a.domain,
+        "account_name": a.name,
+        "first_email": emails[0],
+        "second_email": emails[1] if len(emails) > 1 else emails[0],
+        "contact_email": emails[0],
+    }
+
+
 def _soql(ctx: _Ctx, f: dict[str, str]) -> Fields:
     obj = f.get("object", "Opportunity")
     if obj == "Opportunity":
@@ -277,8 +457,7 @@ def _soql(ctx: _Ctx, f: dict[str, str]) -> Fields:
         if not rows:
             raise ValueError(f"no opportunities in stage {stage!r}")
         first = rows[0]
-        ctx.used.add(f"soql:{first.key}")
-        return {
+        return _soql_base(ctx, first.account_key) | {
             "key": f"{obj}:{stage}",
             "object": obj,
             "stage": stage,
@@ -286,36 +465,32 @@ def _soql(ctx: _Ctx, f: dict[str, str]) -> Fields:
             "count": str(len(rows)),
             "first_id": _sfid(ctx, "Opportunity", first.key),
             "first_name": first.name,
-            "account_name": next(
-                a.name for a in ctx.company.accounts if a.key == first.account_key
-            ),
         }
+    min_contacts = int(f.get("min_contacts", 1))
+    accts = [
+        a
+        for a in ctx.company.accounts
+        if sum(c.account_key == a.key for c in ctx.company.contacts) >= min_contacts
+    ]
+    a = _pick(ctx, "soqlacct", accts, lambda x: x.key)
     if obj == "Contact":
-        a = _pick(ctx, "soqlacct", list(ctx.company.accounts), lambda x: x.key)
         rows_c = [c for c in ctx.company.contacts if c.account_key == a.key]
         sf = _sfid(ctx, "Account", a.key)
-        return {
+        return _soql_base(ctx, a.key) | {
             "key": f"{obj}:{a.key}",
             "object": obj,
-            "stage": "",
             "query": f"SELECT Id, FirstName, LastName, Email FROM Contact WHERE AccountId = '{sf}'",
             "count": str(len(rows_c)),
             "first_id": _sfid(ctx, "Contact", rows_c[0].key),
             "first_name": f"{rows_c[0].first_name} {rows_c[0].last_name}",
-            "account_name": a.name,
         }
-    a = _pick(ctx, "soqlacct", list(ctx.company.accounts), lambda x: x.key)
-    return {
+    return _soql_base(ctx, a.key) | {
         "key": f"Account:{a.key}",
         "object": "Account",
-        "stage": "",
         "query": f"SELECT Id, Name, Website FROM Account WHERE Website = '{a.domain}'",
         "count": "1",
-        "name": a.name,
-        "domain": a.domain,
         "first_id": _sfid(ctx, "Account", a.key),
         "first_name": a.name,
-        "account_name": a.name,
     }
 
 
@@ -339,7 +514,14 @@ _TOPICS = [
 
 def _topic(ctx: _Ctx, f: dict[str, str]) -> Fields:
     topic, note = _pick(ctx, "topic", _TOPICS, lambda x: x[0])
-    return {"key": f"topic:{topic}", "channel": ctx.channel, "topic": topic, "note": note}
+    ref = f"REF-{int(ctx.rng.integers(10000, 100000))}"  # per-record token for Slack checks
+    return {
+        "key": f"topic:{topic}",
+        "channel": ctx.channel,
+        "topic": topic,
+        "note": note,
+        "ref": ref,
+    }
 
 
 _RESOLVERS: dict[str, Callable[[_Ctx, dict[str, str]], Fields]] = {
@@ -379,8 +561,7 @@ def render(
     channel: str = "#sandbox",
     used: set[str] | None = None,
 ) -> RenderedTask:
-    ctx = _Ctx(company, rng, used if used is not None else set(), id_map or {}, channel)
-    return _render_task(t, ctx)
+    return _render_task(t, _make_ctx(company, rng, used, id_map, channel))
 
 
 def render_session(
@@ -393,9 +574,9 @@ def render_session(
     channel: str = "#sandbox",
 ) -> RenderedSession:
     """One session's work: `batch_size` templates drawn from the agent's mix (R1 queue)."""
-    ids = sorted(agent.template_mix)
+    ids = sorted(i for i, wt in agent.template_mix.items() if wt > 0)  # skips quarter-end work
     w = np.array([agent.template_mix[i] for i in ids], dtype=float)
-    ctx = _Ctx(company, rng, set(), id_map or {}, channel)
+    ctx = _make_ctx(company, rng, None, id_map, channel)
     tasks: list[RenderedTask] = []
     seen: set[str] = set()
     for _ in range(agent.batch_size):
@@ -424,3 +605,26 @@ def render_session(
         [s for t in tasks for s in t.success],
         sum(t.max_steps for t in tasks),
     )
+
+
+def validate_catalog(templates: dict[str, TaskTemplate], agents: list[AgentDef]) -> None:
+    """Cross-file consistency: roles, mixes, persona-task maps and tool allowlists agree."""
+    by_id = {a.agent_id: a for a in agents}
+    for t in templates.values():
+        for role in t.roles:
+            if role not in by_id:
+                raise ValueError(f"{t.id}: unknown role {role!r}")
+            if not set(t.expected_tools) <= set(by_id[role].tools):
+                raise ValueError(f"{t.id}: expected_tools not in {role}'s tool allowlist")
+    for a in agents:
+        mine = {t.id for t in templates.values() if a.agent_id in t.roles}
+        if set(a.template_mix) != mine:
+            raise ValueError(f"{a.agent_id}: template_mix keys differ from templates naming it")
+        if set(a.template_mix) != {i for ids in a.persona_tasks.values() for i in ids}:
+            raise ValueError(f"{a.agent_id}: persona_tasks do not cover template_mix")
+        for tid, wt in a.template_mix.items():
+            if (wt == 0) != templates[tid].quarter_end_only:
+                raise ValueError(f"{a.agent_id}: {tid} weight 0 iff quarter_end_only")
+        used = {x for tid in mine for x in templates[tid].expected_tools}
+        if set(a.tools) != used:
+            raise ValueError(f"{a.agent_id}: tools must equal the tools its templates use")

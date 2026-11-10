@@ -13,15 +13,29 @@ tools:
 - mail.send_email
 - slack.post_message
 template_mix:
-  support_refund_full: 0.1
-  support_refund_partial_email: 0.1
-  support_duplicate_charge_check: 0.1
-  support_invoice_question: 0.1
-  support_payment_confirmation_email: 0.1
-  support_amount_hold: 0.1
-  support_refund_notify_channel: 0.1
-  support_followup_email: 0.1
-  support_escalate_to_channel: 0.1
-  support_internal_note: 0.1
+  support_refund_full: 0.19999999999999998
+  support_refund_partial_email: 0.19999999999999998
+  support_refund_notify_channel: 0.19999999999999998
+  support_followup_email: 0.06
+  support_payment_confirmation_email: 0.06
+  support_invoice_question: 0.06
+  support_duplicate_charge_check: 0.06
+  support_internal_note: 0.06
+  support_escalate_to_channel: 0.05
+  support_amount_hold: 0.05
+persona_tasks:
+  small_refund:
+  - support_refund_full
+  - support_refund_partial_email
+  - support_refund_notify_channel
+  followup_email:
+  - support_followup_email
+  - support_payment_confirmation_email
+  - support_invoice_question
+  - support_duplicate_charge_check
+  - support_internal_note
+  escalate:
+  - support_escalate_to_channel
+  - support_amount_hold
 sessions_per_day: 28.0
 batch_size: 5

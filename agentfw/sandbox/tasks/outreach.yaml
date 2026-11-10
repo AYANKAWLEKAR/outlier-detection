@@ -1,14 +1,16 @@
 - id: cold_outreach
-  roles: &id001
+  roles:
   - outreach-a
   - outreach-b
   prompt: 'Send an introduction to {c.first_name} {c.last_name} at {c.account_name}: check their contact
-    record and email {c.email} with the subject ''Quick introduction'' and a short two-sentence pitch.'
+    record and their account, then email {c.email} with the subject ''Quick introduction'' and a short
+    two-sentence pitch.'
   slots:
     c:
       kind: contact
       filter: {}
   expected_tools:
+  - salesforce.get_record
   - salesforce.get_record
   - mail.send_email
   success:
@@ -16,9 +18,11 @@
     params:
       to: '{c.email}'
       subject_contains: Quick introduction
-  max_steps: 6
+  max_steps: 8
 - id: cold_outreach_followup
-  roles: *id001
+  roles:
+  - outreach-a
+  - outreach-b
   prompt: 'Second touch for {c.first_name} {c.last_name}: open the record, email {c.email} with the subject
     ''Circling back'', and tell {chan.channel} (message includes ''{c.last_name}'') that the follow-up
     was sent.'
@@ -26,7 +30,7 @@
     c:
       kind: contact
       filter: {}
-    chan: &id002
+    chan:
       kind: channel_topic
       filter: {}
   expected_tools:
@@ -43,14 +47,17 @@
       text: '{c.last_name}'
   max_steps: 8
 - id: outreach_account_intro
-  roles: *id001
-  prompt: 'Introduce our services to {acct.name}: open the account {acct.sf_id}, then email {acct.contact_email}
-    with the subject ''Helio for {acct.name}''.'
+  roles:
+  - outreach-a
+  - outreach-b
+  prompt: 'Introduce our services to {acct.name}: open the account {acct.sf_id} and its primary contact,
+    then email {acct.contact_email} with the subject ''Helio for {acct.name}''.'
   slots:
     acct:
       kind: account
       filter: {}
   expected_tools:
+  - salesforce.get_record
   - salesforce.get_record
   - mail.send_email
   success:
@@ -58,26 +65,35 @@
     params:
       to: '{acct.contact_email}'
       subject_contains: Helio for
-  max_steps: 6
+  max_steps: 8
 - id: channel_digest
-  roles: *id001
+  roles:
+  - outreach-a
+  - outreach-b
   prompt: Read the latest messages in {chan.channel} and post a two-line digest back there starting with
-    'Digest'.
-  slots: &id003
-    chan: *id002
+    'Digest {chan.ref}'.
+  slots:
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - slack.read_channel
   - slack.post_message
   success:
   - kind: slack_contains
     params:
-      text: Digest
+      text: Digest {chan.ref}
   max_steps: 6
 - id: outreach_channel_digest_email
-  roles: *id001
+  roles:
+  - outreach-a
+  - outreach-b
   prompt: Summarize recent activity in {chan.channel} and email it to team-leads@helio-ops.example with
     the subject 'Channel digest'.
-  slots: *id003
+  slots:
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - slack.read_channel
   - mail.send_email
@@ -88,14 +104,17 @@
       subject_contains: Channel digest
   max_steps: 6
 - id: outreach_webinar_invite
-  roles: *id001
-  prompt: 'Invite {c.first_name} {c.last_name} ({c.account_name}) to our product webinar: check the contact,
-    then email {c.email} with the subject ''Invitation: product webinar''.'
+  roles:
+  - outreach-a
+  - outreach-b
+  prompt: 'Invite {c.first_name} {c.last_name} ({c.account_name}) to our product webinar: check the contact
+    and their account, then email {c.email} with the subject ''Invitation: product webinar''.'
   slots:
     c:
       kind: contact
       filter: {}
   expected_tools:
+  - salesforce.get_record
   - salesforce.get_record
   - mail.send_email
   success:
@@ -103,16 +122,19 @@
     params:
       to: '{c.email}'
       subject_contains: 'Invitation: product webinar'
-  max_steps: 6
+  max_steps: 8
 - id: outreach_meeting_confirm
-  roles: *id001
-  prompt: Confirm tomorrow's meeting with {c.first_name} {c.last_name}. Verify the contact details first,
-    then send a confirmation to {c.email} with the subject 'Meeting confirmation'.
+  roles:
+  - outreach-a
+  - outreach-b
+  prompt: Confirm tomorrow's meeting with {c.first_name} {c.last_name}. Verify the contact and account
+    details first, then send a confirmation to {c.email} with the subject 'Meeting confirmation'.
   slots:
     c:
       kind: contact
       filter: {}
   expected_tools:
+  - salesforce.get_record
   - salesforce.get_record
   - mail.send_email
   success:
@@ -120,16 +142,20 @@
     params:
       to: '{c.email}'
       subject_contains: Meeting confirmation
-  max_steps: 6
+  max_steps: 8
 - id: outreach_reply_summary
-  roles: *id001
+  roles:
+  - outreach-a
+  - outreach-b
   prompt: Read recent chatter in {chan.channel} about {chan.topic}, open the contact {c.first_name} {c.last_name},
     and email {c.email} a short note about it with the subject 'Notes on {chan.topic}'.
   slots:
     c:
       kind: contact
       filter: {}
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - slack.read_channel
   - salesforce.get_record
@@ -141,40 +167,41 @@
       subject_contains: Notes on
   max_steps: 8
 - id: outreach_signal_post
-  roles: *id001
+  roles:
+  - outreach-a
+  - outreach-b
   prompt: Open the contact {c.first_name} {c.last_name} and post a short outreach status update to {chan.channel}
-    that begins 'Outreach status' and includes '{c.account_name}'.
+    that begins 'Outreach status {chan.ref}' and includes '{c.account_name}'.
   slots:
     c:
       kind: contact
       filter: {}
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.get_record
   - slack.post_message
   success:
   - kind: slack_contains
     params:
-      text: Outreach status
+      text: Outreach status {chan.ref}
   max_steps: 6
 - id: newsletter_send
-  roles: &id004
+  roles:
   - newsletter-a
   prompt: 'Send this month''s newsletter to the {acct.account_name} contacts: run the SOQL query to find
-    them, email {c1.email} and {c2.email} with the subject ''Helio monthly newsletter'', then post ''Newsletter
-    sent'' to {chan.channel}.'
+    them, email {acct.first_email} and {acct.second_email} with the subject ''Helio monthly newsletter'',
+    then post ''Newsletter sent {chan.ref}'' to {chan.channel}.'
   slots:
     acct:
       kind: soql_object
       filter:
         object: Contact
-    c1:
-      kind: contact
+        min_contacts: '2'
+    chan:
+      kind: channel_topic
       filter: {}
-    c2:
-      kind: contact
-      filter: {}
-    chan: *id002
   expected_tools:
   - salesforce.run_soql
   - mail.send_email
@@ -183,26 +210,29 @@
   success:
   - kind: mailhog_has_message
     params:
-      to: '{c1.email}'
+      to: '{acct.first_email}'
       subject_contains: Helio monthly newsletter
   - kind: mailhog_has_message
     params:
-      to: '{c2.email}'
+      to: '{acct.second_email}'
       subject_contains: Helio monthly newsletter
   - kind: slack_contains
     params:
-      text: Newsletter sent
+      text: Newsletter sent {chan.ref}
   max_steps: 10
 - id: newsletter_test_send
-  roles: *id004
+  roles:
+  - newsletter-a
   prompt: 'Test-send the newsletter: query contacts for {acct.account_name}, send a copy to qa-inbox@helio-ops.example
-    with the subject ''Newsletter test'', and post ''Newsletter test sent'' to {chan.channel}.'
+    with the subject ''Newsletter test'', and post ''Newsletter test sent {chan.ref}'' to {chan.channel}.'
   slots:
     acct:
       kind: soql_object
       filter:
         object: Contact
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.run_soql
   - mail.send_email
@@ -214,60 +244,64 @@
       subject_contains: Newsletter test
   - kind: slack_contains
     params:
-      text: Newsletter test sent
+      text: Newsletter test sent {chan.ref}
   max_steps: 8
 - id: newsletter_product_update
-  roles: *id004
-  prompt: 'Send the product update announcement to {c.first_name} {c.last_name}: query contacts at {acct.account_name},
-    then email {c.email} with the subject ''What is new at Helio'', cc team-leads@helio-ops.example.'
+  roles:
+  - newsletter-a
+  prompt: 'Send the product update announcement: query the contacts at {acct.account_name}, run a second
+    query on the first contact ({acct.first_name}) to confirm the address, then email {acct.first_email}
+    with the subject ''What is new at Helio'', cc team-leads@helio-ops.example.'
   slots:
     acct:
       kind: soql_object
       filter:
         object: Contact
-    c:
-      kind: contact
-      filter: {}
   expected_tools:
+  - salesforce.run_soql
   - salesforce.run_soql
   - mail.send_email
   success:
   - kind: mailhog_has_message
     params:
-      to: '{c.email}'
+      to: '{acct.first_email}'
       subject_contains: What is new at Helio
-  max_steps: 6
+  max_steps: 8
 - id: newsletter_segment_report
-  roles: *id004
-  prompt: 'Count the segment: run a SOQL query for contacts at {acct.account_name} and post the audience
-    size to {chan.channel}, starting with ''Segment size''.'
+  roles:
+  - newsletter-a
+  prompt: 'Count the segment: run a SOQL query for contacts at {acct.account_name}, look up that account''s
+    record too, and post the audience size to {chan.channel}, starting with ''Segment size {chan.ref}''.'
   slots:
     acct:
       kind: soql_object
       filter:
         object: Contact
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
+  - salesforce.run_soql
   - salesforce.run_soql
   - slack.post_message
   success:
   - kind: slack_contains
     params:
-      text: Segment size
-  max_steps: 6
+      text: Segment size {chan.ref}
+  max_steps: 8
 - id: newsletter_vip_edition
-  roles: *id004
-  prompt: 'Send the VIP edition: query the account {acct.first_name} contacts, then email {c.email} with
-    the subject ''VIP edition'' and tell {chan.channel} ''VIP edition sent''.'
+  roles:
+  - newsletter-a
+  prompt: 'Send the VIP edition: query the account {acct.name} by its website {acct.domain}, then email
+    {acct.contact_email} with the subject ''VIP edition'' and tell {chan.channel} ''VIP edition sent {chan.ref}''.'
   slots:
     acct:
       kind: soql_object
       filter:
         object: Account
-    c:
-      kind: contact
+    chan:
+      kind: channel_topic
       filter: {}
-    chan: *id002
   expected_tools:
   - salesforce.run_soql
   - mail.send_email
@@ -275,9 +309,9 @@
   success:
   - kind: mailhog_has_message
     params:
-      to: '{c.email}'
+      to: '{acct.contact_email}'
       subject_contains: VIP edition
   - kind: slack_contains
     params:
-      text: VIP edition sent
+      text: VIP edition sent {chan.ref}
   max_steps: 8

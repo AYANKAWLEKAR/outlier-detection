@@ -11,10 +11,28 @@ tools:
 - salesforce.create_task
 - slack.post_message
 template_mix:
-  crm_hygiene_fix_title: 0.2
-  crm_dedupe_sweep: 0.2
-  crm_assign_followups: 0.2
-  crm_quarter_end_cleanup: 0.2
-  crm_account_note: 0.2
+  crm_hygiene_fix_title: 0.125
+  crm_account_note: 0.125
+  crm_contact_department_fix: 0.125
+  crm_opportunity_nextstep: 0.125
+  crm_dedupe_sweep: 0.15
+  crm_duplicate_alert: 0.15
+  crm_assign_followups: 0.1
+  crm_stale_opportunity_task: 0.1
+  crm_quarter_end_cleanup: 0.0
+persona_tasks:
+  hygiene_update:
+  - crm_hygiene_fix_title
+  - crm_account_note
+  - crm_contact_department_fix
+  - crm_opportunity_nextstep
+  dedupe_sweep:
+  - crm_dedupe_sweep
+  - crm_duplicate_alert
+  assign_followups:
+  - crm_assign_followups
+  - crm_stale_opportunity_task
+  quarter_end_mass_update:
+  - crm_quarter_end_cleanup
 sessions_per_day: 14.0
-batch_size: 7
+batch_size: 6

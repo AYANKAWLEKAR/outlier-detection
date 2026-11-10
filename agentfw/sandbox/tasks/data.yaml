@@ -1,14 +1,14 @@
 - id: export_report
-  roles: &id001
+  roles:
   - data-export-a
   prompt: 'Export the {deals.stage} opportunity report: run the SOQL query, then email it to reporting@helio-ops.example
-    with the subject ''Opportunity export'' and post ''Export sent'' to {chan.channel}.'
+    with the subject ''Opportunity export'' and post ''Export sent {chan.ref}'' to {chan.channel}.'
   slots:
     deals:
       kind: soql_object
       filter:
         object: Opportunity
-    chan: &id002
+    chan:
       kind: channel_topic
       filter: {}
   expected_tools:
@@ -22,10 +22,11 @@
       subject_contains: Opportunity export
   - kind: slack_contains
     params:
-      text: Export sent
+      text: Export sent {chan.ref}
   max_steps: 8
 - id: export_spotcheck
-  roles: *id001
+  roles:
+  - data-export-a
   prompt: Before exporting, spot-check {deals.first_name} ({deals.first_id}) from the {deals.stage} query,
     then email analytics@helio-ops.example with the subject 'Export spot-check' about what you found.
   slots:
@@ -44,9 +45,11 @@
       subject_contains: Export spot-check
   max_steps: 8
 - id: export_contacts_list
-  roles: *id001
-  prompt: 'Export the contacts for {acct.account_name}: run the SOQL query and email the list to partners@helio-ops.example
-    with the subject ''Contact export''.'
+  roles:
+  - data-export-a
+  prompt: 'Export the contacts for {acct.account_name}: run the SOQL query, open the first contact ({acct.first_name})
+    to confirm the fields look right, and email the list to partners@helio-ops.example with the subject
+    ''Contact export''.'
   slots:
     acct:
       kind: soql_object
@@ -54,23 +57,27 @@
         object: Contact
   expected_tools:
   - salesforce.run_soql
+  - salesforce.get_record
   - mail.send_email
   success:
   - kind: mailhog_has_message
     params:
       to: partners@helio-ops.example
       subject_contains: Contact export
-  max_steps: 6
+  max_steps: 8
 - id: export_pipeline_snapshot
-  roles: *id001
+  roles:
+  - data-export-a
   prompt: 'Take a pipeline snapshot of the {deals.stage} stage: query it, open the top record {deals.first_name},
-    and post ''Snapshot ready'' to {chan.channel}.'
+    and post ''Snapshot ready {chan.ref}'' to {chan.channel}.'
   slots:
     deals:
       kind: soql_object
       filter:
         object: Opportunity
-    chan: *id002
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - salesforce.run_soql
   - salesforce.get_record
@@ -78,10 +85,10 @@
   success:
   - kind: slack_contains
     params:
-      text: Snapshot ready
+      text: Snapshot ready {chan.ref}
   max_steps: 8
 - id: inbox_triage
-  roles: &id003
+  roles:
   - exec-assistant-a
   prompt: 'Go through the inbox: list the open tickets, read {ticket.id}, and add a note saying the exec
     team has seen it.'
@@ -96,7 +103,8 @@
   success: []
   max_steps: 8
 - id: crm_lookup_brief
-  roles: *id003
+  roles:
+  - exec-assistant-a
   prompt: 'Quick brief on {acct.name}: query the account at {acct.domain}, open the record, and email
     me at exec-office@helio-ops.example with the subject ''Brief: {acct.name}''.'
   slots:
@@ -115,7 +123,8 @@
       subject_contains: 'Brief:'
   max_steps: 8
 - id: exec_account_update
-  roles: *id003
+  roles:
+  - exec-assistant-a
   prompt: 'Update the account {acct.name}: open it, set Description to ''Executive sponsor assigned'',
     and create a task ''Schedule exec check-in''.'
   slots:
@@ -135,7 +144,8 @@
       value: Executive sponsor assigned
   max_steps: 8
 - id: billing_peek
-  roles: *id003
+  roles:
+  - exec-assistant-a
   prompt: 'I need a look at recent billing: list charges, open charge {charge.id}, and email me at exec-office@helio-ops.example
     with the subject ''Billing peek''.'
   slots:
@@ -153,7 +163,8 @@
       subject_contains: Billing peek
   max_steps: 8
 - id: send_brief
-  roles: *id003
+  roles:
+  - exec-assistant-a
   prompt: 'Compile this morning''s brief: list open tickets, check the {deals.stage} deals with SOQL,
     and email exec-office@helio-ops.example with the subject ''Morning brief''.'
   slots:
@@ -172,29 +183,39 @@
       subject_contains: Morning brief
   max_steps: 8
 - id: channel_digest_brief
-  roles: *id003
-  prompt: Read {chan.channel} and email me a three-bullet summary at exec-office@helio-ops.example with
-    the subject 'Channel brief'.
-  slots: &id004
-    chan: *id002
+  roles:
+  - exec-assistant-a
+  prompt: Read {chan.channel}, check the open ticket list, and email me a three-bullet summary at exec-office@helio-ops.example
+    with the subject 'Channel brief'.
+  slots:
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - slack.read_channel
+  - zendesk.list_tickets
   - mail.send_email
   success:
   - kind: mailhog_has_message
     params:
       to: exec-office@helio-ops.example
       subject_contains: Channel brief
-  max_steps: 6
+  max_steps: 8
 - id: exec_alert_ack
-  roles: *id003
-  prompt: 'Read {chan.channel} and post ''Noted by exec office: {chan.topic}'' there.'
-  slots: *id004
+  roles:
+  - exec-assistant-a
+  prompt: 'Read {chan.channel}, glance at the open tickets, and post ''Noted by exec office: {chan.topic}
+    {chan.ref}'' there.'
+  slots:
+    chan:
+      kind: channel_topic
+      filter: {}
   expected_tools:
   - slack.read_channel
+  - zendesk.list_tickets
   - slack.post_message
   success:
   - kind: slack_contains
     params:
-      text: Noted by exec office
-  max_steps: 6
+      text: 'Noted by exec office: {chan.topic} {chan.ref}'
+  max_steps: 8

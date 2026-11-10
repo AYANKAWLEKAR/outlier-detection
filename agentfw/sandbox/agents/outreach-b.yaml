@@ -8,14 +8,26 @@ tools:
 - slack.read_channel
 - slack.post_message
 template_mix:
-  cold_outreach: 0.1111
-  cold_outreach_followup: 0.1111
-  outreach_account_intro: 0.1111
-  channel_digest: 0.1111
-  outreach_channel_digest_email: 0.1111
-  outreach_webinar_invite: 0.1111
-  outreach_meeting_confirm: 0.1111
-  outreach_reply_summary: 0.1111
-  outreach_signal_post: 0.1111
+  cold_outreach: 0.18
+  cold_outreach_followup: 0.18
+  outreach_account_intro: 0.18
+  outreach_webinar_invite: 0.18
+  outreach_meeting_confirm: 0.18
+  channel_digest: 0.025
+  outreach_channel_digest_email: 0.025
+  outreach_reply_summary: 0.025
+  outreach_signal_post: 0.025
+persona_tasks:
+  cold_outreach:
+  - cold_outreach
+  - cold_outreach_followup
+  - outreach_account_intro
+  - outreach_webinar_invite
+  - outreach_meeting_confirm
+  channel_digest:
+  - channel_digest
+  - outreach_channel_digest_email
+  - outreach_reply_summary
+  - outreach_signal_post
 sessions_per_day: 30.0
-batch_size: 8
+batch_size: 6
