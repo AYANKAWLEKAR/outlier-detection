@@ -9,6 +9,7 @@ from typing import Any, Protocol
 
 import orjson
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from agentfw.sandbox.config import ApiBudget, BudgetExceeded, SandboxConfig
 from agentfw.sandbox.seed.company import Company
@@ -26,10 +27,12 @@ _KEY_PREFIX = {
     "Case": "500",
 }
 _FORBIDDEN = re.compile(r"\b(delete|update|insert|upsert|merge|undelete)\b", re.IGNORECASE)
-_LIMIT_ANY = re.compile(r"\blimit\s+(\S+)", re.IGNORECASE)
+_LIMIT_ANY = re.compile(r"\blimit\s+([^\s)]+)", re.IGNORECASE)
 _LIMIT_END = re.compile(r"\blimit\s+\d+(\s+offset\s+\d+)?\s*$", re.IGNORECASE)
 _STRING = re.compile(r"'(?:[^'\\]|\\.)*'")
-_COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*|--[^\n]*", re.DOTALL)
+_COMMENT = re.compile(r"/\*|\*/|//|--")
+_RECORD_ID = re.compile(r"^[A-Za-z0-9]{15,18}$")
+_RESERVED_FIELDS = frozenset({"id", "attributes"})
 
 
 class SalesforceBackend(Protocol):
@@ -44,21 +47,43 @@ class SalesforceBackend(Protocol):
 
 
 def validate_soql(query: str) -> str:
-    """Return the query to run (SELECT only, LIMIT <= 2000 enforced) or raise a ToolError."""
-    q = _COMMENT.sub(" ", query).strip()
-    if not re.match(r"select\b", q, re.IGNORECASE):
+    """Return the query to run (SELECT only, every LIMIT <= 2000) or raise a ToolError.
+
+    Checks run on a copy with string literals masked; the original text is what is returned
+    (plus an appended LIMIT when absent). SOQL has no comments, so comment markers are errors.
+    """
+    q = query.strip()
+    masked = _STRING.sub("''", q)
+    if "'" in masked.replace("''", ""):
+        raise tool_error("SOQL has an unterminated string literal")
+    if _COMMENT.search(masked):
+        raise tool_error("SOQL comments are not supported")
+    if not re.match(r"select\b", masked, re.IGNORECASE):
         raise tool_error("run_soql accepts SOQL SELECT queries only")
-    bare = _STRING.sub("''", q)  # keyword checks must ignore string literals
-    if ";" in bare:
+    if ";" in masked:
         raise tool_error("run_soql accepts a single SOQL SELECT statement")
-    if _FORBIDDEN.search(bare):
+    if _FORBIDDEN.search(masked):
         raise tool_error("run_soql accepts SOQL SELECT queries only (DML keyword found)")
-    for m in _LIMIT_ANY.finditer(bare):
+    for m in _LIMIT_ANY.finditer(masked):
         if not m.group(1).isdigit() or int(m.group(1)) > SOQL_MAX_LIMIT:
             raise tool_error(f"SOQL LIMIT must be a number <= {SOQL_MAX_LIMIT}")
-    if _LIMIT_END.search(bare) is None:
+    if _LIMIT_END.search(masked) is None:
         q = f"{q} LIMIT {SOQL_MAX_LIMIT}"
     return q
+
+
+def check_record_id(record_id: str) -> str:
+    if _RECORD_ID.match(record_id) is None:
+        raise tool_error(f"invalid record id {record_id!r}")
+    return record_id
+
+
+def check_fields(fields: dict[str, Any], what: str) -> None:
+    if not fields:
+        raise tool_error(f"{what} must not be empty")
+    bad = sorted(k for k in fields if k.lower() in _RESERVED_FIELDS)
+    if bad:
+        raise tool_error(f"{what} must not contain reserved keys: {', '.join(bad)}")
 
 
 def _check_object(obj: str) -> None:
@@ -158,6 +183,7 @@ class FakeSalesforceBackend:
         return {"id": record_id, "success": True}
 
     def mass_update_batch(self, obj: str, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        _check_object(obj)
         if len(records) > COLLECTION_CHUNK:
             raise tool_error(f"sObject Collections accept at most {COLLECTION_CHUNK} records")
         out: list[dict[str, Any]] = []
@@ -219,11 +245,13 @@ class LiveSalesforceBackend:
 
     def get_record(self, obj: str, record_id: str) -> dict[str, Any]:
         _check_object(obj)
+        check_record_id(record_id)
         rec = self._request(getattr(self._sf, obj).get, record_id)
         return {k: v for k, v in dict(rec).items() if k != "attributes"}
 
     def update_record(self, obj: str, record_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         _check_object(obj)
+        check_record_id(record_id)
         self._request(getattr(self._sf, obj).update, record_id, fields)
         return {"id": record_id, "success": True}
 
@@ -248,6 +276,7 @@ class LiveSalesforceBackend:
         return [dict(r) for r in res]
 
     def create_task(self, what_id: str, subject: str) -> dict[str, Any]:
+        check_record_id(what_id)
         res = self._request(self._sf.Task.create, {"WhatId": what_id, "Subject": subject})
         return {"id": res["id"], "success": bool(res.get("success", True))}
 
@@ -263,14 +292,13 @@ def build_server(backend: SalesforceBackend) -> MCPServer:
     @server.tool()
     def get_record(object: str, record_id: str) -> dict[str, Any]:
         """Retrieve one record by id."""
-        return ok(backend.get_record(object, record_id))
+        return ok(backend.get_record(object, check_record_id(record_id)))
 
     @server.tool()
     def update_record(object: str, record_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         """Update fields on one record."""
-        if not fields:
-            raise tool_error("fields must not be empty")
-        return ok(backend.update_record(object, record_id, fields))
+        check_fields(fields, "fields")
+        return ok(backend.update_record(object, check_record_id(record_id), fields))
 
     @server.tool()
     def mass_update(
@@ -279,13 +307,19 @@ def build_server(backend: SalesforceBackend) -> MCPServer:
         """Apply the same field updates to many records (sObject Collections, 200 per request)."""
         if not record_ids:
             raise tool_error("record_ids must not be empty")
-        if not field_updates:
-            raise tool_error("field_updates must not be empty")
+        check_fields(field_updates, "field_updates")
+        _check_object(object)
+        for rid in record_ids:
+            check_record_id(rid)
         results: list[dict[str, Any]] = []
         batches = 0
         for i in range(0, len(record_ids), COLLECTION_CHUNK):
-            chunk = [{"Id": rid, **field_updates} for rid in record_ids[i : i + COLLECTION_CHUNK]]
-            results.extend(backend.mass_update_batch(object, chunk))
+            chunk = [{**field_updates, "Id": rid} for rid in record_ids[i : i + COLLECTION_CHUNK]]
+            try:
+                results.extend(backend.mass_update_batch(object, chunk))
+            except ToolError as exc:
+                done = sum(1 for r in results if r.get("success"))
+                raise tool_error(f"{exc} (updated={done} batches={batches})") from exc
             batches += 1
         failed = [r for r in results if not r.get("success")]
         return {"updated": len(results) - len(failed), "failed": failed, "batches": batches}
@@ -293,6 +327,6 @@ def build_server(backend: SalesforceBackend) -> MCPServer:
     @server.tool()
     def create_task(what_id: str, subject: str) -> dict[str, Any]:
         """Create a Task related to a record."""
-        return ok(backend.create_task(what_id, subject))
+        return ok(backend.create_task(check_record_id(what_id), subject))
 
     return server

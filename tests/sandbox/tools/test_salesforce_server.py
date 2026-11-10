@@ -8,6 +8,7 @@ from typing import Any
 
 import orjson
 import pytest
+from mcp.server.mcpserver.exceptions import ToolError
 
 from agentfw.core.patterns import is_id_like
 from agentfw.sandbox.config import ApiBudget, SandboxConfig
@@ -68,7 +69,7 @@ def test_fake_ids_are_sf_ids_and_deterministic() -> None:
     ],
 )
 def test_validate_soql_rejects(q: str) -> None:
-    with pytest.raises(Exception, match="(?i)soql|select|limit"):
+    with pytest.raises(ToolError, match="(?i)soql|select|limit"):
         validate_soql(q)
 
 
@@ -78,6 +79,112 @@ def test_validate_soql_accepts_and_limits() -> None:
     assert validate_soql("SELECT Id FROM Contact WHERE Name = 'delete me'").endswith("LIMIT 2000")
     assert validate_soql("SELECT Id FROM Contact LIMIT 2000").endswith("LIMIT 2000")
     assert validate_soql("SELECT LastModifiedDate FROM Contact").endswith("LIMIT 2000")
+
+
+@pytest.mark.parametrize(
+    "q",
+    [
+        "SELECT Id FROM Account WHERE Website = 'http://a.example' AND Name = 'x'",
+        "SELECT Id FROM Contact WHERE Name = 'a--b'",
+        "SELECT Id FROM Contact WHERE Name = 'a /* b */ c' LIMIT 7",
+        "SELECT Id, (SELECT Id FROM Contacts LIMIT 5) FROM Account",
+        "SELECT Id, (SELECT Id FROM Contacts LIMIT 5) FROM Account LIMIT 10",
+    ],
+)
+def test_validate_soql_preserves_original_text(q: str) -> None:
+    out = validate_soql(q)
+    assert out == q or out == f"{q} LIMIT 2000"
+
+
+@pytest.mark.parametrize(
+    "q",
+    [
+        "SELECT Id FROM Contact /* x */",
+        "SELECT Id FROM Contact -- x",
+        "SELECT Id FROM Contact // x",
+        "SELECT Id, (SELECT Id FROM Contacts LIMIT 5000) FROM Account",
+        "SELECT Id, (SELECT Id FROM Contacts LIMIT 5) FROM Account LIMIT 5000",
+        "SELECT Id, (DELETE FROM Contacts) FROM Account",
+        "SELECT Id FROM Contact WHERE Id IN (Delete x)",
+        "SELECT Id FROM Contact WHERE Name = 'x' dElEtE",
+        "SELECT Id FROM Contact WHERE Name = 'unterminated",
+    ],
+)
+def test_validate_soql_rejects_more(q: str) -> None:
+    with pytest.raises(ToolError):
+        validate_soql(q)
+
+
+@pytest.mark.anyio
+async def test_reserved_keys_rejected_in_updates(server) -> None:  # type: ignore[no-untyped-def]
+    _, res = await call(server, "run_soql", query="SELECT Id FROM Contact LIMIT 2")
+    rids = [r["Id"] for r in res["data"]]
+    bads: list[dict[str, Any]] = [
+        {"Id": rids[0]},
+        {"id": rids[0]},
+        {"Attributes": {}},
+        {"Title": "x", "ID": "y"},
+    ]
+    for bad in bads:
+        err, msg = await call(
+            server, "mass_update", object="Contact", record_ids=rids, field_updates=bad
+        )
+        assert err and "reserved" in msg.lower()
+        err, msg = await call(
+            server, "update_record", object="Contact", record_id=rids[0], fields=bad
+        )
+        assert err and "reserved" in msg.lower()
+
+
+@pytest.mark.anyio
+async def test_record_ids_validated(server) -> None:  # type: ignore[no-untyped-def]
+    err, _ = await call(server, "get_record", object="Contact", record_id="../limits")
+    assert err
+    err, _ = await call(
+        server, "mass_update", object="Contact", record_ids=["a/b"], field_updates={"Title": "x"}
+    )
+    assert err
+    err, _ = await call(server, "create_task", what_id="x y", subject="s")
+    assert err
+
+
+@pytest.mark.anyio
+async def test_mass_update_unknown_object_is_clean_error(server) -> None:  # type: ignore[no-untyped-def]
+    err, msg = await call(
+        server,
+        "mass_update",
+        object="Nope",
+        record_ids=["003000000000001"],
+        field_updates={"Title": "x"},
+    )
+    assert err and "unsupported object" in msg
+
+
+@pytest.mark.anyio
+async def test_mass_update_failure_reports_progress(tmp_path: Path) -> None:
+    sf = _FakeSF()
+    budget = ApiBudget(tmp_path / "b.json", limit=1)
+    srv = build_server(LiveSalesforceBackend(_cfg(tmp_path), client=sf, budget=budget))
+    ids = [f"003{i:012d}" for i in range(450)]
+    err, msg = await call(
+        srv, "mass_update", object="Contact", record_ids=ids, field_updates={"Title": "x"}
+    )
+    assert err and "updated=200" in msg and "batches=1" in msg
+
+
+@pytest.mark.anyio
+async def test_live_id_not_overridable(tmp_path: Path) -> None:
+    sf = _FakeSF()
+    budget = ApiBudget(tmp_path / "b.json", limit=5)
+    srv = build_server(LiveSalesforceBackend(_cfg(tmp_path), client=sf, budget=budget))
+    err, _ = await call(
+        srv,
+        "mass_update",
+        object="Contact",
+        record_ids=["003000000000001", "003000000000002"],
+        field_updates={"Id": "003000000000009"},
+    )
+    assert err and sf.calls == []
 
 
 @pytest.mark.anyio
