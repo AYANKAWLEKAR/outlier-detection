@@ -49,6 +49,13 @@ def mailhog_has_message(
     return False
 
 
+def mailhog_message_ids(mailhog_http: str, fetch: Callable[[str], bytes] = _fetch) -> set[str]:
+    """Ids of the messages the Mailhog API currently lists (local Mailhog only)."""
+    base = _local_http(mailhog_http)
+    data = orjson.loads(fetch(f"{base}/api/v2/messages"))
+    return {str(item["ID"]) for item in data.get("items", []) if "ID" in item}
+
+
 def stripe_refund_exists(stripe: StripeBackend, charge_id: str) -> bool:
     try:
         charge = stripe.retrieve_charge(charge_id)

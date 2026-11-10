@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
@@ -148,6 +149,9 @@ def test_build_turns_one_call_per_step_then_a_final_answer() -> None:
 
 
 async def test_twenty_fake_sessions_end_to_end(tmp_path: Path) -> None:
+    """Fake backends + the scripted policy: passing checks here prove the *plumbing* (rendering,
+    proxy, envelopes, labels, check wiring) works end to end, not that a real model is competent
+    at the tasks; the live integration test measures that."""
     plans = plan_sessions(AGENTS, TEMPLATES, 20, AttackMix(), seed=0)
     out = tmp_path / "run"
     summary = await execute(plans, fake_config(data_dir=tmp_path / "data"), out, backends="fake")
@@ -365,3 +369,101 @@ def test_cli_fake_run(tmp_path: Path) -> None:
     assert len(_ledger(out)) == 3
     summary = RunSummary.model_validate_json((out / "summary.json").read_bytes())
     assert summary.completed == 3
+
+
+async def test_failed_session_spend_is_recorded_and_counts_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plans = plan_sessions(AGENTS, TEMPLATES, 2, AttackMix(action_rate=0, prompt_rate=0), 0)
+    priced: dict[str, Any] = {"price_in_per_m": 1.0, "price_out_per_m": 1.0, "max_concurrency": 1}
+    cfg = fake_config(data_dir=tmp_path / "data", **priced)
+
+    def crash(*args: Any) -> Any:
+        raise RuntimeError("checks crashed")  # after every scripted turn was spent
+
+    monkeypatch.setattr(run_mod, "_evaluate", crash)
+    summary = await execute(plans, cfg, tmp_path / "run", backends="fake")
+    rows = _ledger(tmp_path / "run")
+    assert all(r["status"] == "failed" and r["usd"] > 0 for r in rows.values())
+    spent = sum(r["usd"] for r in rows.values())
+    assert summary.usd == pytest.approx(spent)
+    # the failed attempts' spend counts against the budget when the run resumes
+    monkeypatch.undo()
+    tight = fake_config(data_dir=tmp_path / "data", llm_usd_budget=spent * 0.9, **priced)
+    again = await execute(plans, tight, tmp_path / "run", backends="fake")
+    assert (again.completed, again.stopped_reason) == (0, "llm_usd_budget")
+
+
+async def test_torn_ledger_line_is_repaired_on_startup(tmp_path: Path) -> None:
+    plans = plan_sessions(AGENTS, TEMPLATES, 2, AttackMix(action_rate=0, prompt_rate=0), 0)
+    cfg = fake_config(data_dir=tmp_path / "data", max_concurrency=1)
+    out = tmp_path / "run"
+    await execute(plans, cfg, out, backends="fake")
+    with (out / "ledger.jsonl").open("ab") as f:
+        f.write(b'{"session_id": "s0-torn", "sta')  # a crash mid-append
+    summary = await execute(plans, cfg, out, backends="fake")
+    data = (out / "ledger.jsonl").read_bytes()
+    assert data.endswith(b"\n") and b"s0-torn" not in data
+    assert [orjson.loads(x)["session_id"] for x in data.splitlines()] == [
+        p.session_id for p in plans
+    ]
+    assert (summary.completed, summary.resumed) == (2, 2)
+
+
+async def test_two_runners_cannot_share_a_run_dir(tmp_path: Path) -> None:
+    plans = plan_sessions(AGENTS, TEMPLATES, 1, AttackMix(action_rate=0, prompt_rate=0), 0)
+    out = tmp_path / "run"
+    out.mkdir()
+    with (out / ".lock").open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        with pytest.raises(RuntimeError, match="in use"):
+            await execute(plans, fake_config(data_dir=tmp_path / "data"), out, backends="fake")
+    summary = await execute(plans, fake_config(data_dir=tmp_path / "data"), out, backends="fake")
+    assert summary.completed == 1  # the lock is free again once the other holder is gone
+
+
+def _sf_plan(i: int = 0) -> SessionPlan:
+    tid = "reprice_opportunity"  # 3 Salesforce calls + 2 Salesforce checks
+    return SessionPlan(
+        session_id=f"sf-{i}", agent_id=TEMPLATES[tid].roles[0], template_ids=[tid], seed=i
+    )
+
+
+async def test_fake_salesforce_calls_and_checks_are_charged_to_a_given_budget(
+    tmp_path: Path,
+) -> None:
+    budget = ApiBudget(tmp_path / "data" / "sf_api_budget.json", 100)
+    cfg = fake_config(data_dir=tmp_path / "data")
+    summary = await execute([_sf_plan()], cfg, tmp_path / "run", backends="fake", sf_budget=budget)
+    row = _ledger(tmp_path / "run")["sf-0"]
+    assert (row["status"], row["sf_calls"], summary.sf_calls) == ("completed", 3, 3)
+    assert budget.remaining() == 100 - 3 - 2
+
+
+async def test_sf_budget_reserves_a_sessions_estimate_before_starting(tmp_path: Path) -> None:
+    budget = ApiBudget(tmp_path / "data" / "sf_api_budget.json", 4)  # the session needs 5
+    cfg = fake_config(data_dir=tmp_path / "data")
+    summary = await execute([_sf_plan()], cfg, tmp_path / "run", backends="fake", sf_budget=budget)
+    assert (summary.completed, summary.stopped_reason) == (0, "sf_api_budget")
+    assert budget.remaining() == 4  # nothing was spent
+
+
+async def test_sf_budget_hit_mid_session_marks_it_truncated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(run_mod, "_sf_estimate", lambda prep: 0)  # under-estimate on purpose
+    budget = ApiBudget(tmp_path / "data" / "sf_api_budget.json", 2)
+    cfg = fake_config(data_dir=tmp_path / "data", max_concurrency=1)
+    plans = [_sf_plan(0), _sf_plan(1)]
+    summary = await execute(plans, cfg, tmp_path / "run", backends="fake", sf_budget=budget)
+    rows = _ledger(tmp_path / "run")
+    assert rows["sf-0"]["status"] == "budget_truncated"
+    assert "sf-1" not in rows
+    assert (summary.completed, summary.truncated, summary.stopped_reason) == (
+        0,
+        1,
+        "sf_api_budget",
+    )
+    # truncated sessions are terminal: a resume does not re-run their (already executed) actions
+    again = await execute(plans[:1], cfg, tmp_path / "run", backends="fake", sf_budget=budget)
+    assert (again.truncated, again.completed) == (1, 0)

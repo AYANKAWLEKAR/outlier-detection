@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import threading
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -72,17 +73,20 @@ class FakeStripeBackend:
 
     is_fake = True
 
-    def __init__(self, company: Company) -> None:
-        ids = fake_stripe_ids(company)
+    def __init__(self, company: Company, ids: Mapping[str, str] | None = None) -> None:
+        """``ids`` ({company key: Stripe id}) overrides the fake ids, e.g. with a live run's
+        seeded ids so a fake answers for live ids (the runner's D-014 synthetic results)."""
+        mapped = fake_stripe_ids(company)
+        mapped.update({k: v for k, v in (ids or {}).items() if k in mapped})
         self._s = _State()
         self._lock = threading.Lock()
         for c in company.customers:
-            cid = ids[c.key]
+            cid = mapped[c.key]
             self._s.customers[cid] = {"id": cid, "email": c.email, "name": c.name}
         for p in company.charges:
-            chid = ids[p.key]
+            chid = mapped[p.key]
             self._s.charges[chid] = _Charge(
-                chid, ids[p.customer_key], p.amount_cents, p.currency, p.description
+                chid, mapped[p.customer_key], p.amount_cents, p.currency, p.description
             )
 
     @staticmethod

@@ -6,6 +6,7 @@ import copy
 import hashlib
 import re
 import threading
+from collections.abc import Mapping
 from typing import Any, Protocol
 
 import orjson
@@ -102,10 +103,12 @@ class FakeSalesforceBackend:
 
     is_fake = True
 
-    def __init__(self, company: Company) -> None:
+    def __init__(self, company: Company, ids: Mapping[str, str] | None = None) -> None:
+        """``ids`` ({company key: Salesforce Id}) overrides the fake ids (e.g. a live run's)."""
         self._lock = threading.Lock()
         self._rows: dict[str, dict[str, dict[str, Any]]] = {o: {} for o in OBJECTS}
         self._ids: dict[str, str] = {}
+        self._override = dict(ids or {})
         self._n_tasks = 0
         for a in company.accounts:
             self._add("Account", a.key, {"Name": a.name, "Website": a.domain})
@@ -133,7 +136,7 @@ class FakeSalesforceBackend:
             )
 
     def _add(self, obj: str, key: str, fields: dict[str, Any]) -> None:
-        rid = sf_id(obj, key)
+        rid = self._override.get(key) or sf_id(obj, key)
         self._ids[key] = rid
         self._rows[obj][rid] = {"Id": rid, **fields}
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 import threading
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -148,10 +149,11 @@ class FakeZendeskBackend(SqliteZendeskBackend):
 
     is_fake = True
 
-    def __init__(self, company: Company) -> None:
+    def __init__(self, company: Company, stripe_ids: Mapping[str, str] | None = None) -> None:
+        """``stripe_ids`` overrides the fake Stripe ids tickets link to (e.g. a live run's)."""
         with tempfile.TemporaryDirectory() as tmp:
             db = Path(tmp) / DB_NAME
-            seed_zendesk(db, company, fake_stripe_ids(company))
+            seed_zendesk(db, company, {**fake_stripe_ids(company), **(stripe_ids or {})})
             src = sqlite3.connect(db)
             mem = _connect(":memory:")
             try:

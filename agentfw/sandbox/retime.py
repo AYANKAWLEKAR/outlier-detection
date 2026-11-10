@@ -14,7 +14,10 @@ baselines meaningless. Packaging therefore moves every session onto a simulated 
   internal order is always preserved.
 * **Burst gaps** — the gap *into* any envelope listed in ``burst_ids`` (the ``velocity_burst``
   duplicates; packaging takes them from the labels) — are kept exactly, unclamped, so a burst's
-  rate survives retiming.
+  rate survives retiming. Raw calls alone cannot tell a burst duplicate from a legitimately
+  repeated call, so ``burst_ids`` is a required keyword (pass an empty set when there are none).
+* ``start_ms`` must be a UTC midnight: it is simulated day 0, and working hours are counted
+  from it.
 
 Only ``ts_unix_ms`` changes: envelope ids (which labels key on) are kept as they are.
 """
@@ -76,13 +79,15 @@ def retime(
     seed: int,
     start_ms: int,
     *,
-    burst_ids: Collection[str] = frozenset(),
+    burst_ids: Collection[str],
 ) -> list[RawCall]:
     """Every call of ``sessions`` ({session_id: calls}) on the simulated timeline, time-ordered.
 
     Deterministic in ``seed``: agent ``a``'s starts use ``default_rng([seed, stable_hash(a)])``.
     Empty sessions are dropped; a session whose agent is not in ``agents`` is an error.
     """
+    if start_ms % _DAY_MS:
+        raise ValueError(f"start_ms {start_ms} is not a UTC midnight (day 0 of the timeline)")
     rate = {a.agent_id: a.sessions_per_day for a in agents}
     burst = frozenset(burst_ids)
     by_agent: dict[str, list[list[RawCall]]] = {}
