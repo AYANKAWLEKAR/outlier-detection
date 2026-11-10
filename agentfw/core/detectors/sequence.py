@@ -13,8 +13,14 @@ Prerequisites (b): per (agent, tool Y) we count Y-observations in which tool X w
 ``prior_tools`` (evidence ``prereq_missing`` = first missing tool, sorted). The mined set is cached
 on the record; ``update`` refreshes it and ``score`` never writes (it recomputes if stale).
 
-``score`` is pure; ``update`` is for allowed outcomes only. Task 1.8 adds the ``flow`` part in
-``_parts``; the emitted score is the max over parts.
+Id flow (c): for a *write* tool, each ID-typed flat value absent from ``session_ids_seen`` scores
+``present / total`` of that (agent, tool, path)'s history (0 until ``total >= flow_min_obs``); the
+max over missing values is ``s_flow``. Evidence: ``missing_id_path``, ``r_flow`` (never raw ids).
+A tool is a write if its hint says so, else if it has been seen with an ID-typed argument and never
+with a response ``item_count`` -- learned only from past ``update`` calls, so scoring is causal.
+
+``score`` is pure; ``update`` is for allowed outcomes only. The emitted score is the max over the
+parts (first part wins ties); ``fired`` is None when that max is 0.
 """
 
 from __future__ import annotations
@@ -26,12 +32,26 @@ from types import MappingProxyType
 from typing import Any, ClassVar, Self
 
 from agentfw.core.config import EngineConfig
-from agentfw.core.envelope import ActionEnvelope, DetectorScore
+from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType
 from agentfw.core.hints import ToolHint
 from agentfw.core.schema_infer import TypeView
-from agentfw.core.state import DictStore, key_prereq, key_trans, register_record
+from agentfw.core.state import (
+    DictStore,
+    key_flow,
+    key_kind,
+    key_prereq,
+    key_trans,
+    register_record,
+)
 
-__all__ = ["NAME", "PrereqRecord", "SequenceDetector", "TransRecord"]
+__all__ = [
+    "NAME",
+    "FlowRecord",
+    "PrereqRecord",
+    "SequenceDetector",
+    "ToolKindRecord",
+    "TransRecord",
+]
 
 NAME = "sequence"
 _PAD = "<s>"
@@ -113,6 +133,36 @@ class PrereqRecord:
         )
 
 
+@register_record
+@dataclass(slots=True)
+class ToolKindRecord:
+    KIND: ClassVar[str] = "toolkind"
+    has_item_count: bool = False
+    has_id_arg: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {"has_item_count": self.has_item_count, "has_id_arg": self.has_id_arg}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Self:
+        return cls(bool(d["has_item_count"]), bool(d["has_id_arg"]))
+
+
+@register_record
+@dataclass(slots=True)
+class FlowRecord:
+    KIND: ClassVar[str] = "flow"
+    present: int = 0
+    total: int = 0
+
+    def to_dict(self) -> dict[str, object]:
+        return {"present": self.present, "total": self.total}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Self:
+        return cls(int(d["present"]), int(d["total"]))
+
+
 def _contexts(prior: tuple[str, ...]) -> tuple[str, str]:
     """(k=2 key ``"a|b"``, k=1 key) from the last two prior tools, padded with ``<s>``."""
     last = prior[-2:]
@@ -190,21 +240,52 @@ class SequenceDetector:
             return 1.0, {"prereq_missing": missing[0]}
         return 0.0, {"prereq_missing": None}
 
+    # --- id flow -----------------------------------------------------------------------
+
+    def is_write(self, agent: str, tool: str) -> bool:
+        hint = self._hints.get(tool)
+        if hint is not None and hint.kind is not None:
+            return hint.kind == "write"
+        rec = self._store.get(key_kind(agent, tool))
+        return isinstance(rec, ToolKindRecord) and rec.has_id_arg and not rec.has_item_count
+
+    def _s_flow(self, e: ActionEnvelope, types: TypeView) -> tuple[float, dict[str, object]]:
+        ev: dict[str, object] = {"missing_id_path": None, "r_flow": 0.0}
+        if not self.is_write(e.agent_id, e.tool_id):
+            return 0.0, ev
+        best = -1.0
+        for path in sorted(e.flat_args):
+            if types(path) != FieldType.ID:
+                continue
+            if not any(
+                isinstance(v, str) and v not in e.session_ids_seen for v in e.flat_args[path]
+            ):
+                continue
+            rec = self._store.get(key_flow(e.agent_id, e.tool_id, path))
+            r = 0.0
+            if isinstance(rec, FlowRecord) and rec.total >= self._cfg.flow_min_obs:
+                r = rec.present / rec.total
+            if r > best:
+                best = r
+                ev["missing_id_path"], ev["r_flow"] = path, r
+        return max(0.0, best), ev
+
     # --- protocol ----------------------------------------------------------------------
 
-    def _parts(self, e: ActionEnvelope) -> list[Part]:
-        """All sub-scores; Task 1.8 appends the ``flow`` part here."""
+    def _parts(self, e: ActionEnvelope, types: TypeView) -> list[Part]:
+        """All sub-scores in tie-break order."""
         s_t, ev_t = self._s_trans(e)
         s_p, ev_p = self._s_prereq(e)
-        return [("trans", s_t, ev_t), ("prereq", s_p, ev_p)]
+        s_f, ev_f = self._s_flow(e, types)
+        return [("trans", s_t, ev_t), ("prereq", s_p, ev_p), ("flow", s_f, ev_f)]
 
     def score(self, e: ActionEnvelope, types: TypeView) -> list[DetectorScore]:
-        parts = self._parts(e)
+        parts = self._parts(e, types)
         fired = max(parts, key=lambda p: p[1])  # first part wins ties
         evidence: dict[str, object] = {}
         for _, _, ev in parts:
             evidence.update(ev)
-        evidence["fired"] = fired[0]
+        evidence["fired"] = fired[0] if fired[1] > 0.0 else None
         return [DetectorScore(NAME, None, fired[1], evidence)]
 
     def update(self, e: ActionEnvelope, types: TypeView) -> None:
@@ -231,3 +312,30 @@ class SequenceDetector:
         for x in set(e.prior_tools):
             prec.cnt[x] = prec.cnt.get(x, 0) + 1
         prec.cached = (prec.n_y, self._mine(prec))
+
+        self._update_flow(e, types)
+
+    def _update_flow(self, e: ActionEnvelope, types: TypeView) -> None:
+        kkey = key_kind(e.agent_id, e.tool_id)
+        krec = self._store.get(kkey)
+        if not isinstance(krec, ToolKindRecord):
+            krec = ToolKindRecord()
+            self._store.put(kkey, krec)
+        if e.response_meta is not None and e.response_meta.item_count is not None:
+            krec.has_item_count = True
+        for path, vals in e.flat_args.items():
+            if types(path) != FieldType.ID:
+                continue
+            strs = [v for v in vals if isinstance(v, str)]
+            if not strs:
+                continue
+            krec.has_id_arg = True
+            fkey = key_flow(e.agent_id, e.tool_id, path)
+            frec = self._store.get(fkey)
+            if not isinstance(frec, FlowRecord):
+                frec = FlowRecord()
+                self._store.put(fkey, frec)
+            for v in strs:
+                frec.total += 1
+                if v in e.session_ids_seen:
+                    frec.present += 1
