@@ -221,3 +221,29 @@ def test_config_record_excludes_client(tmp_path: Path) -> None:
         "prompt_version": "v1",
         "cache_dir": str(tmp_path),
     }
+
+
+def test_scored_call_hides_its_own_response_but_history_keeps_theirs(tmp_path: Path) -> None:
+    import orjson
+
+    from agentfw.core.envelope import ResponseMeta
+
+    det, client = _judge(tmp_path, '{"suspicion": 0.1}')
+    prev = make_env(
+        tool_id="zendesk.get_ticket",
+        args={"ticket_id": "T-1"},
+        response_meta=ResponseMeta(item_count=111, bytes=2222, error=True),
+    )
+    det.update(prev, Outcome.ALLOWED)
+    cur = make_env(
+        args={"amount": 5.0},
+        response_meta=ResponseMeta(item_count=98765, bytes=43210, error=True),
+    )
+    det.score(cur)
+    user = str(client.calls[0][0][1]["content"])
+    history_part, current_part = user.split("\nCurrent call:\n")
+    current = orjson.loads(current_part.split("\n")[0])
+    assert "response_meta" not in current
+    assert "98765" not in user and "43210" not in user
+    history = orjson.loads(history_part.split("\n")[-1])
+    assert history[0]["response_meta"] == {"item_count": 111, "bytes": 2222, "error": True}

@@ -2,7 +2,8 @@
 
 Asks a chat model how suspicious the current call is given the session's recent calls and caches
 every parseable reply on disk, so re-runs are free and deterministic. The prompt carries envelope
-data only (tool id, args, response-meta summary) and never labels or attack metadata. Strings of
+data only (tool id, args, and a response-meta summary for the *earlier* calls of the window; the
+scored call's own response is left out, spec 2.3) and never labels or attack metadata. Strings of
 freetext length are replaced by a length marker, both in the prompt and in the stored history.
 
 ``update`` only appends to a bounded per-session history (no learning). ``score`` never touches
@@ -14,7 +15,7 @@ The async client runs on ONE persistent event loop in a daemon thread for the ju
 (a pooled httpx client must not be reused across loops); ``reset``/``close`` stop it.
 Each envelope carries a leak-free relative ``dt_s`` (seconds since the previous call of the same
 session, 0.1 s resolution, 0 for the first call) so timing attacks stay visible; no absolute time
-and no ids reach the prompt.
+and no envelope or session ids reach the prompt (ids inside args are business data and do).
 """
 
 from __future__ import annotations
@@ -61,13 +62,19 @@ def _scrub(x: Any) -> Any:
     return x
 
 
-def _compact(e: ActionEnvelope, last_ts: int | None) -> dict[str, Any]:
-    rm = e.response_meta
-    meta = (
-        None if rm is None else {"item_count": rm.item_count, "bytes": rm.bytes, "error": rm.error}
-    )
+def _compact(e: ActionEnvelope, last_ts: int | None, *, response: bool) -> dict[str, Any]:
+    """Prompt form of ``e``. ``response=False`` (the call being scored) leaves out its
+    ``response_meta``: that response does not exist yet when the call is decided (spec 2.3)."""
     dt = 0.0 if last_ts is None else round(max(0, e.ts_unix_ms - last_ts) / 1000.0, 1)
-    return {"tool_id": e.tool_id, "args": _scrub(e.args), "response_meta": meta, "dt_s": dt}
+    out: dict[str, Any] = {"tool_id": e.tool_id, "args": _scrub(e.args), "dt_s": dt}
+    if response:
+        rm = e.response_meta
+        out["response_meta"] = (
+            None
+            if rm is None
+            else {"item_count": rm.item_count, "bytes": rm.bytes, "error": rm.error}
+        )
+    return out
 
 
 class _LoopThread:
@@ -170,7 +177,7 @@ class LlmJudge:
         t0 = time.perf_counter()
         hist = self._history.get(e.session_id)  # .get: never create entries in score()
         window = list(hist) if hist else []
-        cur = _compact(e, self._last_ts.get(e.session_id))
+        cur = _compact(e, self._last_ts.get(e.session_id), response=False)
         path = self._cache_dir / f"{self._key(window, cur)}.json"
         reply = self._read_cache(path)
         cached = reply is not None
@@ -211,7 +218,7 @@ class LlmJudge:
 
     def update(self, e: ActionEnvelope, outcome: Outcome) -> None:
         hist = self._history.setdefault(e.session_id, deque(maxlen=self._window))
-        hist.append(_compact(e, self._last_ts.get(e.session_id)))
+        hist.append(_compact(e, self._last_ts.get(e.session_id), response=True))
         self._last_ts[e.session_id] = e.ts_unix_ms
 
     def state_bytes(self) -> int:
