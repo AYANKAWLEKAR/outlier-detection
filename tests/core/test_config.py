@@ -56,6 +56,15 @@ SWEEP_SWITCH_DEFAULTS: dict[str, object] = {
 }
 
 
+# Task 1.15 opt-in switches (docs/decisions/008-tier1-gate.md): defaults keep the spec's behaviour.
+GATE_SWITCH_DEFAULTS: dict[str, object] = {
+    "cal_censor": "none",
+    "cal_censor_min_n": 0,
+    "vel_count_attempts": False,
+    "seq_prereq_graded": False,
+}
+
+
 # Defaults changed by an open-decision record (Task 1.14), overriding the spec value above.
 DECISION_OVERRIDES: dict[str, object] = {
     "prereq_rate": 0.90,  # docs/decisions/003-prereq-threshold.md
@@ -63,7 +72,9 @@ DECISION_OVERRIDES: dict[str, object] = {
 
 
 def test_engine_config_defaults_match_global_constraints() -> None:
-    expected = GLOBAL_CONSTRAINT_VALUES | SWEEP_SWITCH_DEFAULTS | DECISION_OVERRIDES
+    expected = (
+        GLOBAL_CONSTRAINT_VALUES | SWEEP_SWITCH_DEFAULTS | GATE_SWITCH_DEFAULTS | DECISION_OVERRIDES
+    )
     assert dataclasses.asdict(EngineConfig()) == expected
 
 

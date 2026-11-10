@@ -18,7 +18,7 @@ from agentfw.bench.dataset import load_dir
 from agentfw.bench.metrics import compute_all
 from agentfw.bench.protocol import Detector
 from agentfw.bench.registry import DETECTORS, make_detector
-from agentfw.bench.replay import ScoreRow, SplitSpec, replay
+from agentfw.bench.replay import OutcomeMode, ScoreRow, SplitSpec, replay
 from agentfw.core.config import EngineConfig
 from agentfw.core.envelope import Label, RawCall
 
@@ -46,13 +46,15 @@ def replay_detector(
     detector: str,
     split: SplitSpec,
     cfg: EngineConfig | None = None,
+    outcomes: OutcomeMode = "allow",
 ) -> tuple[list[ScoreRow], Detector]:
-    """Replay one registry detector (an engine variant gets ``cfg``) over a dataset directory."""
+    """Replay one registry detector (an engine variant gets ``cfg``) over a dataset directory;
+    ``outcomes`` is :func:`agentfw.bench.replay.replay`'s outcome mode (default allow-all)."""
     if detector not in DETECTORS:
         raise KeyError(f"unknown detector {detector!r}; available: {sorted(DETECTORS)}")
     raws, labels = _load(str(traces_dir))
     det = make_detector(detector) if cfg is None else make_detector(detector, cfg=cfg)
-    return replay(raws, labels, det, split), det
+    return replay(raws, labels, det, split, outcomes=outcomes), det
 
 
 def ablation_row(

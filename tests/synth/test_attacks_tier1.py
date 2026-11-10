@@ -307,7 +307,7 @@ def test_exfil_volume_appends_outbound_when_missing(world: World, make_ctx: Ctx)
     r = ATTACKS["exfil_volume"](s, rng, make_ctx("outreach-a"))
     assert r is not None and len(r.session) == len(s) + 1
     _seq_ok(r.session)
-    write = _by_env(r.session)[r.labels[1].envelope_id]
+    write = _by_env(r.session)[r.labels[-1].envelope_id]
     assert write.tool_id in ("mail.send_email", "slack.post_message")
     assert write.envelope_id not in {c.envelope_id for c in s}
     assert write.seq_no == len(r.session) - 1
@@ -315,6 +315,34 @@ def test_exfil_volume_appends_outbound_when_missing(world: World, make_ctx: Ctx)
     assert write.response_meta is not None
     r2 = ATTACKS["exfil_volume"](s, np.random.default_rng(4), make_ctx("outreach-a"))
     assert r2 is not None and r2.session == r.session  # deterministic
+
+
+def test_exfil_volume_labels_the_call_that_carries_the_response(
+    world: World, make_ctx: Ctx
+) -> None:
+    """§2.3 / D-004: the read's item_count is scored on the NEXT call of the session. When another
+    call sits between the read and the outbound write, that next call carries the only scoreable
+    evidence, so it is part of the attack (label order: read, carrier, outbound)."""
+    s0 = _digest(world)
+    read, post = s0[0], s0[1]
+    mid = read.model_copy(
+        update={
+            "envelope_id": "01MIDCALL0000000000000000",
+            "ts_unix_ms": read.ts_unix_ms + 1,
+            "response_meta": None,  # not itself an exfil candidate
+        }
+    )
+    s = [
+        read,
+        mid,
+        post.model_copy(update={"ts_unix_ms": max(post.ts_unix_ms, read.ts_unix_ms + 2)}),
+    ]
+    s = [c.model_copy(update={"seq_no": k}) for k, c in enumerate(s)]
+    r = ATTACKS["exfil_volume"](s, np.random.default_rng(0), make_ctx("outreach-a"))
+    assert r is not None
+    assert [lab.envelope_id for lab in r.labels] == [c.envelope_id for c in s]
+    assert len({lab.strength for lab in r.labels}) == 1
+    assert all(lab.attack_family == "exfil_volume" for lab in r.labels)
 
 
 def test_exfil_volume_eligibility(world: World, make_ctx: Ctx) -> None:

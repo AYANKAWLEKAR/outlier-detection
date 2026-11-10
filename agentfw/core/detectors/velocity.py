@@ -31,6 +31,12 @@ Evidence: ``signal`` (``count``/``sum``), ``window_count`` (calls in the window,
 included), ``baseline_median`` (raw units, ``None`` without history), ``n_hist``, ``z`` (``None``
 when cold), ``cold``; a sum adds ``window_sum``.
 
+Refused attempts (Task 1.15 opt-in ``vel_count_attempts``, decision 008): the engine reports each
+blocked / denied call through ``observe_refused``; the count key keeps its minute in ``refused``
+(only while it is inside the short window, and only for a key that already exists). ``score`` adds
+the refused attempts of the current window to ``window_count``; nothing else (the ring, the
+history, money sums) ever sees them, so the baseline never moves toward a refused call.
+
 The 24 h window ``long`` is kept sparse (D-010): ``{minute: (count, sum)}`` for active minutes
 only, pruned to the last ``vel_long_min`` minutes (emptied when ``vel_long_min <= 0``). It is
 maintained for state/reporting (Open Decision 4) and is not scored in v1, matching §6.4. Sums
@@ -42,7 +48,7 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar, Self
 
@@ -114,6 +120,7 @@ class VelocityRecord:
     last_minute: int
     hist_count: P2Quantiles | None  # count key only
     hist_sum: P2Quantiles | None  # money keys only
+    refused: list[int] = field(default_factory=list)  # minutes of refused attempts (opt-in)
 
     @classmethod
     def new(cls, cfg: EngineConfig, minute: int, money: bool) -> Self:
@@ -143,6 +150,8 @@ class VelocityRecord:
         if self.money:
             d["short_sum"] = [s for _, s in self.short]
             d["long_sum"] = [self.long[m][1] for m in mins]
+        if self.refused:
+            d["refused"] = list(self.refused)
         return d
 
     @classmethod
@@ -175,6 +184,7 @@ class VelocityRecord:
             last_minute=last,
             hist_count=None if hc is None else P2Quantiles.from_dict(hc),
             hist_sum=None if hs is None else P2Quantiles.from_dict(hs),
+            refused=[int(m) for m in d.get("refused", [])],
         )
 
 
@@ -257,6 +267,9 @@ class VelocityDetector:
         if rec is not None:
             (count, _), samples = self._virtual(rec, minute)
             count += 1
+            if rec.refused:
+                lo = max(minute, rec.last_minute) - self._cfg.vel_short_min
+                count += sum(1 for m in rec.refused if m > lo)
         hist = rec.hist_count if rec is not None else None
         sig = self._signal(hist, [math.log1p(c) for c, _ in samples], math.log1p(count))
         best_field: str | None = None
@@ -300,6 +313,23 @@ class VelocityDetector:
         cutoff = to - self._cfg.vel_long_min
         while rec.long and (oldest := next(iter(rec.long))) <= cutoff:  # keys ascend
             del rec.long[oldest]
+        if rec.refused:
+            self._prune_refused(rec, to)
+
+    def _prune_refused(self, rec: VelocityRecord, minute: int) -> None:
+        lo = minute - self._cfg.vel_short_min
+        rec.refused = [m for m in rec.refused if m > lo]
+
+    def observe_refused(self, e: ActionEnvelope) -> None:
+        """Count a refused call as an attempt in its short window (``vel_count_attempts``)."""
+        if not self._cfg.vel_count_attempts:
+            return
+        rec = self._record(key_vel(e.agent_id, e.tool_id))
+        if rec is None:
+            return
+        minute = max(e.ts_unix_ms // MS_PER_MIN, rec.last_minute)
+        rec.refused.append(minute)
+        self._prune_refused(rec, minute)
 
     def update(self, e: ActionEnvelope, types: TypeView) -> None:
         agent, tool = e.agent_id, e.tool_id

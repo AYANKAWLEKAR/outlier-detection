@@ -5,6 +5,11 @@ agent: the final live threshold; benign rows with fused == 1.0 and >= 0.99; and 
 **attack** rows. The bench replay allows every envelope (spec 5.2), so the calibrator learns attack
 scores too, and a ``q_{1-alpha}`` sits in whichever tail mass (benign or attack) exceeds ``alpha``.
 Also: which ``detector:part`` supplied the top-1 score of the benign fused == 1.0 rows.
+
+:func:`threshold_trajectory` (Task 1.15, decision 008) follows each agent's live threshold over
+time, to expose a censoring ratchet: when the calibrator stops learning the calls the engine
+blocks, its ``q_{1-alpha}`` is fitted on a distribution truncated at the threshold and can only
+move down.
 """
 
 from __future__ import annotations
@@ -19,11 +24,14 @@ import orjson
 from agentfw.bench.replay import ScoreRow
 
 __all__ = [
+    "RATCHET_DROP",
     "SATURATED_THRESHOLD",
     "AgentSaturation",
     "SaturationReport",
+    "ThetaTrajectory",
     "saturation_md",
     "threshold_saturation",
+    "threshold_trajectory",
 ]
 
 #: A final live threshold at or above this counts as saturated.
@@ -131,4 +139,46 @@ def saturation_md(rep: SaturationReport) -> list[str]:
     out.append("|---|---|---|")
     for k, n in rep.top1.items():
         out.append(f"| {k} | {n} | {n / total:.3f} |")
+    return out
+
+
+# --- threshold trajectories (Task 1.15) ---------------------------------------------------------
+
+#: An agent whose live threshold fell by more than this over the test period counts as ratcheting.
+RATCHET_DROP = 0.05
+_QUARTERS = (0.25, 0.5, 0.75, 1.0)
+
+
+@dataclass(slots=True, frozen=True)
+class ThetaTrajectory:
+    end_train: float  # live threshold on the agent's last scored train row (NaN: none)
+    test_quarters: tuple[float, ...]  # on its scored test rows at 25/50/75/100 % (by count)
+    min_test: float
+    end: float  # last scored row overall
+
+    @property
+    def drift(self) -> float:
+        """``end - end_train`` (NaN without train rows)."""
+        return self.end - self.end_train
+
+
+def threshold_trajectory(rows: Sequence[ScoreRow]) -> dict[str, ThetaTrajectory]:
+    """Per agent (sorted), over scored rows with a threshold, ordered by (ts, envelope_id)."""
+    by: dict[str, list[tuple[str, float]]] = {}
+    for r in sorted(rows, key=lambda r: (r.ts_unix_ms, r.envelope_id)):
+        if not math.isnan(r.fused_score) and r.threshold is not None:
+            by.setdefault(r.agent_id, []).append((r.split, r.threshold))
+    out: dict[str, ThetaTrajectory] = {}
+    for agent in sorted(by):
+        rs = by[agent]
+        train = [t for split, t in rs if split == "train"]
+        test = [t for split, t in rs if split == "test"]
+        out[agent] = ThetaTrajectory(
+            end_train=train[-1] if train else math.nan,
+            test_quarters=tuple(test[max(0, math.ceil(f * len(test)) - 1)] for f in _QUARTERS)
+            if test
+            else (),
+            min_test=min(test) if test else math.nan,
+            end=rs[-1][1],
+        )
     return out

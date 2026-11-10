@@ -10,7 +10,9 @@ V outcomes and ``s_trans = (1 - P) * (1 - H / ln V)`` (0 when ``V <= 2``). Evide
 Prerequisites (b): per (agent, tool Y) we count Y-observations in which tool X was anywhere in the
 ``prior_tools`` window (once per observation). X is a prerequisite when ``n_y >= prereq_min_n`` and
 ``cnt[X] / n_y >= prereq_rate``. ``s_prereq = 1`` if any prerequisite is absent from
-``prior_tools`` (evidence ``prereq_missing`` = first missing tool, sorted). The mined set is cached
+``prior_tools`` (evidence ``prereq_missing`` = first missing tool, sorted); with the opt-in
+``seq_prereq_graded`` (Task 1.15, decision 008) it is instead the highest ``cnt[X] / n_y`` among the
+missing prerequisites. The mined set is cached
 on the record; ``update`` refreshes it and ``score`` never writes (it recomputes if stale).
 
 Id flow (c): for a *write* tool, each ID-typed flat value absent from ``session_ids_seen`` scores
@@ -236,9 +238,14 @@ class SequenceDetector:
 
     def _s_prereq(self, e: ActionEnvelope) -> tuple[float, dict[str, object]]:
         missing = sorted(self.prerequisites(e.agent_id, e.tool_id) - set(e.prior_tools))
-        if missing:
-            return 1.0, {"prereq_missing": missing[0]}
-        return 0.0, {"prereq_missing": None}
+        if not missing:
+            return 0.0, {"prereq_missing": None}
+        s = 1.0
+        if self._cfg.seq_prereq_graded:  # Task 1.15 opt-in: the strongest missing rule's rate
+            rec = self._store.get(key_prereq(e.agent_id, e.tool_id))
+            assert isinstance(rec, PrereqRecord)  # a mined prerequisite implies a record
+            s = max(rec.cnt[x] / rec.n_y for x in missing)
+        return s, {"prereq_missing": missing[0]}
 
     # --- id flow -----------------------------------------------------------------------
 

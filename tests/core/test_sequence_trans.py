@@ -178,6 +178,23 @@ def test_missing_prereq_scores_one_with_evidence(seq: SequenceDetector) -> None:
     assert ok.score < 1.0
 
 
+def test_graded_prereq_scores_the_mined_rate_of_the_missing_tool() -> None:
+    """Task 1.15 opt-in (decision 008): s_prereq = max mined rate over the missing prerequisites."""
+    graded = SequenceDetector(DictStore(), EngineConfig().replace(seq_prereq_graded=True))
+    binary = SequenceDetector(DictStore(), EngineConfig())
+    for det in (graded, binary):
+        for i in range(100):  # X: 95 %, W: 92 % of Y's windows
+            tools = ["X", "W", "Y"] if i < 92 else ["X", "Z", "Y"] if i < 95 else ["Z", "Y"]
+            run_session(det, tools)
+    assert prereqs(graded, "Y") == frozenset({tid("X"), tid("W")})
+    s = one(graded, probe(graded, ["Z"], "Y"))  # both missing; Z -> Y is a known transition
+    assert s.evidence["fired"] == "prereq" and s.evidence["prereq_missing"] == tid("W")
+    assert s.score == pytest.approx(0.95)
+    assert one(graded, probe(graded, ["X", "Z"], "Y")).score == pytest.approx(0.92)  # W only
+    assert one(binary, probe(binary, ["Z"], "Y")).score == 1.0
+    assert one(graded, probe(graded, ["X", "W"], "Y")).evidence["prereq_missing"] is None
+
+
 def test_score_is_pure(seq: SequenceDetector) -> None:
     for _ in range(60):
         obs_y_with_x(seq)

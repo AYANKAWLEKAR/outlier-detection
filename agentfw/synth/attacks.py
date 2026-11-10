@@ -19,7 +19,8 @@ persona sessions (eps in [0.03, 0.10], k in [15, 40] clamped to the sessions tha
 attack applies only if at least 15 remain); ``Label.step`` is 1-BASED (``i`` for the i-th drifted
 session, the unit ``bench.metrics.drift_delay`` counts) and ``strength = eps``. ``exfil_volume``
 sets a read's ``item_count`` to ``round(V * median)`` (V log-uniform [10, 100]) and labels the
-first outbound write (mail / slack) after it, appending one at the end of the session if missing.
+read, the call right after it (which carries ``prev_response``, §2.3 / D-004) and the first
+outbound write (mail / slack) after it, appending one at the end of the session if missing.
 The "persona median" is the median of the tool's catalog ``response.item_count`` dist (personas
 do not override response dists): lognormal ``exp(mu)``, poisson ``lam`` (approximation),
 gamma Wilson-Hilferty ``k*theta*(1-1/(9k))**3`` (approximation), uniform midpoint, constant value.
@@ -638,13 +639,10 @@ def exfil_volume(
             )
         )
         j = len(out) - 1
-    return AttackResult(
-        out,
-        [
-            _label(ctx, "exfil_volume", out[i].envelope_id, v),
-            _label(ctx, "exfil_volume", out[j].envelope_id, v),
-        ],
-    )
+    # §2.3 / D-004: the inflated item_count is scored on the call right after the read, so that
+    # call is part of the attack even when it is not the outbound write (Task 1.15, decision 008).
+    hit = [i, *([i + 1] if i + 1 < j else []), j]
+    return AttackResult(out, [_label(ctx, "exfil_volume", out[k].envelope_id, v) for k in hit])
 
 
 def _control_cands(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, str]]:

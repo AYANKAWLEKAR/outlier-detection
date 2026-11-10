@@ -17,6 +17,7 @@ from agentfw.bench.replay import (
 )
 from agentfw.core.envelope import (
     ActionEnvelope,
+    Decision,
     DetectorResult,
     DetectorScore,
     Label,
@@ -224,3 +225,96 @@ def test_load_dir_roundtrip_and_replay(tmp_path: Path) -> None:
     assert set(labels) == {r.envelope_id for r in raws}
     rows = replay(raws, labels, Spy(), SplitSpec())
     assert len(rows) == len(raws)
+
+
+# --- Task 1.15: outcome modes (opt-in; spec §5.2's allow-all stays the default) ----------------
+
+
+class Decider:
+    """Blocks (decision BLOCK) every envelope whose id is in ``block``; records outcomes."""
+
+    def __init__(self, block: set[str]) -> None:
+        self.block = block
+        self.outcomes: dict[str, Outcome] = {}
+
+    def reset(self) -> None: ...
+
+    def score(self, e: ActionEnvelope) -> DetectorResult:
+        d = Decision.BLOCK if e.envelope_id in self.block else Decision.REQUIRE_APPROVAL
+        return DetectorResult(0.0, (), (), 0.0, threshold=0.5, decision=d)
+
+    def update(self, e: ActionEnvelope, outcome: Outcome) -> None:
+        self.outcomes[e.envelope_id] = outcome
+
+    def state_bytes(self) -> int:
+        return 0
+
+
+def _attack_label(raw: RawCall) -> Label:
+    return Label(
+        envelope_id=raw.envelope_id, label="attack", attack_family="magnitude_spike", attack_id="x"
+    )
+
+
+def test_default_outcomes_allow_every_envelope(raws3: list[RawCall]) -> None:
+    det = Decider({raws3[0].envelope_id})
+    replay(raws3, {raws3[1].envelope_id: _attack_label(raws3[1])}, det, SplitSpec())
+    assert set(det.outcomes.values()) == {Outcome.ALLOWED}
+
+
+def test_enforce_blocks_what_the_detector_blocks(raws3: list[RawCall]) -> None:
+    det = Decider({raws3[0].envelope_id})
+    labels = {raws3[1].envelope_id: _attack_label(raws3[1])}  # labels never leak into enforce
+    replay(raws3, labels, det, SplitSpec(), outcomes="enforce")
+    assert det.outcomes == {
+        raws3[0].envelope_id: Outcome.BLOCKED,
+        raws3[1].envelope_id: Outcome.ALLOWED,  # require_approval: the approver allows
+        raws3[2].envelope_id: Outcome.ALLOWED,
+    }
+
+
+def test_enforce_allows_unsampled_envelopes(raws3: list[RawCall]) -> None:
+    det = Decider({r.envelope_id for r in raws3})
+    replay(raws3, {}, det, SplitSpec(), outcomes="enforce", sample_ids={raws3[0].envelope_id})
+    assert det.outcomes[raws3[0].envelope_id] is Outcome.BLOCKED
+    assert det.outcomes[raws3[1].envelope_id] is Outcome.ALLOWED
+
+
+def test_oracle_blocks_labelled_attacks_only(raws3: list[RawCall]) -> None:
+    det = Decider({raws3[0].envelope_id})
+    labels = {raws3[1].envelope_id: _attack_label(raws3[1])}
+    replay(raws3, labels, det, SplitSpec(), outcomes="oracle")
+    assert det.outcomes == {
+        raws3[0].envelope_id: Outcome.ALLOWED,
+        raws3[1].envelope_id: Outcome.BLOCKED,
+        raws3[2].envelope_id: Outcome.ALLOWED,
+    }
+
+
+def test_unknown_outcome_mode_rejected(raws3: list[RawCall]) -> None:
+    with pytest.raises(ValueError, match="outcomes"):
+        replay(raws3, {}, Spy(), SplitSpec(), outcomes="deny")  # type: ignore[arg-type]
+
+
+def test_review_approves_flagged_benign_and_denies_flagged_attacks() -> None:
+    """§6.8 feedback loop: a reviewer sees every flagged call (block or require_approval) and
+    approves it iff it is benign; unflagged calls are allowed unseen (attacks included)."""
+    raws = [make_raw(seq_no=i, ts_unix_ms=1_000 + i) for i in range(5)]
+    ids = [r.envelope_id for r in raws]
+
+    class Banded(Decider):
+        def score(self, e: ActionEnvelope) -> DetectorResult:
+            i = ids.index(e.envelope_id)
+            d = [Decision.BLOCK, Decision.BLOCK, Decision.REQUIRE_APPROVAL, Decision.ALLOW][i % 4]
+            return DetectorResult(0.0, (), (), 0.0, threshold=0.5, decision=d)
+
+    det = Banded(set())
+    labels = {i: _attack_label(r) for i, r in zip(ids, raws, strict=True) if ids.index(i) in (1, 3)}
+    replay(raws, labels, det, SplitSpec(), outcomes="review")
+    assert [det.outcomes[i] for i in ids] == [
+        Outcome.APPROVED,  # blocked, benign
+        Outcome.DENIED,  # blocked, attack
+        Outcome.APPROVED,  # require_approval, benign
+        Outcome.ALLOWED,  # allow, attack: nobody looks
+        Outcome.APPROVED,  # blocked, benign
+    ]

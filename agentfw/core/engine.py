@@ -7,10 +7,13 @@ path. The engine remembers ``(envelope_id, fused)`` of the last score; that cach
 detector state (it is not in the store and never counted by ``state_bytes``).
 
 ``update(e, outcome)``: nothing moves unless the outcome is ``ALLOWED`` / ``APPROVED`` (a blocked
-or denied action never moves a baseline). Otherwise, in order:
+or denied action never moves a baseline; two opt-in exceptions (Task 1.15): with
+``cal_censor="winsorize"`` a ``BLOCKED`` call adds the threshold that blocked it to the calibrator,
+and with ``vel_count_attempts`` a refused call counts in velocity's current window -- neither
+moves a baseline distribution). Otherwise, in order:
 
-1. the fused score that decided ``e``: the cached one when it is ``e``'s, else a fresh pure
-   score computed *before* anything below mutates state;
+1. the fused score and threshold that decided ``e``: the cached ones when they are ``e``'s, else
+   a fresh pure score (and the current threshold) computed *before* anything below mutates state;
 2. sub-detector updates (with the same pre-envelope types as ``score``);
 3. pooled priors (§6.10): every finite NUMERIC value as ``signed_log1p(x)`` (and the previous
    response's ``item_count`` under magnitude's ``__resp__.item_count``, unless
@@ -18,7 +21,10 @@ or denied action never moves a baseline). Otherwise, in order:
    every CATEGORICAL / ID value (derived ``__domain__`` / ``__host__`` / ``__prefix__`` included)
    under novelty's key ``value_key(v)`` when novelty is enabled. ``PooledPriors`` applies
    ``priors_mode``;
-4. the calibrator, with the fused score from step 1;
+4. the calibrator, with the fused score from step 1 -- unless ``cal_censor`` says otherwise for a
+   call the engine itself blocked (fused >= threshold): ``"drop"`` skips it, ``"winsorize"``
+   feeds the threshold instead, both only once the agent's calibrator holds
+   ``cal_censor_min_n`` scores (Task 1.15, ``docs/decisions/008-tier1-gate.md``);
 5. type inference, last, over the flat paths (derived paths are typed by construction).
 
 Freetext never reaches state: the normalizer already replaced strings of ``freetext_min_len``+
@@ -33,7 +39,7 @@ from time import perf_counter_ns
 from types import MappingProxyType
 
 from agentfw.core.calibration import Calibrator
-from agentfw.core.config import EngineConfig
+from agentfw.core.config import CAL_CENSOR_MODES, EngineConfig
 from agentfw.core.detectors.base import SubDetector, signed_log1p, value_key
 from agentfw.core.detectors.magnitude import RESP_FIELD, MagnitudeDetector
 from agentfw.core.detectors.novelty import NoveltyDetector
@@ -94,6 +100,8 @@ class Engine:
         unknown = set(enabled) - ALL_DETECTORS
         if unknown:
             raise ValueError(f"unknown detectors {sorted(unknown)}; known: {DETECTOR_ORDER}")
+        if cfg.cal_censor not in CAL_CENSOR_MODES:
+            raise ValueError(f"unknown cal_censor {cfg.cal_censor!r}; known: {CAL_CENSOR_MODES}")
         self.cfg = cfg
         self.store: StateStore = DictStore() if store is None else store
         self.enabled = frozenset(enabled)
@@ -110,7 +118,11 @@ class Engine:
             "sequence": SequenceDetector(self.store, cfg, hints),
         }
         self._detectors = tuple(built[n] for n in DETECTOR_ORDER if n in self.enabled)
-        self._cache: tuple[str, float] | None = None
+        vel = built["velocity"]
+        self._velocity = (
+            vel if isinstance(vel, VelocityDetector) and "velocity" in self.enabled else None
+        )
+        self._cache: tuple[str, float, float] | None = None  # (envelope_id, fused, threshold)
 
     # -- Detector protocol ---------------------------------------------------------------------
 
@@ -125,7 +137,7 @@ class Engine:
         agent = e.agent_id
         theta = self.calibrator.threshold(agent)
         decision = self.calibrator.decide(agent, fr.fused)
-        self._cache = (e.envelope_id, fr.fused)
+        self._cache = (e.envelope_id, fr.fused, theta)
         return DetectorResult(
             fused_score=fr.fused,
             per_detector=per,
@@ -139,18 +151,32 @@ class Engine:
     def update(self, e: ActionEnvelope, outcome: Outcome) -> None:
         cached = self._cache
         fused: float | None = None
+        theta = math.nan
         if cached is not None and cached[0] == e.envelope_id:
             self._cache = None
-            fused = cached[1]
+            _, fused, theta = cached
+        censor = self.cfg.cal_censor
+        if censor != "none" and self.calibrator.n_scored(e.agent_id) < self.cfg.cal_censor_min_n:
+            censor = "none"  # still in shadow: learn like the spec
         if outcome not in _LEARN:
+            if self._velocity is not None:
+                self._velocity.observe_refused(e)  # no-op unless vel_count_attempts
+            if outcome is Outcome.BLOCKED and censor == "winsorize":
+                if fused is None:
+                    theta = self.calibrator.threshold(e.agent_id)
+                self.calibrator.observe_censored(e.agent_id, theta)
             return
         view = self._view(e)
         if fused is None:
             fused = self._fuse(e, view)[1].fused  # pure: before any state below moves
+            theta = self.calibrator.threshold(e.agent_id)
         for d in self._detectors:
             d.update(e, view)
         self._observe_priors(e, view)
-        self.calibrator.observe(e.agent_id, fused, outcome)
+        if censor == "none" or fused < theta:
+            self.calibrator.observe(e.agent_id, fused, outcome)
+        elif censor == "winsorize":
+            self.calibrator.observe(e.agent_id, theta, outcome)
         agent, tool = e.agent_id, e.tool_id
         for path, values in e.flat_args.items():
             self.inference.observe(agent, tool, path, values)

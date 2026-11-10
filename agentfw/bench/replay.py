@@ -2,7 +2,21 @@
 
 Every detector and baseline runs through :func:`replay`: envelopes are sorted by
 ``(ts_unix_ms, session_id, seq_no)``, normalized causally, scored, and only then
-used to update the detector (outcome ``ALLOWED``).
+used to update the detector.
+
+The outcome handed to ``update`` is ``ALLOWED`` for every envelope by default (spec §5.2: the
+harness measures detection, not enforcement). Two opt-in modes exist for Task 1.15
+(``docs/decisions/008-tier1-gate.md``):
+
+* ``outcomes="enforce"``: ``BLOCKED`` when the detector's own ``DetectorResult.decision`` is
+  ``BLOCK``, else ``ALLOWED`` (``REQUIRE_APPROVAL`` is approved; envelopes not sampled by
+  ``sample_ids`` are allowed). Mirrors deployment: a blocked call never moves a baseline.
+* ``outcomes="review"``: the §6.8 feedback loop with a perfect reviewer. Every *flagged* envelope
+  (decision ``BLOCK`` or ``REQUIRE_APPROVAL``) is ``APPROVED`` if benign and ``DENIED`` if labelled
+  ``attack``; unflagged envelopes are ``ALLOWED`` unseen (missed attacks are learned). It reads the
+  labels of flagged envelopes only (the reviewer's verdict).
+* ``outcomes="oracle"``: ``BLOCKED`` for every envelope labelled ``attack``, else ``ALLOWED``. It
+  reads every label, so it is a diagnostic upper bound only, never a reported benchmark number.
 """
 
 from __future__ import annotations
@@ -22,11 +36,13 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from agentfw.bench.protocol import BatchFit, Detector
-from agentfw.core.envelope import ActionEnvelope, Label, Outcome, RawCall
+from agentfw.core.envelope import ActionEnvelope, Decision, Label, Outcome, RawCall
 from agentfw.core.normalize import SessionTracker, normalize
 
 __all__ = [
+    "OUTCOME_MODES",
     "LeakError",
+    "OutcomeMode",
     "ScoreRow",
     "SplitSpec",
     "assign_split",
@@ -37,6 +53,9 @@ __all__ = [
 ]
 
 Split = Literal["train", "test"]
+OutcomeMode = Literal["allow", "enforce", "review", "oracle"]
+OUTCOME_MODES: tuple[OutcomeMode, ...] = ("allow", "enforce", "review", "oracle")
+_FLAGGED = frozenset({Decision.BLOCK, Decision.REQUIRE_APPROVAL})
 
 
 class LeakError(RuntimeError):
@@ -109,7 +128,10 @@ def replay(
     warmup_min_obs: int = 30,
     sample_ids: set[str] | None = None,
     strict: bool = False,
+    outcomes: OutcomeMode = "allow",
 ) -> list[ScoreRow]:
+    if outcomes not in OUTCOME_MODES:
+        raise ValueError(f"unknown outcomes mode {outcomes!r}; known: {OUTCOME_MODES}")
     ordered = sorted(raws, key=_order)
     assignment = assign_split(ordered, split)
     detector.reset()
@@ -137,6 +159,8 @@ def replay(
         per_json = "[]"
         latency = 0.0
         threshold: float | None = None
+        outcome = Outcome.ALLOWED
+        flagged = False
         if scored:
             before = detector.state_bytes() if strict else 0
             t0 = perf_counter_ns()
@@ -147,7 +171,15 @@ def replay(
             fused = res.fused_score
             per_json = _per_detector_json(res.per_detector)
             threshold = res.threshold
+            flagged = res.decision in _FLAGGED
+            if outcomes == "enforce" and res.decision is Decision.BLOCK:
+                outcome = Outcome.BLOCKED
         lab = labels.get(env.envelope_id)
+        is_attack = lab is not None and lab.label == "attack"
+        if outcomes == "review" and flagged:
+            outcome = Outcome.DENIED if is_attack else Outcome.APPROVED
+        elif outcomes == "oracle" and is_attack:
+            outcome = Outcome.BLOCKED
         rows.append(
             ScoreRow(
                 envelope_id=env.envelope_id,
@@ -171,7 +203,7 @@ def replay(
                 threshold=threshold,
             )
         )
-        detector.update(env, Outcome.ALLOWED)
+        detector.update(env, outcome)
         tracker.observe(env)
         obs[key] += 1
     return rows

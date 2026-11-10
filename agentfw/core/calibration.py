@@ -46,6 +46,10 @@ class Calibrator:
         rec = self.store.get(key_cal(agent))
         return rec if isinstance(rec, CalRecord) else None
 
+    def n_scored(self, agent: str) -> int:
+        rec = self._rec(agent)
+        return 0 if rec is None else rec.n_scored
+
     def threshold(self, agent: str) -> float:
         cfg = self.cfg
         rec = self._rec(agent)
@@ -66,7 +70,17 @@ class Calibrator:
         return Decision.ALLOW
 
     def observe(self, agent: str, fused: float, outcome: Outcome) -> None:
-        if outcome not in (Outcome.ALLOWED, Outcome.APPROVED) or not math.isfinite(fused):
+        if outcome not in (Outcome.ALLOWED, Outcome.APPROVED):
+            return
+        self._push(agent, fused)
+
+    def observe_censored(self, agent: str, theta: float) -> None:
+        """Count a call the engine blocked at ``theta`` as tail mass at ``theta`` (its fused score
+        is never learned). Used only with ``cal_censor="winsorize"`` (decision 008)."""
+        self._push(agent, theta)
+
+    def _push(self, agent: str, fused: float) -> None:
+        if not math.isfinite(fused):
             return
         rec = self._rec(agent)
         if rec is None:

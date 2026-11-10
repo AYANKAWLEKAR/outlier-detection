@@ -17,7 +17,9 @@ and summarises each run with :func:`sweep_metrics`, all on **warm test** rows:
 
 The long sweeps run outside pytest: ``python -m agentfw.bench.sweeps --traces DIR --out DIR``
 (see :func:`main`), which also measures quantile tail error (Open Decision 1) and velocity
-long-window memory (Open Decision 4), and writes ``sweeps.json`` + ``sweeps.md``.
+long-window memory (Open Decision 4), and writes ``sweeps.json`` + ``sweeps.md``. Suite ``gate``
+(Task 1.15, decision 008) replays :data:`GATE_CANDIDATES`, each with its replay outcome mode, and
+adds the live-threshold trajectory summary (the censoring ratchet).
 """
 
 from __future__ import annotations
@@ -44,14 +46,18 @@ from agentfw.bench.ablation import (
 )
 from agentfw.bench.dataset import load_dir
 from agentfw.bench.diagnostics import (
+    RATCHET_DROP,
+    SATURATED_THRESHOLD,
     AgentSaturation,
     SaturationReport,
+    ThetaTrajectory,
     saturation_md,
     threshold_saturation,
+    threshold_trajectory,
 )
 from agentfw.bench.metrics import GATE_FAMILIES, Thresholds, compute_all, gate_preview
 from agentfw.bench.protocol import Detector
-from agentfw.bench.replay import ScoreRow, SplitSpec
+from agentfw.bench.replay import OutcomeMode, ScoreRow, SplitSpec
 from agentfw.core.config import EngineConfig
 from agentfw.core.detectors.base import IQR_TO_SIGMA, signed_log1p
 from agentfw.core.detectors.velocity import VelocityRecord
@@ -62,6 +68,7 @@ from agentfw.core.stats.p2 import P2Quantiles, p2_tail
 from agentfw.synth.generate import generate
 
 __all__ = [
+    "GATE_CANDIDATES",
     "SweepRow",
     "calibration_tail_error",
     "field_tail_errors",
@@ -376,7 +383,41 @@ ABLATION_VARIANTS = [
     *(f"engine-only-{d}" for d in DETECTOR_ORDER),
     "engine-no-priors",
 ]
-ALL_SUITES = [*SUITE_GRIDS, "prereq", "ablation", "tail", "saturation"]
+#: Task 1.15 gate candidates (docs/decisions/008-tier1-gate.md): ``(setting, params, outcomes)``.
+#: Every switch is opt-in; "default" is the spec engine under the spec's allow-all replay.
+#: ``review`` reads the labels of flagged calls (a perfect §6.8 reviewer); ``oracle`` reads every
+#: label (attacks never learned): a diagnostic upper bound only.
+_W: dict[str, object] = {"cal_censor": "winsorize"}
+_W500: dict[str, object] = {**_W, "cal_censor_min_n": 500}
+_ATT: dict[str, object] = {"vel_count_attempts": True}
+_GRADED: dict[str, object] = {"seq_prereq_graded": True}
+_NOV50: dict[str, object] = {"novelty_full_n": 50}
+GATE_CANDIDATES: list[tuple[str, dict[str, object], OutcomeMode]] = [
+    ("default", {}, "allow"),
+    ("enforce", {}, "enforce"),
+    ("cal_censor=drop", {"cal_censor": "drop"}, "allow"),
+    ("cal_censor=winsorize", dict(_W), "allow"),
+    ("enforce, winsorize", dict(_W), "enforce"),
+    ("winsorize after 500", dict(_W500), "allow"),
+    ("enforce, winsorize after 500", dict(_W500), "enforce"),
+    (
+        "enforce, winsorize after 500, attempts, graded, nov50",
+        {**_W500, **_ATT, **_GRADED, **_NOV50},
+        "enforce",
+    ),
+    ("review", {}, "review"),
+    ("review, graded prereq", dict(_GRADED), "review"),
+    ("review, novelty_full_n=50", dict(_NOV50), "review"),
+    ("review, vel attempts", dict(_ATT), "review"),
+    ("review, vel attempts, graded prereq", {**_ATT, **_GRADED}, "review"),
+    (
+        "review, vel attempts, graded prereq, novelty_full_n=50",
+        {**_ATT, **_GRADED, **_NOV50},
+        "review",
+    ),
+    ("oracle (labels; diagnostic)", {}, "oracle"),
+]
+ALL_SUITES = [*SUITE_GRIDS, "prereq", "ablation", "tail", "saturation", "gate"]
 
 
 def skip_dataset(base_dir: Path, skip: float) -> Path:
@@ -408,11 +449,12 @@ class _Spec:
     params: tuple[tuple[str, object], ...]
     split: SplitSpec
     n_boot: int
+    outcomes: OutcomeMode = "allow"
 
 
 def _run_spec(spec: _Spec) -> dict[str, Any]:
     cfg = EngineConfig().replace(**dict(spec.params))
-    rows, det = replay_detector(spec.traces, spec.detector, spec.split, cfg)
+    rows, det = replay_detector(spec.traces, spec.detector, spec.split, cfg, spec.outcomes)
     out: dict[str, Any] = {
         "metrics": sweep_metrics(
             rows, state_bytes=det.state_bytes(), cal_alpha=cfg.cal_alpha, n_boot=spec.n_boot
@@ -423,6 +465,7 @@ def _run_spec(spec: _Spec) -> dict[str, Any]:
         "velocity_memory": velocity_memory(det),
         "calibration_tail": {str(a): calibration_tail_error(rows, a) for a in CAL_ALPHAS},
         "saturation": dataclasses.asdict(threshold_saturation(rows)),
+        "trajectory": {a: dataclasses.asdict(t) for a, t in threshold_trajectory(rows).items()},
     }
     return out
 
@@ -484,8 +527,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     split = SplitSpec()
     base = str(a.traces)
 
-    def spec(params: Mapping[str, object], traces: str = base, det: str = "engine") -> _Spec:
-        return _Spec(traces, det, tuple(params.items()), split, a.n_boot)
+    def spec(
+        params: Mapping[str, object],
+        traces: str = base,
+        det: str = "engine",
+        outcomes: OutcomeMode = "allow",
+    ) -> _Spec:
+        return _Spec(traces, det, tuple(params.items()), split, a.n_boot, outcomes)
 
     plan: dict[str, list[tuple[str, _Spec]]] = {}
     for s in suites:
@@ -505,6 +553,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             plan[s] = items
         elif s in ("tail", "saturation"):
             plan[s] = [("default", spec({}))]
+        elif s == "gate":
+            plan[s] = [(n, spec(pt, outcomes=o)) for n, pt, o in GATE_CANDIDATES]
 
     # Run each distinct replay once (the default point appears in several suites).
     jobs = list(dict.fromkeys(sp for items in plan.values() for _, sp in items))
@@ -514,7 +564,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     md: list[str] = [f"# Sweeps on `{base}`", ""]
     for s, items in plan.items():
         entries = [
-            {"setting": name, "params": dict(sp.params), "traces": sp.traces, **results[sp]}
+            {
+                "setting": name,
+                "params": dict(sp.params),
+                "outcomes": sp.outcomes,
+                "traces": sp.traces,
+                **results[sp],
+            }
             for name, sp in items
         ]
         report["suites"][s] = entries
@@ -543,6 +599,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"| {e['setting']} | {int(vm['vel_keys'])} | {int(vm['vel_json_sparse'])} "
                     f"| {int(vm['vel_json_dense'])} | {int(vm['vel_json_no_long'])} |"
                 )
+        if s == "gate":
+            md += ["", *_trajectory_summary_md(entries)]
         if s == "saturation":
             rep = entries[0]["saturation"]
             md += ["", *saturation_md(_saturation_from_dict(rep))]
@@ -558,6 +616,34 @@ def main(argv: Sequence[str] | None = None) -> int:
     (a.out / "sweeps.md").write_text("\n".join(md))
     print(a.out / "sweeps.md")
     return 0
+
+
+def _trajectory_summary_md(entries: Sequence[Mapping[str, Any]]) -> list[str]:
+    """One line per candidate: where the live thresholds end up, and whether they ratchet."""
+    out = [
+        f"Live per-agent thresholds (agents ratcheting = threshold fell by > {RATCHET_DROP} from "
+        "the end of train to the end of test; saturated = final threshold >= "
+        f"{SATURATED_THRESHOLD}):",
+        "",
+        "| setting | outcomes | median end of train | median end | median drift | min end "
+        "| agents ratcheting | agents saturated |",
+        "|---|---|---|---|---|---|---|---|",
+    ]
+    for e in entries:
+        tr = [ThetaTrajectory(**{**t, "test_quarters": tuple(t["test_quarters"])})
+              for t in e["trajectory"].values()]  # fmt: skip
+        if not tr:
+            continue
+        ends = np.asarray([t.end for t in tr])
+        drift = np.asarray([t.drift for t in tr])
+        end_train = float(np.nanmedian([t.end_train for t in tr]))
+        out.append(
+            f"| {e['setting']} | {e['outcomes']} | {_fmt(end_train)} "
+            f"| {_fmt(float(np.median(ends)))} | {_fmt(float(np.nanmedian(drift)))} "
+            f"| {_fmt(float(ends.min()))} | {int(np.sum(drift < -RATCHET_DROP))} of {len(tr)} "
+            f"| {int(np.sum(ends >= SATURATED_THRESHOLD))} |"
+        )
+    return out
 
 
 def _saturation_from_dict(d: Mapping[str, Any]) -> SaturationReport:

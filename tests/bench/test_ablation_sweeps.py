@@ -290,3 +290,34 @@ def test_run_without_ablations_keeps_none(tiny_dataset: Path, tmp_path: Path) ->
 
     run(tiny_dataset, "random", SplitSpec(), tmp_path, n_boot=0)
     assert orjson.loads((tmp_path / "report.json").read_bytes())["ablations"] is None
+
+
+# --- Task 1.15: gate candidates (opt-in outcome modes and censoring; decision 008) --------------
+
+
+def test_replay_detector_passes_the_outcome_mode(tiny_dataset: Path) -> None:
+    from agentfw.bench.ablation import replay_detector
+
+    allow, _ = replay_detector(tiny_dataset, "engine", SplitSpec())
+    oracle, _ = replay_detector(tiny_dataset, "engine", SplitSpec(), outcomes="oracle")
+    assert [r.envelope_id for r in allow] == [r.envelope_id for r in oracle]
+    # attacks never learned: later scores (and thresholds) differ from the allow-all replay
+    assert [r.fused_score for r in allow] != [r.fused_score for r in oracle]
+
+
+def test_gate_suite_runs_every_candidate_with_its_outcome_mode(
+    tiny_dataset: Path, tmp_path: Path
+) -> None:
+    import orjson
+
+    from agentfw.bench.sweeps import GATE_CANDIDATES, main
+
+    assert main(["--traces", str(tiny_dataset), "--out", str(tmp_path), "--suites", "gate"]) == 0
+    rep = orjson.loads((tmp_path / "sweeps.json").read_bytes())
+    entries = rep["suites"]["gate"]
+    assert [e["setting"] for e in entries] == [c[0] for c in GATE_CANDIDATES]
+    assert [e["outcomes"] for e in entries] == [c[2] for c in GATE_CANDIDATES]
+    assert {"allow", "enforce", "oracle"} <= {e["outcomes"] for e in entries}
+    assert all(e["trajectory"] for e in entries)
+    md = (tmp_path / "sweeps.md").read_text()
+    assert "## gate" in md and "| setting | outcomes |" in md and "ratcheting" in md

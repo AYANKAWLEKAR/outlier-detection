@@ -433,3 +433,57 @@ def test_sum_signal_off_scores_count_only_and_keeps_no_money_keys() -> None:
     assert huge.evidence["signal"] == "count" and huge.field is None
     assert huge.score < 0.5  # one call at normal cadence; the money total is not a signal
     assert det._store.get(key_vel(AGENT, TOOL, "amount")) is None
+
+
+# -- Task 1.15 opt-in: refused attempts count in the window, never in the baseline ----------------
+
+
+def test_refused_attempts_count_in_the_window_but_not_in_history() -> None:
+    det = VelocityDetector(DictStore(), CFG.replace(vel_count_attempts=True))
+    last = _warm(det)
+    e = env(T0)
+    n0 = hist_n(record(det))
+    [base] = det.score(at(e, last + MIN), TYPES)
+    for i in range(12):  # refused (blocked / denied) attempts within the same minute
+        det.observe_refused(at(e, last + MIN + i * 1_000))
+    [s] = det.score(at(e, last + MIN + 20_000), TYPES)
+    assert ev_int(s, "window_count") == ev_int(base, "window_count") + 12
+    assert s.score > base.score
+    # the baseline never sees them: after the window has rolled past, history is as without them
+    ref = new_det()
+    _warm(ref)
+    later = at(e, last + 30 * MIN)
+    det.update(later, TYPES)
+    ref.update(later, TYPES)
+    assert hist_n(record(det)) == hist_n(record(ref)) > n0
+    assert record(det).hist_count.to_dict() == record(ref).hist_count.to_dict()  # type: ignore[union-attr]
+    [a] = det.score(at(e, last + 31 * MIN), TYPES)
+    [b] = ref.score(at(e, last + 31 * MIN), TYPES)
+    assert a == b  # refused attempts older than the short window are forgotten
+    assert record(det).to_dict() == record(ref).to_dict()
+
+
+def test_refused_attempts_ignored_when_switch_off_or_key_cold() -> None:
+    off = new_det()
+    last = _warm(off)
+    before = snapshot(off)
+    off.observe_refused(at(env(T0), last + MIN))
+    assert snapshot(off) == before
+    on = VelocityDetector(DictStore(), CFG.replace(vel_count_attempts=True))
+    on.observe_refused(env(T0))  # no record yet: nothing to count against, nothing created
+    assert snapshot(on) == orjson.dumps([], option=orjson.OPT_SORT_KEYS)
+
+
+def test_refused_attempts_roundtrip_through_to_dict() -> None:
+    det = VelocityDetector(DictStore(), CFG.replace(vel_count_attempts=True))
+    last = _warm(det)
+    det.observe_refused(at(env(T0), last + MIN))
+    rec = record(det)
+    assert VelocityRecord.from_dict(rec.to_dict()).to_dict() == rec.to_dict()
+    assert "refused" not in record(_warm_det()).to_dict()  # absent unless used: goldens unchanged
+
+
+def _warm_det() -> VelocityDetector:
+    det = new_det()
+    _warm(det)
+    return det

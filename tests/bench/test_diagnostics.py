@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import orjson
 import pytest
 
@@ -62,3 +64,25 @@ def test_threshold_saturation_per_agent_and_top1_attribution() -> None:
 def test_threshold_saturation_empty() -> None:
     rep = threshold_saturation([])
     assert rep.agents == {} and rep.n_saturated == 0 and rep.top1 == {}
+
+
+# --- Task 1.15: threshold trajectories (the censoring ratchet) ----------------------------------
+
+
+def test_threshold_trajectory_reports_train_end_test_quarters_and_min() -> None:
+    from agentfw.bench.diagnostics import ThetaTrajectory, threshold_trajectory
+
+    rows = [_row(i, "A", 0.1, 0.9 - 0.01 * i, MAG) for i in range(4)]  # train: 0.90 .. 0.87
+    rows += [_row(10 + i, "A", 0.1, 0.8 - 0.1 * i, MAG, split="test") for i in range(4)]
+    rows += [_row(20, "A", float("nan"), None, MAG, split="test")]  # unscored: ignored
+    rows += [_row(30 + i, "B", 0.1, 0.5, MAG, split="test") for i in range(2)]  # no train rows
+    rows.reverse()  # order comes from (ts, envelope_id), not row order
+    tr = threshold_trajectory(rows)
+    a = tr["A"]
+    assert isinstance(a, ThetaTrajectory)
+    assert a.end_train == pytest.approx(0.87)
+    assert a.test_quarters == pytest.approx((0.8, 0.7, 0.6, 0.5))  # rows at 25/50/75/100 %
+    assert a.min_test == pytest.approx(0.5) and a.end == pytest.approx(0.5)
+    assert a.drift == pytest.approx(0.5 - 0.87)
+    b = tr["B"]
+    assert math.isnan(b.end_train) and math.isnan(b.drift) and b.end == pytest.approx(0.5)

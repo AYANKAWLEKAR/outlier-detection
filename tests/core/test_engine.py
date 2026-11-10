@@ -450,3 +450,160 @@ def _skip(eng: Engine) -> object:
 def test_default_engine_mines_a_92_percent_prerequisite_that_095_would_not() -> None:
     assert _skip(_prereq_engine(EngineConfig())) == "zendesk.get_ticket"
     assert _skip(_prereq_engine(EngineConfig().replace(prereq_rate=0.95))) is None
+
+
+# -- Task 1.15: calibrator censoring (opt-in, docs/decisions/008-tier1-gate.md) --------------------
+
+
+def _cal_spy(eng: Engine, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float]]:
+    """Record every value the calibrator receives: ``("obs", fused)`` / ``("cens", theta)``."""
+    fed: list[tuple[str, float]] = []
+    observe, censored = eng.calibrator.observe, eng.calibrator.observe_censored
+
+    def spy_obs(agent: str, fused: float, outcome: Outcome) -> None:
+        fed.append(("obs", fused))
+        observe(agent, fused, outcome)
+
+    def spy_cens(agent: str, theta: float) -> None:
+        fed.append(("cens", theta))
+        censored(agent, theta)
+
+    monkeypatch.setattr(eng.calibrator, "observe", spy_obs)
+    monkeypatch.setattr(eng.calibrator, "observe_censored", spy_cens)
+    return fed
+
+
+def _warm_cfg(cfg: EngineConfig) -> Engine:
+    eng = Engine(cfg)
+    feed(eng, amounts(250))
+    return eng
+
+
+def _n_scored(eng: Engine) -> int:
+    rec = eng.store.get(key_cal("a1"))
+    assert rec is not None
+    return int(rec.n_scored)  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize("mode", ["none", "drop", "winsorize"])
+def test_cal_censor_leaves_rows_below_threshold_alone(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    eng = _warm_cfg(EngineConfig().replace(cal_censor=mode))
+    fed = _cal_spy(eng, monkeypatch)
+    typical = env({"amount": 36.6, "currency": "usd"}, 251)
+    r = eng.score(typical)
+    assert r.threshold is not None and r.fused_score < r.threshold
+    eng.update(typical, Outcome.ALLOWED)
+    assert fed == [("obs", r.fused_score)]
+
+
+def test_cal_censor_none_learns_rows_the_engine_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _warm_cfg(EngineConfig())
+    fed = _cal_spy(eng, monkeypatch)
+    r = eng.score(ODD)
+    assert r.decision is Decision.BLOCK
+    eng.update(ODD, Outcome.ALLOWED)
+    assert fed == [("obs", r.fused_score)]
+    eng.score(ODD)
+    eng.update(ODD, Outcome.BLOCKED)  # spec: a blocked call reaches no baseline
+    assert len(fed) == 1
+
+
+def test_cal_censor_drop_skips_rows_the_engine_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _warm_cfg(EngineConfig().replace(cal_censor="drop"))
+    fed = _cal_spy(eng, monkeypatch)
+    n0, mag0 = _n_scored(eng), eng.store.get(key_mag("a1", TOOL, "amount"))
+    n_mag0 = mag0.n  # type: ignore[union-attr]
+    assert eng.score(ODD).decision is Decision.BLOCK
+    eng.update(ODD, Outcome.ALLOWED)  # allowed anyway (allow-all replay): detectors still learn
+    assert fed == [] and _n_scored(eng) == n0
+    assert eng.store.get(key_mag("a1", TOOL, "amount")).n == n_mag0 + 1  # type: ignore[union-attr]
+
+
+def test_cal_censor_winsorize_feeds_the_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
+    eng = _warm_cfg(EngineConfig().replace(cal_censor="winsorize"))
+    fed = _cal_spy(eng, monkeypatch)
+    r = eng.score(ODD)
+    assert r.threshold is not None and r.fused_score > r.threshold
+    eng.update(ODD, Outcome.ALLOWED)
+    assert fed == [("obs", r.threshold)]  # the tail mass is kept, its value is not
+
+
+def test_cal_censor_winsorize_counts_blocked_mass_only_in_the_calibrator(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    eng = _warm_cfg(EngineConfig().replace(cal_censor="winsorize"))
+    ref = _warm_cfg(EngineConfig().replace(cal_censor="winsorize"))
+    fed = _cal_spy(eng, monkeypatch)
+    n0 = _n_scored(eng)
+    r = eng.score(ODD)
+    eng.update(ODD, Outcome.BLOCKED)
+    assert fed == [("cens", r.threshold)] and _n_scored(eng) == n0 + 1
+    eng.update(ODD, Outcome.DENIED)  # a human denial is not the engine's block: nothing
+    assert len(fed) == 1
+
+    # every non-calibrator record is untouched by the blocked call
+    def non_cal(e: Engine, name: str) -> list[bytes]:
+        lines = dump(e, tmp_path / name).splitlines()
+        return [ln for ln in lines if f'"key":"{key_cal("a1")}"'.encode() not in ln]
+
+    assert non_cal(eng, "a.jsonl") == non_cal(ref, "b.jsonl")
+    assert dump(eng, tmp_path / "a.jsonl") != dump(ref, tmp_path / "b.jsonl")
+
+
+def test_cal_censor_uses_the_threshold_that_decided(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Interleaved: another envelope's update moves the threshold between score and update."""
+    eng = _warm_cfg(EngineConfig().replace(cal_censor="winsorize"))
+    r = eng.score(ODD)
+    for i in range(30):  # other envelopes move the calibrator between ODD's score and update
+        eng.update(env({"amount": 36.6, "currency": "usd"}, 260 + i), Outcome.ALLOWED)
+    assert eng.calibrator.threshold("a1") != r.threshold
+    fed = _cal_spy(eng, monkeypatch)
+    eng.update(ODD, Outcome.ALLOWED)
+    assert fed == [("obs", r.threshold)]
+
+
+def test_unknown_cal_censor_rejected() -> None:
+    with pytest.raises(ValueError, match="cal_censor"):
+        Engine(EngineConfig().replace(cal_censor="clip"))
+
+
+def test_cal_censor_starts_only_once_the_calibrator_has_min_n_scores(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shadow-then-censor: below ``cal_censor_min_n`` scores the calibrator learns like the spec."""
+    cfg = EngineConfig().replace(cal_censor="winsorize", cal_censor_min_n=300)
+    eng = _warm_cfg(cfg)  # 250 scores so far
+    fed = _cal_spy(eng, monkeypatch)
+    r = eng.score(ODD)
+    assert r.decision is Decision.BLOCK
+    eng.update(ODD, Outcome.ALLOWED)
+    assert fed == [("obs", r.fused_score)]
+    eng.score(ODD)
+    eng.update(ODD, Outcome.BLOCKED)  # spec behaviour while in shadow: nothing learned
+    assert len(fed) == 1
+    for i in range(60):
+        eng.update(env({"amount": 36.6, "currency": "usd"}, 300 + i), Outcome.ALLOWED)
+    assert _n_scored(eng) >= 300
+    fed.clear()
+    r = eng.score(ODD)
+    eng.update(ODD, Outcome.ALLOWED)
+    assert fed == [("obs", r.threshold)]
+
+
+@pytest.mark.parametrize("outcome", [Outcome.BLOCKED, Outcome.DENIED])
+def test_vel_count_attempts_counts_refused_calls_in_the_window(outcome: Outcome) -> None:
+    def window(eng: Engine, e: ActionEnvelope) -> int:
+        (vel,) = [s for s in eng.score(e).per_detector if s.detector == "velocity"]
+        v = vel.evidence["window_count"]
+        assert isinstance(v, int)
+        return v
+
+    on = _warm_cfg(EngineConfig().replace(vel_count_attempts=True))
+    off = _warm_cfg(EngineConfig())
+    for eng in (on, off):
+        for k in range(5):
+            eng.update(env({"amount": 1e6, "currency": "usd"}, 250, session=f"r{k}"), outcome)
+    probe = env({"amount": 36.6, "currency": "usd"}, 250, session="p")
+    assert window(on, probe) == window(off, probe) + 5

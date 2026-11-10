@@ -5,10 +5,12 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Literal
 
-__all__ = ["Direction", "EngineConfig", "PriorsMode"]
+__all__ = ["CAL_CENSOR_MODES", "CalCensor", "Direction", "EngineConfig", "PriorsMode"]
 
 PriorsMode = Literal["all", "money_count_only", "off"]
 Direction = Literal["up", "both"]
+CalCensor = Literal["none", "drop", "winsorize"]
+CAL_CENSOR_MODES: tuple[CalCensor, ...] = ("none", "drop", "winsorize")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -43,6 +45,9 @@ class EngineConfig:
     vel_eps: float = 0.25
     vel_cold_n: int = 30
     vel_sum_signal: bool = True  # money-sum windows next to the call count (Task 1.14 sweep)
+    # Task 1.15 switch (decision 008): refused (blocked / denied) calls still count as attempts in
+    # the short window's scored count; they never enter the history baseline. Default off = spec.
+    vel_count_attempts: bool = False
     # Novelty (§6.5)
     novelty_lru: int = 10_000
     novelty_full_n: int = 200
@@ -53,6 +58,9 @@ class EngineConfig:
     trans_smoothing: float = 0.5
     prereq_min_n: int = 50
     prereq_rate: float = 0.90  # docs/decisions/003-prereq-threshold.md (spec: 0.95)
+    # Task 1.15 switch (docs/decisions/008-tier1-gate.md): ``s_prereq`` = the mined rate of the
+    # missing prerequisite instead of 1.0. Default off = spec §6.6(b).
+    seq_prereq_graded: bool = False
     # Id flow (§6.7-6.8)
     flow_min_obs: int = 20
     # Fusion (§6.11)
@@ -64,6 +72,13 @@ class EngineConfig:
     cal_theta0: float = 0.6
     cal_blend_n: int = 500
     cal_delta: float = 0.1
+    # Task 1.15 switch (docs/decisions/008-tier1-gate.md): what the calibrator learns from a call
+    # the engine itself blocked (fused >= the threshold that scored it). "none" (spec §6.8): the
+    # fused score of every allowed call; "drop": nothing; "winsorize": the threshold instead of the
+    # fused score, also when the call was BLOCKED (tail mass kept, value not).
+    cal_censor: CalCensor = "none"
+    # ... applied only once the agent's calibrator holds this many scores (shadow, then censor).
+    cal_censor_min_n: int = 0
 
     def replace(self, **kw: Any) -> EngineConfig:
         """Return a copy with the given fields changed (``TypeError`` on unknown names)."""
