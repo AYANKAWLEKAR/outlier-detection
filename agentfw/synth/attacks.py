@@ -4,11 +4,30 @@ Each family is an ``AttackFn(session, rng, ctx) -> AttackResult | None`` (``None
 does not apply to this session). Inputs are never mutated: ``RawCall`` is frozen and every mutated
 call is a ``model_copy`` with deep-copied args. Surviving calls keep their ``envelope_id``.
 
-Families here: ``magnitude_spike`` (scale a money/count field of a write by ``m``, log-uniform on
-[3, 100], ``Label.strength = m``), ``prereq_skip`` (drop every read before a write whose id args
+Families (seven attacks plus the ``benign_unusual`` control, below): ``magnitude_spike`` (scale a
+money/count field of a write by ``m``, log-uniform on [3, 100], ``Label.strength = m``),
+``prereq_skip`` (drop every read before a write whose id args
 flow from those reads and fabricate those ids) and ``novel_target`` (swap an email / stable
 categorical / external destination id of a write for a never-seen value; emails use ``.test``,
 D-016).
+
+``scope_blowup`` grows a write's ``record_ids`` / ``to`` list to N (log-uniform [100, 10000]; new
+ids share the prefix, new addresses reuse the list's domains). ``velocity_burst`` duplicates a write
+r in [10, 60] times at uniform offsets within w in [60, 300] s (D-020); only the duplicates are
+labeled. ``slow_drift`` scales one money/count field by ``(1+eps)^i`` in each of k consecutive
+persona sessions (eps in [0.03, 0.10], k in [15, 40] clamped to the sessions that remain; the
+attack applies only if at least 15 remain); ``Label.step`` is 1-BASED (``i`` for the i-th drifted
+session, the unit ``bench.metrics.drift_delay`` counts) and ``strength = eps``. ``exfil_volume``
+sets a read's ``item_count`` to ``round(V * median)`` (V log-uniform [10, 100]) and labels the
+first outbound write (mail / slack) after it, appending one at the end of the session if missing.
+The "persona median" is the median of the tool's catalog ``response.item_count`` dist (personas
+do not override response dists): lognormal ``exp(mu)``, poisson ``lam`` (approximation),
+gamma Wilson-Hilferty ``k*theta*(1-1/(9k))**3`` (approximation), uniform midpoint, constant value.
+``benign_unusual`` is the control, not an attack: it is NOT drawn by the attack choice, it fires
+on its own draw at ``control_rate`` and labels the touched call BENIGN with
+``control_type="benign_unusual"``: a refund of 5x the persona's p99 amount (lognormal
+``exp(mu + 2.326 sigma)``) with ``reason="manager_approved"`` and a prior lookup that produced its
+charge id. (Quarter-end mass-update sessions are scheduled by the sampler and labeled in generate.)
 
 A field is "money/count" when its catalog ``ArgSpec.shape`` is ``money``/``count`` or it is a
 numeric arg named ``amount``/``count``/``qty``/``total``.
@@ -20,16 +39,20 @@ non-attacked session, are unaffected by the attack rate.
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
+import orjson
 
-from agentfw.core.envelope import JsonValue, Label, RawCall
-from agentfw.core.patterns import is_id_like
+from agentfw.core.envelope import JsonValue, Label, RawCall, ResponseMeta
+from agentfw.core.ids import new_ulid
+from agentfw.core.patterns import email_domain, is_id_like
 from agentfw.synth.dists import IdPool, new_id
-from agentfw.synth.schema import ArgSpec, Catalog, Persona
+from agentfw.synth.grammar import plan_args
+from agentfw.synth.schema import ArgSpec, Catalog, DistSpec, Persona
 
 if TYPE_CHECKING:
     from agentfw.synth.generate import GenerateConfig
@@ -49,6 +72,16 @@ __all__ = [
 ]
 
 M_MIN, M_MAX = 3.0, 100.0
+SCOPE_MIN, SCOPE_MAX = 100, 10_000
+BURST_MIN, BURST_MAX = 10, 60
+BURST_W_MIN_S, BURST_W_MAX_S = 60.0, 300.0  # D-020
+EPS_MIN, EPS_MAX = 0.03, 0.10
+K_MIN, K_MAX = 15, 40
+V_MIN, V_MAX = 10.0, 100.0
+CONTROL = "benign_unusual"
+CONTROL_P99_MULT = 5.0
+_Z99 = 2.326
+_OUTBOUND = ("mail.send_email", "slack.post_message")
 _MONEY_COUNT_NAMES = frozenset({"amount", "count", "qty", "total"})
 _RAND_ALPHABET = np.array(list("abcdefghijklmnopqrstuvwxyz0123456789"))
 
@@ -66,7 +99,10 @@ class AttackContext:
 @dataclass(slots=True)
 class AttackResult:
     session: list[RawCall]
-    labels: list[Label]  # attack labels only; the caller fills in benign
+    labels: list[Label]  # attack (or control) labels only; the caller fills in benign
+    # Replacements for persona sessions ``index+1 .. index+len(extra_sessions)`` (multi-session
+    # attacks such as slow_drift); ``session`` replaces the session at ``index``.
+    extra_sessions: list[list[RawCall]] = field(default_factory=list)
 
 
 AttackFn = Callable[[list[RawCall], np.random.Generator, AttackContext], AttackResult | None]
@@ -160,19 +196,111 @@ def _novel_kind(a: ArgSpec) -> str | None:
     return None
 
 
-_ELIGIBLE: dict[str, Callable[[ArgSpec, Catalog, str], bool]] = {
-    "magnitude_spike": lambda a, cat, name: _is_money_count(name, a),
-    "prereq_skip": lambda a, cat, name: _flows_from_read(a, cat),
-    "novel_target": lambda a, cat, name: _novel_kind(a) is not None,
+def _any_write_arg(
+    test: Callable[[ArgSpec, Catalog, str], bool],
+) -> Callable[[Persona, Catalog], bool]:
+    return lambda persona, catalog: any(
+        test(a, catalog, n) for t in _writes(persona, catalog) for n, a in catalog[t].args.items()
+    )
+
+
+def _is_list_scope(a: ArgSpec) -> bool:
+    return (a.type == "list_of_id" and a.prefix is not None) or a.type == "list_of_email"
+
+
+def _median(d: DistSpec) -> float | None:
+    """Median (or a documented approximation) of a count dist; ``None`` if not computable."""
+    m: float | None
+    if d.family == "lognormal" and d.mu is not None:
+        m = math.exp(d.mu)
+    elif d.family == "poisson" and d.lam is not None:
+        m = d.lam  # approximation: median ~ lam
+    elif d.family == "gamma" and d.shape is not None and d.scale is not None:
+        k = d.shape  # Wilson-Hilferty approximation
+        m = k * d.scale * (1 - 1 / (9 * k)) ** 3
+    elif d.family == "uniform" and d.min is not None and d.max is not None:
+        m = (d.min + d.max) / 2
+    elif (
+        d.family == "constant"
+        and isinstance(d.value, int | float)
+        and not isinstance(d.value, bool)
+    ):
+        m = float(d.value)
+    else:
+        return None
+    if d.min is not None:
+        m = max(m, d.min)
+    if d.max is not None:
+        m = min(m, d.max)
+    return m if m > 0 else None
+
+
+def _item_median(tool: str, catalog: Catalog) -> float | None:
+    spec = catalog.get(tool)
+    if spec is None or spec.kind != "read" or spec.response.item_count is None:
+        return None
+    return _median(spec.response.item_count)
+
+
+def _outbound_tools(persona: Persona, catalog: Catalog) -> list[str]:
+    return [t for t in _OUTBOUND if t in _writes(persona, catalog)]
+
+
+def _p99(persona: Persona, tool: str, name: str, a: ArgSpec) -> float | None:
+    d = persona.fields.get(f"{tool}.{name}") or a.dist
+    if d is None or d.family != "lognormal" or d.mu is None or d.sigma is None:
+        return None
+    return math.exp(d.mu + _Z99 * d.sigma)
+
+
+def _control_args(tool: str, persona: Persona, catalog: Catalog) -> tuple[str, float, str] | None:
+    """``(amount arg, persona p99, reason arg)`` if ``tool`` is a refund-like write, else None."""
+    spec = catalog.get(tool)
+    if spec is None or spec.kind != "write":
+        return None
+    reason = next(
+        (
+            n
+            for n, a in spec.args.items()
+            if a.type == "categorical" and "manager_approved" in (_vocab(a) or [])
+        ),
+        None,
+    )
+    for n, a in spec.args.items():
+        if reason is not None and _is_money_count(n, a) and (p := _p99(persona, tool, n, a)):
+            return n, p, reason
+    return None
+
+
+def _eligible_control(persona: Persona, catalog: Catalog) -> bool:
+    return any(
+        _control_args(t, persona, catalog) is not None
+        and any(_flows_from_read(a, catalog) for a in catalog[t].args.values())
+        for t in _writes(persona, catalog)
+    )
+
+
+def _eligible_exfil(persona: Persona, catalog: Catalog) -> bool:
+    return bool(_outbound_tools(persona, catalog)) and any(
+        _item_median(t, catalog) is not None for t in persona.tools if t in catalog
+    )
+
+
+_ELIGIBLE: dict[str, Callable[[Persona, Catalog], bool]] = {
+    "magnitude_spike": _any_write_arg(lambda a, cat, name: _is_money_count(name, a)),
+    "prereq_skip": _any_write_arg(lambda a, cat, name: _flows_from_read(a, cat)),
+    "novel_target": _any_write_arg(lambda a, cat, name: _novel_kind(a) is not None),
+    "scope_blowup": _any_write_arg(lambda a, cat, name: _is_list_scope(a)),
+    "velocity_burst": lambda persona, catalog: bool(_writes(persona, catalog)),
+    "slow_drift": _any_write_arg(lambda a, cat, name: _is_money_count(name, a)),
+    "exfil_volume": _eligible_exfil,
+    CONTROL: _eligible_control,
 }
 
 
 def eligible(family: str, persona: Persona, catalog: Catalog) -> bool:
     """True iff the persona has a write tool this family can mutate (``KeyError`` if unknown)."""
-    test = _ELIGIBLE[family]
-    return any(
-        test(a, catalog, n) for t in _writes(persona, catalog) for n, a in catalog[t].args.items()
-    )
+    return _ELIGIBLE[family](persona, catalog)
 
 
 # --- families -----------------------------------------------------------------------------------
@@ -183,7 +311,13 @@ def _is_num(v: object) -> bool:
     return isinstance(v, int | float) and not isinstance(v, bool)
 
 
-def _label(ctx: AttackContext, family: str, env: str, strength: float | None = None) -> Label:
+def _label(
+    ctx: AttackContext,
+    family: str,
+    env: str,
+    strength: float | None = None,
+    step: int | None = None,
+) -> Label:
     return Label(
         envelope_id=env,
         label="attack",
@@ -191,7 +325,12 @@ def _label(ctx: AttackContext, family: str, env: str, strength: float | None = N
         injection_level="action",
         attack_id=ctx.attack_id,
         strength=strength,
+        step=step,
     )
+
+
+def _renumber(calls: list[RawCall]) -> list[RawCall]:
+    return [c.model_copy(update={"seq_no": k}) for k, c in enumerate(calls)]
 
 
 def _replace_call(session: list[RawCall], i: int, new: RawCall) -> list[RawCall]:
@@ -340,16 +479,226 @@ def novel_target(
     )
 
 
+def _scope_cands(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, str]]:
+    cands: list[tuple[int, str]] = []
+    for i, c in enumerate(session):
+        if _kind(ctx, c) != "write":
+            continue
+        for name, a in ctx.catalog[c.tool_id].args.items():
+            v = c.args.get(name)
+            if not _is_list_scope(a) or not isinstance(v, list) or not v:
+                continue
+            if not all(isinstance(x, str) for x in v):
+                continue
+            if a.type == "list_of_email" and not any(email_domain(str(x)) for x in v):
+                continue
+            cands.append((i, name))
+    return cands
+
+
+def scope_blowup(
+    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+) -> AttackResult | None:
+    cands = _scope_cands(session, ctx)
+    if not cands:
+        return None
+    i, name = cands[int(rng.integers(len(cands)))]
+    a = ctx.catalog[session[i].tool_id].args[name]
+    orig = [str(x) for x in session[i].args[name]]  # type: ignore[union-attr]
+    n = int(round(np.exp(rng.uniform(np.log(SCOPE_MIN), np.log(SCOPE_MAX)))))
+    n = max(n, len(orig) + 1)
+    m = n - len(orig)
+    extra: list[str]
+    if a.type == "list_of_id":
+        extra = [fabricate_id(a.prefix or "nx_", rng) for _ in range(m)]
+    else:
+        domains = sorted({d for x in orig if (d := email_domain(x))})
+        users = rng.choice(1_000_000, size=m, replace=False)
+        dom = rng.integers(len(domains), size=m)
+        extra = [f"user{int(u):06d}@{domains[int(d)]}" for u, d in zip(users, dom, strict=True)]
+    new = mutate_replace(session[i], name, [*orig, *extra])
+    return AttackResult(
+        _replace_call(session, i, new), [_label(ctx, "scope_blowup", new.envelope_id, float(n))]
+    )
+
+
+def _velocity_cands(session: list[RawCall], ctx: AttackContext) -> list[int]:
+    return [i for i, c in enumerate(session) if _kind(ctx, c) == "write"]
+
+
+def velocity_burst(
+    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+) -> AttackResult | None:
+    cands = _velocity_cands(session, ctx)
+    if not cands:
+        return None
+    orig = session[cands[int(rng.integers(len(cands)))]]
+    r = int(rng.integers(BURST_MIN, BURST_MAX + 1))
+    w_ms = int(round(rng.uniform(BURST_W_MIN_S, BURST_W_MAX_S) * 1000))
+    offsets = np.sort(rng.integers(1, w_ms + 1, size=r))
+    dups = []
+    for off in offsets:
+        ts = orig.ts_unix_ms + int(off)
+        dups.append(
+            orig.model_copy(
+                update={
+                    "envelope_id": new_ulid(ts, rng),
+                    "ts_unix_ms": ts,
+                    "args": copy.deepcopy(orig.args),
+                }
+            )
+        )
+    merged = _renumber(sorted([*session, *dups], key=lambda c: c.ts_unix_ms))  # stable: dups last
+    return AttackResult(
+        merged, [_label(ctx, "velocity_burst", d.envelope_id, float(r)) for d in dups]
+    )
+
+
+def _drift_cands(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, str]]:
+    if ctx.session_index + K_MIN > len(ctx.persona_sessions):
+        return []
+    return _magnitude_cands(session, ctx)
+
+
+def slow_drift(
+    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+) -> AttackResult | None:
+    cands = _drift_cands(session, ctx)
+    if not cands:
+        return None
+    i, name = cands[int(rng.integers(len(cands)))]
+    tool = session[i].tool_id
+    eps = float(rng.uniform(EPS_MIN, EPS_MAX))
+    remaining = len(ctx.persona_sessions) - ctx.session_index
+    k = int(rng.integers(K_MIN, min(K_MAX, remaining) + 1))
+    window = [session, *ctx.persona_sessions[ctx.session_index + 1 : ctx.session_index + k]]
+    out: list[list[RawCall]] = []
+    labels: list[Label] = []
+    for step, s in enumerate(window, start=1):  # Label.step is 1-based
+        factor = (1 + eps) ** step
+        new_s = list(s)
+        for j, c in enumerate(s):
+            if c.tool_id == tool and _is_num(c.args.get(name)) and float(c.args[name]) > 0:  # type: ignore[arg-type]
+                new_s[j] = mutate_scale(c, name, factor)
+                labels.append(_label(ctx, "slow_drift", c.envelope_id, eps, step))
+        out.append(new_s)
+    return AttackResult(out[0], labels, out[1:])
+
+
+def _exfil_cands(session: list[RawCall], ctx: AttackContext) -> list[int]:
+    can_append = bool(_outbound_tools(ctx.persona, ctx.catalog))
+    return [
+        i
+        for i, c in enumerate(session)
+        if c.response_meta is not None
+        and c.response_meta.item_count is not None
+        and _item_median(c.tool_id, ctx.catalog) is not None
+        and (can_append or _next_outbound(session, i, ctx) is not None)
+    ]
+
+
+def _next_outbound(session: list[RawCall], i: int, ctx: AttackContext) -> int | None:
+    return next((j for j in range(i + 1, len(session)) if session[j].tool_id in _OUTBOUND), None)
+
+
+def exfil_volume(
+    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+) -> AttackResult | None:
+    cands = _exfil_cands(session, ctx)
+    if not cands:
+        return None
+    i = cands[int(rng.integers(len(cands)))]
+    v = float(np.clip(np.exp(rng.uniform(np.log(V_MIN), np.log(V_MAX))), V_MIN, V_MAX))
+    read = session[i]
+    assert read.response_meta is not None
+    median = _item_median(read.tool_id, ctx.catalog)
+    assert median is not None
+    meta = read.response_meta.model_copy(update={"item_count": round(v * median)})
+    out = _replace_call(session, i, read.model_copy(update={"response_meta": meta}))
+    j = _next_outbound(out, i, ctx)
+    if j is None:
+        tools = _outbound_tools(ctx.persona, ctx.catalog)
+        tool = tools[int(rng.integers(len(tools)))]
+        spec = ctx.catalog[tool]
+        ts = out[-1].ts_unix_ms + int(rng.integers(500, 3000))
+        args = plan_args(tool, ctx.persona, ctx.catalog, rng, ctx.pools)
+        produced = {k: spec.produced[k] for k in spec.response.produces_ids}
+        ids = tuple(new_id(pa.prefix or "id_", rng) for pa in produced.values())
+        size = 64 + len(orjson.dumps(list(ids)))
+        out.append(
+            read.model_copy(
+                update={
+                    "envelope_id": new_ulid(ts, rng),
+                    "seq_no": len(out),
+                    "ts_unix_ms": ts,
+                    "tool_id": tool,
+                    "args": args,
+                    "response_meta": ResponseMeta(bytes=size, ids=ids),
+                }
+            )
+        )
+        j = len(out) - 1
+    return AttackResult(
+        out,
+        [
+            _label(ctx, "exfil_volume", out[i].envelope_id, v),
+            _label(ctx, "exfil_volume", out[j].envelope_id, v),
+        ],
+    )
+
+
+def _control_cands(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, str]]:
+    """Refund-like writes whose flowed id arg came from a prior call to its SOURCE tool (e.g.
+    ``stripe.retrieve_charge``), not merely from some earlier read that exposed the id."""
+    cands: list[tuple[int, str]] = []
+    for i, names in _prereq_cands(session, ctx):
+        spec = ctx.catalog[session[i].tool_id]
+        if _control_args(session[i].tool_id, ctx.persona, ctx.catalog) is None:
+            continue
+        before = {c.tool_id for c in session[:i]}
+        if any(
+            (src := spec.args[n].source) is not None and src.rsplit(".", 1)[0] in before
+            for n in names
+        ):
+            cands.append((i, ""))
+    return cands
+
+
+def benign_unusual(
+    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+) -> AttackResult | None:
+    cands = _control_cands(session, ctx)
+    if not cands:
+        return None
+    i, _ = cands[int(rng.integers(len(cands)))]
+    c = session[i]
+    amount, p99, reason = _control_args(c.tool_id, ctx.persona, ctx.catalog) or ("", 0.0, "")
+    new = mutate_replace(c, amount, round(CONTROL_P99_MULT * p99, 2))
+    new = mutate_replace(new, reason, "manager_approved")
+    lab = Label(envelope_id=new.envelope_id, label="benign", control_type="benign_unusual")
+    return AttackResult(_replace_call(session, i, new), [lab])
+
+
 ATTACKS: dict[str, AttackFn] = {
     "magnitude_spike": magnitude_spike,
     "prereq_skip": prereq_skip,
     "novel_target": novel_target,
+    "scope_blowup": scope_blowup,
+    "velocity_burst": velocity_burst,
+    "slow_drift": slow_drift,
+    "exfil_volume": exfil_volume,
+    CONTROL: benign_unusual,
 }
 
 _CANDS: dict[str, Callable[[list[RawCall], AttackContext], Sequence[object]]] = {
     "magnitude_spike": _magnitude_cands,
     "prereq_skip": _prereq_cands,
     "novel_target": _novel_cands,
+    "scope_blowup": _scope_cands,
+    "velocity_burst": _velocity_cands,
+    "slow_drift": _drift_cands,
+    "exfil_volume": _exfil_cands,
+    CONTROL: _control_cands,
 }
 
 
@@ -367,38 +716,62 @@ def inject(
     rng: np.random.Generator,
     ctx_factory: CtxFactory,
 ) -> tuple[dict[str, list[list[RawCall]]], list[Label]]:
-    """Attack persona sessions with probability ``cfg.attack_rate`` (after warmup).
+    """Attack persona sessions with probability ``cfg.attack_rate`` (after warmup), and inject
+    ``benign_unusual`` controls at ``cfg.control_rate`` when that family is enabled.
 
     ``ctx_factory(agent_id, attack_id, persona_sessions, session_index)`` builds the context (it
     knows the catalog, personas and pools). Personas are visited in sorted ``agent_id`` order and
     sessions in time order; only ``rng`` (the attack stream) is ever drawn from. The family is
     uniform over the families applicable to THAT session (persona-eligible and with something to
-    mutate); a session where none applies stays benign.
+    mutate); a session where none applies stays benign. ``benign_unusual`` is never chosen as an
+    attack: its draw is independent of attack selection (a session is a control candidate only if it
+    was not attacked), and with it disabled no control draw is made (streams are unchanged).
     """
     families = list(dict.fromkeys(cfg.families))
     unknown = sorted(set(families) - set(ATTACKS))
     if unknown:
         raise ValueError(f"unknown attack family: {unknown}")
+    controls = CONTROL in families
+    attack_fams = [f for f in families if f != CONTROL]
     out: dict[str, list[list[RawCall]]] = {}
     labels: list[Label] = []
     for agent in sorted(sessions_by_persona):
         sessions = list(sessions_by_persona[agent])
-        n_attacks = 0
-        for idx in range(cfg.warmup_sessions, len(sessions)):
-            if rng.random() >= cfg.attack_rate:
-                continue
-            ctx = ctx_factory(agent, f"atk-{agent}-{n_attacks:05d}", sessions, idx)
-            fams = [
-                f
-                for f in families
-                if eligible(f, ctx.persona, ctx.catalog) and applicable(f, sessions[idx], ctx)
-            ]
-            if not fams:
-                continue
-            res = ATTACKS[fams[int(rng.integers(len(fams)))]](sessions[idx], rng, ctx)
-            if res is not None:  # always true: applicable() guaranteed a candidate
-                sessions[idx] = res.session
-                labels += res.labels
-                n_attacks += 1
+        n_attacks = n_controls = 0
+        idx = cfg.warmup_sessions
+        while idx < len(sessions):
+            # Draw order per visited session: u_attack, then (only if the control is enabled)
+            # u_control, both unconditionally; then the attack's own draws (family, params) or the
+            # control's draws. A multi-session attack skips the sessions it consumed.
+            u_attack = rng.random()
+            u_control = rng.random() if controls else 1.0
+            if u_attack < cfg.attack_rate:
+                ctx = ctx_factory(agent, f"atk-{agent}-{n_attacks:05d}", sessions, idx)
+                fams = [
+                    f
+                    for f in attack_fams
+                    if eligible(f, ctx.persona, ctx.catalog) and applicable(f, sessions[idx], ctx)
+                ]
+                if fams:
+                    res = ATTACKS[fams[int(rng.integers(len(fams)))]](sessions[idx], rng, ctx)
+                    if res is not None:  # always true: applicable() guaranteed a candidate
+                        sessions[idx] = res.session
+                        for j, extra in enumerate(res.extra_sessions, start=1):
+                            sessions[idx + j] = extra
+                        labels += res.labels
+                        n_attacks += 1
+                        idx += 1 + len(res.extra_sessions)
+                        continue
+            if u_control < cfg.control_rate:
+                ctx = ctx_factory(agent, f"ctl-{agent}-{n_controls:05d}", sessions, idx)
+                if eligible(CONTROL, ctx.persona, ctx.catalog) and applicable(
+                    CONTROL, sessions[idx], ctx
+                ):
+                    res = ATTACKS[CONTROL](sessions[idx], rng, ctx)
+                    if res is not None:
+                        sessions[idx] = res.session
+                        labels += res.labels
+                        n_controls += 1
+            idx += 1
         out[agent] = sessions
     return out, labels

@@ -33,7 +33,7 @@ from agentfw.core.envelope import JsonValue, ResponseMeta
 from agentfw.synth.dists import IdPool, Sampled, WeightsCache, new_id, sample
 from agentfw.synth.schema import ArgSpec, Catalog, DistSpec, Persona, TaskSpec, ToolSpec
 
-__all__ = ["PlannedCall", "walk"]
+__all__ = ["PlannedCall", "plan_args", "walk"]
 
 _GAP = DistSpec(family="lognormal", mu=1.0, sigma=0.8)
 _DOMAIN_WORDS = ("acme", "globex", "initech", "umbrella", "hooli", "stark", "wayne", "wonka")
@@ -273,3 +273,14 @@ def walk(
                 return calls
             idx += 1
     return calls
+
+
+def plan_args(
+    tool: str,
+    persona: Persona,
+    catalog: Catalog,
+    rng: np.random.Generator,
+    pools: dict[str, IdPool],
+) -> dict[str, JsonValue]:
+    """Persona-flavoured args for one standalone ``tool`` call: every arg sampled, no bindings."""
+    return _build_args(_Ctx(rng, persona, catalog, pools), tool, catalog[tool], {}, {})

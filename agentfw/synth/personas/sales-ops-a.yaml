@@ -13,6 +13,7 @@ tasks:
   - {name: reprice_opportunity, weight: 0.3}
   - {name: bulk_stage_update, weight: 0.15}
   - {name: log_followup, weight: 0.1}
+  - {name: quarter_end_mass_update, weight: 0.0}  # scheduled on quarter_end_days only
 fields:
   mail.send_email.to.__domain__: {family: zipf, vocab_size: 8, s: 1.5}
   mail.send_email.to.__len__: {family: poisson, lam: 1.5, min: 1}

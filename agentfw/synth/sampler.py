@@ -13,9 +13,19 @@ A walk may return no calls (abandon on a non-emitted first step). Such draws are
 session is emitted, but the draw still happened, so the attempted session count per day keeps the
 configured rate (the emitted count is slightly below it). ``max_sessions`` counts emitted sessions
 and truncates in time order.
+
+Quarter-end scheduling: a persona with ``quarter_end_days`` and a ``quarter_end_mass_update`` entry
+in its task list (weight 0, so it is never drawn from the regular mix) runs that task in a session
+with probability ``QUARTER_END_PROB`` on every simulated day that is a quarter-end day: the UTC
+calendar day-of-month is in ``quarter_end_days`` AND the month is Mar/Jun/Sep/Dec. The extra draw
+happens only on such days, so every other day's stream is untouched. ``sample_persona_tagged``
+also returns the ids of those sessions (the generator labels them ``benign_unusual``).
 """
 
 from __future__ import annotations
+
+import datetime as dt
+from dataclasses import dataclass, field
 
 import numpy as np
 import xxhash
@@ -26,10 +36,34 @@ from agentfw.synth.dists import IdPool, WeightsCache, sample
 from agentfw.synth.grammar import walk
 from agentfw.synth.schema import Catalog, Persona, TaskSpec
 
-__all__ = ["persona_rng", "sample_persona", "stable_hash"]
+__all__ = [
+    "QUARTER_END_PROB",
+    "QUARTER_END_TASK",
+    "SampledPersona",
+    "persona_rng",
+    "sample_persona",
+    "sample_persona_tagged",
+    "stable_hash",
+]
 
 _DAY_MS = 86_400_000
 _HOUR_MS = 3_600_000
+QUARTER_END_TASK = "quarter_end_mass_update"
+QUARTER_END_PROB = 0.5
+_QUARTER_END_MONTHS = (3, 6, 9, 12)
+
+
+@dataclass(slots=True)
+class SampledPersona:
+    sessions: list[list[RawCall]]
+    quarter_end_session_ids: set[str] = field(default_factory=set)
+
+
+def _is_quarter_end_day(persona: Persona, day_ms: int) -> bool:
+    if not persona.quarter_end_days:
+        return False
+    d = dt.datetime.fromtimestamp(day_ms / 1000, dt.UTC)
+    return d.month in _QUARTER_END_MONTHS and d.day in persona.quarter_end_days
 
 
 def stable_hash(s: str) -> int:
@@ -52,25 +86,51 @@ def sample_persona(
     max_sessions: int | None = None,
 ) -> list[list[RawCall]]:
     """Sessions for one persona in time order (each a list of calls with seq_no 0..n-1)."""
+    return sample_persona_tagged(
+        persona,
+        catalog,
+        tasks,
+        days=days,
+        global_seed=global_seed,
+        start_ms=start_ms,
+        max_sessions=max_sessions,
+    ).sessions
+
+
+def sample_persona_tagged(
+    persona: Persona,
+    catalog: Catalog,
+    tasks: dict[str, TaskSpec],
+    *,
+    days: int,
+    global_seed: int,
+    start_ms: int,
+    max_sessions: int | None = None,
+) -> SampledPersona:
+    """``sample_persona`` plus the ids of the scheduled quarter-end sessions."""
+    out = SampledPersona([])
     if max_sessions is not None and max_sessions <= 0:
-        return []
+        return out
     rng = persona_rng(global_seed, persona.agent_id)
     pools = {
         name: IdPool(spec.prefix, spec.size, spec.s, rng)
         for name, spec in sorted(persona.id_pools.items())
     }
     cache: WeightsCache = {}
-    names = [t.name for t in persona.tasks]
-    w = np.array([t.weight for t in persona.tasks], dtype=np.float64)
+    regular = [t for t in persona.tasks if t.weight > 0]
+    names = [t.name for t in regular]
+    w = np.array([t.weight for t in regular], dtype=np.float64)
     probs = w / w.sum()
     lo, hi = persona.working_hours
-    sessions: list[list[RawCall]] = []
+    sessions = out.sessions
+    has_qe = any(t.name == QUARTER_END_TASK for t in persona.tasks)
     for day in range(days):
         day_ms = start_ms + day * _DAY_MS
         n = max(0, round(float(sample(persona.session_rate, rng))))
         starts = np.sort(rng.integers(day_ms + lo * _HOUR_MS, day_ms + hi * _HOUR_MS, size=n))
         for st in starts:
-            task = tasks[names[int(rng.choice(len(names), p=probs))]]
+            qe = has_qe and _is_quarter_end_day(persona, day_ms) and rng.random() < QUARTER_END_PROB
+            task = tasks[QUARTER_END_TASK if qe else names[int(rng.choice(len(names), p=probs))]]
             planned = walk(task, persona, catalog, rng, pools, weights_cache=cache)
             if not planned:
                 continue
@@ -93,6 +153,8 @@ def sample_persona(
                     )
                 )
             sessions.append(calls)
+            if qe:
+                out.quarter_end_session_ids.add(session_id)
             if max_sessions is not None and len(sessions) >= max_sessions:
-                return sessions
-    return sessions
+                return out
+    return out

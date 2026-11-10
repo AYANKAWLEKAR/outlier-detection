@@ -29,7 +29,7 @@ from agentfw.synth.load import (
     load_tasks,
     validate_world,
 )
-from agentfw.synth.sampler import sample_persona, stable_hash
+from agentfw.synth.sampler import sample_persona_tagged, stable_hash
 from agentfw.synth.schema import Catalog, Persona
 
 __all__ = ["GenerateConfig", "Manifest", "generate", "main"]
@@ -74,7 +74,7 @@ def _inject_attacks(
     personas: list[Persona],
     by_persona: dict[str, list[list[RawCall]]],
 ) -> tuple[dict[str, list[list[RawCall]]], dict[str, Label]]:
-    """Mutate benign sessions per ``cfg.families``; returns attack labels by envelope id."""
+    """Mutate benign sessions per ``cfg.families``; returns attack/control labels by envelope id."""
     if not cfg.families:
         return by_persona, {}
     by_id = {p.agent_id: p for p in personas}
@@ -102,8 +102,9 @@ def generate(cfg: GenerateConfig, out_dir: Path) -> Manifest:
     personas = sorted(load_personas(cfg.personas_dir), key=lambda p: p.agent_id)
     validate_world(catalog, personas, tasks)
     by_persona: dict[str, list[list[RawCall]]] = {}
+    quarter_end: set[str] = set()
     for p, cap in zip(personas, _split_cap(cfg.max_sessions, len(personas)), strict=True):
-        by_persona[p.agent_id] = sample_persona(
+        sampled = sample_persona_tagged(
             p,
             catalog,
             tasks,
@@ -112,13 +113,22 @@ def generate(cfg: GenerateConfig, out_dir: Path) -> Manifest:
             start_ms=cfg.start_ms,
             max_sessions=cap,
         )
+        by_persona[p.agent_id] = sampled.sessions
+        quarter_end |= sampled.quarter_end_session_ids
     by_persona, attack_labels = _inject_attacks(cfg, catalog, personas, by_persona)
     sessions = [s for a in sorted(by_persona) for s in by_persona[a]]
     raws = sorted(
         (c for s in sessions for c in s), key=lambda c: (c.ts_unix_ms, c.session_id, c.seq_no)
     )
+    # Precedence per envelope: attack > control (injected, or any call of a quarter-end session)
+    # > benign.
     labels = [
-        attack_labels.get(c.envelope_id) or Label(envelope_id=c.envelope_id, label="benign")
+        attack_labels.get(c.envelope_id)
+        or Label(
+            envelope_id=c.envelope_id,
+            label="benign",
+            control_type="benign_unusual" if c.session_id in quarter_end else None,
+        )
         for c in raws
     ]
     out_dir.mkdir(parents=True, exist_ok=True)
