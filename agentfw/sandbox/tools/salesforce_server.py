@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import re
 import threading
@@ -137,6 +138,16 @@ class FakeSalesforceBackend:
     def ids(self) -> dict[str, str]:
         """{company record key: Salesforce Id}, like `seed_salesforce` returns."""
         return dict(self._ids)
+
+    def snapshot(self) -> tuple[dict[str, dict[str, dict[str, Any]]], dict[str, str], int]:
+        with self._lock:
+            return copy.deepcopy((self._rows, self._ids, self._n_tasks))
+
+    def restore(
+        self, snap: tuple[dict[str, dict[str, dict[str, Any]]], dict[str, str], int]
+    ) -> None:
+        with self._lock:
+            self._rows, self._ids, self._n_tasks = copy.deepcopy(snap)
 
     def _find(self, obj: str, record_id: str) -> dict[str, Any]:
         _check_object(obj)

@@ -78,6 +78,22 @@ class SqliteZendeskBackend:
             "charge_id": row["charge_id"],
         }
 
+    def snapshot(self) -> bytes:
+        """The whole database as bytes (for exact restore after a prompt injection)."""
+        with self._lock:
+            return self._con.serialize()
+
+    def restore(self, snap: bytes) -> None:
+        with self._lock:
+            self._con.deserialize(snap)
+
+    def set_ticket_body(self, ticket_id: str, body: str) -> None:
+        """Overwrite a ticket's body (test/injection hook; not an MCP tool)."""
+        with self._lock:
+            self._row(ticket_id)
+            self._con.execute("UPDATE tickets SET body = ? WHERE key = ?", (body, ticket_id))
+            self._con.commit()
+
     def get_ticket(self, ticket_id: str) -> dict[str, Any]:
         with self._lock:
             ticket = self._ticket(self._row(ticket_id))

@@ -33,6 +33,18 @@ class FakeSlackBackend:
         self._msgs: list[dict[str, Any]] = []
         self._lock = threading.Lock()
 
+    @property
+    def channel_id(self) -> str:
+        return self._channel
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return [dict(m) for m in self._msgs]
+
+    def restore(self, snap: list[dict[str, Any]]) -> None:
+        with self._lock:
+            self._msgs = [dict(m) for m in snap]
+
     def post_message(self, channel: str, text: str) -> dict[str, Any]:
         _check_channel(channel, self._channel)
         with self._lock:
