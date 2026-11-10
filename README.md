@@ -27,6 +27,48 @@ uv run python -m agentfw.sandbox.package validate dataset/v1
 Offline check of the same commands: add `--fake` to the run, and pass lowered `--min-*` values to
 `validate`.
 
+### Benchmark dataset/v1 (Tier-2 exit)
+
+Once `dataset/v1` validates, run every detector on the full by-time test split into
+`results/v1/<name>/`, run `engine` and `llm_judge` on the same stratified 2,000-envelope sample,
+and run the by-agent split into a separate directory (it is a separate table, never averaged with
+by-time):
+
+```
+for d in engine random static_threshold isolation_forest; do
+  uv run python -m agentfw.bench.run --traces dataset/v1 --detector $d --out results/v1/$d
+  uv run python -m agentfw.bench.run --traces dataset/v1 --detector $d --split agent \
+    --out results/v1-agent/$d
+done
+uv run python -m agentfw.bench.run --traces dataset/v1 --detector engine \
+  --sample stratified:2000 --out results/v1/engine-sample
+# live judge model; needs JUDGE_BASE_URL and JUDGE_API_KEY in the environment
+uv run python -m agentfw.bench.run --traces dataset/v1 --detector llm_judge --judge-model <model> \
+  --sample stratified:2000 --out results/v1/llm_judge-sample
+uv run python -m agentfw.bench.leaderboard --label "sandbox dataset v1" \
+  --out docs/leaderboard-v1.md results/v1/*/report.json
+uv run pytest -m slow tests/acceptance/test_tier2_exit.py   # skips while dataset/v1 is absent
+```
+
+## Leaderboard and writeup
+
+[docs/leaderboard.md](docs/leaderboard.md) ranks the engine and the baselines on the **synthetic
+benchmark (SW1)** (seed 0, 20 personas, 90 days, all 8 families), by time and by agent, with
+bootstrap CIs. Regenerate it with `uv run python scripts/build_leaderboard.py` (about 1 h 45 min
+with 4 processes, mostly the 1,000-sample bootstraps and the isolation forest; `--reuse` keeps
+finished runs). [docs/writeup.md](docs/writeup.md) describes the method, the
+datasets, the results with CIs, the failure cases and the limitations.
+
+**Tier-2 exit status: not reached.** The live sandbox dataset v1 has not been built (it needs a
+real LLM and sandbox accounts), so the Tier-2 numbers are not published yet;
+`tests/acceptance/test_tier2_exit.py` skips until it exists. The SW1 leaderboard is a synthetic
+stand-in, not the exit.
+
+## License
+
+No license has been chosen yet. A license must be chosen before this repository or the dataset is
+published.
+
 ## Tier 1 status
 
 **The Tier-1 exit gate is not met** (per-family attack recall ≥ 0.90 for the targeted detector).
