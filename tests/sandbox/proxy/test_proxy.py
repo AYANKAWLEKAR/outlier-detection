@@ -13,11 +13,13 @@ import pytest
 from mcp import Client
 from mcp.types import CallToolResult, TextContent
 
+from agentfw.bench.dataset import load_traces
 from agentfw.core.engine import Engine
 from agentfw.core.envelope import (
     ActionEnvelope,
     Decision,
     DetectorResult,
+    DetectorScore,
     Label,
     Outcome,
     RawCall,
@@ -292,6 +294,30 @@ class BadMutator(RefundMutator):
         return m
 
 
+class RaisingMutator:
+    def mutate(self, raw: RawCall, history: Sequence[RawCall]) -> MutationResult | None:
+        if raw.tool_id == "stripe.create_refund":
+            raise RuntimeError("mutator bug")
+        return None
+
+
+async def test_raising_mutator_fails_closed(caplog: pytest.LogCaptureFixture) -> None:
+    async with make_proxy(mutator=RaisingMutator()) as (proxy, sink, spies):
+        with caplog.at_level(logging.ERROR, logger="agentfw.sandbox.proxy_py.proxy"):
+            res = await proxy.call_tool(
+                "stripe.create_refund", {"charge_id": CHARGE_ID, "amount": 1.0, "reason": "x"}
+            )
+        assert res.is_error and "mutator" in _text(res)
+        assert spies["stripe"].forwarded == []
+        assert len(sink.calls) == 1 and sink.labels == []
+        call = sink.calls[0]
+        assert call.tool_id == "stripe.create_refund" and call.args["amount"] == 1.0
+        assert call.response_meta.error is True
+        assert not (await proxy.call_tool("flaky.ok", {})).is_error
+        assert [c.seq_no for c in sink.calls] == [0, 1]
+    assert any("mutator" in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.parametrize("bad_extra", [False, True])
 async def test_invalid_mutator_output_is_error_not_a_bad_line(bad_extra: bool) -> None:
     async with make_proxy(mutator=BadMutator(bad_extra=bad_extra)) as (proxy, sink, spies):
@@ -430,6 +456,42 @@ async def test_shadow_failure_never_blocks() -> None:
         assert not res.is_error
         assert spies["zendesk"].forwarded and len(sink.calls) == 1
         assert sink.verdicts == []
+
+
+class UnserializableEvidenceDetector:
+    def reset(self) -> None:
+        pass
+
+    def score(self, e: ActionEnvelope) -> DetectorResult:
+        return DetectorResult(
+            fused_score=0.5,
+            per_detector=(DetectorScore("novelty", "x", 0.5, {"odd": object()}),),
+            reasons=(),
+            latency_us=1.0,
+        )
+
+    def update(self, e: ActionEnvelope, outcome: Outcome) -> None:
+        pass
+
+    def state_bytes(self) -> int:
+        return 0
+
+
+async def test_unwritable_shadow_verdict_never_blocks(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    sink = JsonlSink(tmp_path)
+    shadow = UnserializableEvidenceDetector()
+    async with make_proxy(sink=sink, shadow=shadow) as (proxy, _, spies):
+        with caplog.at_level(logging.ERROR, logger="agentfw.sandbox.proxy_py.proxy"):
+            res = await proxy.call_tool("zendesk.get_ticket", {"ticket_id": TICKET})
+            assert not res.is_error
+            assert not (await proxy.call_tool("flaky.ok", {})).is_error
+        assert spies["zendesk"].forwarded and spies["flaky"].forwarded
+    calls = load_traces(tmp_path / "calls.jsonl")
+    assert [(c.tool_id, c.seq_no) for c in calls] == [("zendesk.get_ticket", 0), ("flaky.ok", 1)]
+    assert not (tmp_path / "verdicts.jsonl").exists()
+    assert any(r.exc_info and "shadow" in r.getMessage() for r in caplog.records)
 
 
 async def test_shadow_engine_end_to_end_writes_jsonl(tmp_path: Path) -> None:

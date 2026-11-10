@@ -25,8 +25,9 @@ Calls are serialized per proxy (one agent session), so ``seq_no``, the mutator's
 session tracker stay causal. Once admitted, a call runs shielded from upstream cancellation (an MCP
 client that gives up sends ``notifications/cancelled``): the forward is still bounded by
 ``timeout_s`` and the call is always recorded, so there is no lost envelope or ``seq_no`` gap.
-Mutator output is re-validated as ``RawCall``; invalid output is rejected (fail closed: the
-original call is recorded with an error result and nothing is forwarded or labelled).
+Mutator output is re-validated as ``RawCall``; a mutator that raises or returns invalid output
+fails closed: the original call is recorded with an error result, nothing is forwarded or labelled.
+Shadow scoring, its verdict write and the shadow update all sit behind logged ``except`` boundaries.
 """
 
 from __future__ import annotations
@@ -204,15 +205,16 @@ class FirewallProxy:
         self, name: str, route: tuple[str, str], arguments: dict[str, Any]
     ) -> CallToolResult:
         raw = self._new_raw(name, arguments)
-        mutation = (
-            self.mutator.mutate(raw, tuple(self._history)) if self.mutator is not None else None
-        )
+        mutation: MutationResult | None = None
+        if self.mutator is not None:
+            try:
+                mutation = self.mutator.mutate(raw, tuple(self._history))
+            except Exception:  # boundary: a broken mutator fails closed, the session goes on
+                logger.exception("mutator raised for %s; not forwarding", raw.envelope_id)
+                return self._reject(raw, f"{name}: mutator failed; not forwarded")
         if mutation is not None and (invalid := _invalid_mutation(mutation)) is not None:
             logger.error("rejecting mutator output for %s: %s", raw.envelope_id, invalid)
-            self._shadow_score(raw)
-            result = error_result(f"{name}: mutator produced an invalid call; not forwarded")
-            self._record(raw.model_copy(update={"response_meta": extract_response_meta(result)}))
-            return result
+            return self._reject(raw, f"{name}: mutator produced an invalid call; not forwarded")
         forward = True
         if mutation is not None:
             mutated = mutation.raw.tool_id != raw.tool_id or mutation.raw.args != raw.args
@@ -240,6 +242,13 @@ class FirewallProxy:
                 extra = extra.model_copy(update={"seq_no": self._next_seq()})
                 self._shadow_score(extra.model_copy(update={"response_meta": None}))
                 self._record(extra)
+        return result
+
+    def _reject(self, raw: RawCall, message: str) -> CallToolResult:
+        """Fail closed: record the original call with an error result; forward and label nothing."""
+        self._shadow_score(raw)
+        result = error_result(message)
+        self._record(raw.model_copy(update={"response_meta": extract_response_meta(result)}))
         return result
 
     def _next_seq(self) -> int:
@@ -275,25 +284,26 @@ class FirewallProxy:
         """Score ``raw`` (no response yet) against state as of before it. Never blocks."""
         if self.shadow is None:
             return
-        env = normalize(raw, self._tracker)
         try:
-            result = self.shadow.score(env)
-        except Exception:  # boundary: shadow mode must never affect the call
-            logger.exception("shadow score failed for %s", raw.envelope_id)
-            return
-        self.sink.write_verdict(raw.envelope_id, result)
+            result = self.shadow.score(normalize(raw, self._tracker))
+            self.sink.write_verdict(raw.envelope_id, result)
+        except Exception:  # boundary: shadow mode (scoring and its verdict) never affects the call
+            logger.exception("shadow score/verdict failed for %s", raw.envelope_id)
 
     def _record(self, final: RawCall) -> None:
         """Log the response-carrying call, then update the shadow detector and the tracker."""
         self.sink.write_call(final)
         self._history.append(final)
-        env = normalize(final, self._tracker)
-        if self.shadow is not None:
-            try:
-                self.shadow.update(env, Outcome.ALLOWED)
-            except Exception:  # boundary: shadow mode must never affect the call
-                logger.exception("shadow update failed for %s", final.envelope_id)
-        self._tracker.observe(env)
+        try:
+            env = normalize(final, self._tracker)
+            if self.shadow is not None:
+                try:
+                    self.shadow.update(env, Outcome.ALLOWED)
+                except Exception:  # boundary: shadow mode must never affect the call
+                    logger.exception("shadow update failed for %s", final.envelope_id)
+            self._tracker.observe(env)
+        except Exception:  # boundary: session bookkeeping must not fail an already-logged call
+            logger.exception("session tracking failed for %s", final.envelope_id)
 
     # -- MCP server --------------------------------------------------------------------------
 
