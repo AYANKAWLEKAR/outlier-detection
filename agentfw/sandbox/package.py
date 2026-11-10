@@ -30,7 +30,7 @@ import re
 import sys
 import time
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -60,12 +60,16 @@ _OPTS = orjson.OPT_SORT_KEYS
 _FILES = ("traces.jsonl", "labels.jsonl", "traces.parquet", "labels.parquet")
 
 _SECRET_PATTERNS = (
-    re.compile(r"sk_(?:test|live)_[A-Za-z0-9]+"),
-    re.compile(r"xox[abposr]-[A-Za-z0-9-]+"),
-    re.compile(r"Bearer\s+\S+"),
-    re.compile(r"00D[A-Za-z0-9]{12,15}![A-Za-z0-9._]+"),
+    re.compile(r"(?:sk|rk|pk)_(?:test|live)_[A-Za-z0-9]+"),  # Stripe
+    re.compile(r"whsec_[A-Za-z0-9]+"),  # Stripe webhook secret
+    re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{20,}"),  # OpenAI-style (incl. sk-proj-)
+    re.compile(r"xox[abposr]-[A-Za-z0-9-]+"),  # Slack
+    re.compile(r"xapp-[A-Za-z0-9-]+"),  # Slack app-level
+    # whitespace may be real or still JSON-escaped (\t, \n, \r) in raw serialized text
+    re.compile(r"\bbearer(?:\s|\\[tnr])+[^\s\\\"]+", re.IGNORECASE),
+    re.compile(r"00D[A-Za-z0-9]{12,15}![A-Za-z0-9._]+"),  # Salesforce session id
 )
-_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)")
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*)")
 _RESERVED_TLDS = (".example", ".test")
 
 
@@ -79,10 +83,41 @@ def _bad_domains(text: str) -> list[str]:
     return sorted(d for d in seen if not d.endswith(_RESERVED_TLDS))
 
 
-def _content_problems(name: str, text: str) -> list[str]:
-    out = [f"{name}: secret-like string {s[:40]!r}" for s in sorted(set(scan_secrets(text)))]
+def _strings(v: object) -> Iterator[str]:
+    """Every string in a decoded JSON value, dict keys included."""
+    if isinstance(v, str):
+        yield v
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            yield str(k)
+            yield from _strings(x)
+    elif isinstance(v, list):
+        for x in v:
+            yield from _strings(x)
+
+
+def _text_problems(name: str, text: str) -> list[str]:
+    hits = sorted(set(scan_secrets(text)))
+    out = [f"{name}: secret-like string {s[:40]!r}" for s in hits]
     out += [f"{name}: email domain {d!r} is not .example/.test" for d in _bad_domains(text)]
     return out
+
+
+def _content_problems(name: str, text: str) -> list[str]:
+    """Secret and email findings in ``text``: the raw text and, for JSON / JSON lines, every
+    decoded string value (so escapes cannot hide a secret)."""
+    found = dict.fromkeys(_text_problems(name, text))
+    if name.endswith((".json", ".jsonl")):
+        for line in text.splitlines():
+            try:
+                value = orjson.loads(line) if name.endswith(".jsonl") else orjson.loads(text)
+            except orjson.JSONDecodeError:
+                continue
+            for st in _strings(value):
+                found.update(dict.fromkeys(_text_problems(name, st)))
+            if not name.endswith(".jsonl"):
+                break
+    return list(found)
 
 
 # --- models --------------------------------------------------------------------------------------
@@ -197,18 +232,29 @@ def _read_ledger(run: Path) -> dict[str, dict[str, Any]]:
     return latest
 
 
-def _read_model(run: Path) -> str:
+def _read_meta(run: Path) -> dict[str, Any]:
     meta = run / "run_meta.json"
     if not meta.is_file():
-        return "unknown"
-    return str(orjson.loads(meta.read_bytes()).get("model", "unknown"))
+        return {}
+    loaded = orjson.loads(meta.read_bytes())
+    return loaded if isinstance(loaded, dict) else {}
 
 
-def _check_session(sid: str, raws: Sequence[RawCall], labels: Sequence[Label]) -> None:
+def _read_rows[T](path: Path, parse: Callable[[bytes], T], sid: str, run: Path) -> list[T]:
+    try:
+        return [parse(x) for x in path.read_bytes().splitlines()]
+    except OSError as e:
+        raise ValueError(f"session {sid} (run {run.name}): cannot read {path.name}: {e}") from e
+
+
+def _check_session(sid: str, run: Path, raws: Sequence[RawCall], labels: Sequence[Label]) -> None:
+    where = f"session {sid} (run {run.name})"
     if not raws:
-        raise ValueError(f"session {sid}: completed in the ledger but has no raw calls")
+        raise ValueError(f"{where}: completed in the ledger but has no raw calls")
+    if {r.agent_id for r in raws} != {raws[0].agent_id} or {r.session_id for r in raws} != {sid}:
+        raise ValueError(f"{where}: inconsistent agent_id or session_id across its calls")
     if [lab.envelope_id for lab in labels] != [r.envelope_id for r in raws]:
-        raise ValueError(f"session {sid}: need exactly one label per envelope, in call order")
+        raise ValueError(f"{where}: need exactly one label per envelope, in call order")
 
 
 def _load_run(
@@ -225,19 +271,19 @@ def _load_run(
         if sid in seen:
             raise ValueError(f"duplicate session id {sid!r} across run directories")
         seen.add(sid)
-        raws = [
-            RawCall.model_validate_json(x)
-            for x in (run / "raw" / f"{sid}.jsonl").read_bytes().splitlines()
-        ]
-        labs = [
-            Label.model_validate_json(x)
-            for x in (run / "labels" / f"{sid}.jsonl").read_bytes().splitlines()
-        ]
-        _check_session(sid, raws, labs)
+        raws = _read_rows(run / "raw" / f"{sid}.jsonl", RawCall.model_validate_json, sid, run)
+        labs = _read_rows(run / "labels" / f"{sid}.jsonl", Label.model_validate_json, sid, run)
+        _check_session(sid, run, raws, labs)
         sessions[sid] = raws
         labels.update({lab.envelope_id: lab for lab in labs})
         included += 1
-    return {"name": run.name, "included": included, "excluded": dict(sorted(excluded.items()))}
+    meta = _read_meta(run)
+    return {
+        "name": run.name,
+        "mode": str(meta.get("mode", "unknown")),
+        "included": included,
+        "excluded": dict(sorted(excluded.items())),
+    }
 
 
 # --- packaging -----------------------------------------------------------------------------------
@@ -247,6 +293,12 @@ def _check_normalizes(raws: Sequence[RawCall]) -> None:
     tracker = SessionTracker()
     for r in raws:
         tracker.observe(normalize(r, tracker))
+
+
+_FAKE_BANNER = (
+    "> **WARNING: FAKE DATA.** At least one source run used fake backends and a scripted agent "
+    "(`--fake`). This dataset exercises the pipeline only; it is not a real agent benchmark.\n"
+)
 
 
 def _render_card(manifest: DatasetManifest) -> str:
@@ -266,7 +318,14 @@ def _render_card(manifest: DatasetManifest) -> str:
         "by_injection_level_rows": table(c.by_injection_level),
         "model": manifest.model,
         "seed": str(manifest.config["seed"]),
+        "fake_banner": _FAKE_BANNER
+        if any(r["mode"] == "fake" for r in manifest.source_runs)
+        else "",
     }
+    if not CARD_TEMPLATE.is_file():
+        raise FileNotFoundError(
+            f"dataset card template missing: {CARD_TEMPLATE} (run from a source checkout)"
+        )
     text = CARD_TEMPLATE.read_text()
     for k, v in fields.items():
         text = text.replace("{{" + k + "}}", v)
@@ -281,7 +340,7 @@ def package(
     labels: dict[str, Label] = {}
     seen: set[str] = set()
     sources = [_load_run(Path(r), sessions, labels, seen) for r in run_dirs]
-    models = sorted({_read_model(Path(r)) for r in run_dirs})
+    models = sorted({str(_read_meta(Path(r)).get("model", "unknown")) for r in run_dirs})
     burst = {e for e, lab in labels.items() if lab.attack_family == "velocity_burst"}
     raws = retime(sessions, load_agents(AGENTS_DIR), seed, START_MS, burst_ids=burst)
     final = [labels[r.envelope_id] for r in raws]
@@ -293,12 +352,6 @@ def package(
         raise ValueError("refusing to package: " + "; ".join(problems))
     _check_normalizes(raws)
 
-    out_dir = Path(out_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "traces.jsonl").write_bytes(traces_blob)
-    (out_dir / "labels.jsonl").write_bytes(labels_blob)
-    _write_parquet(_traces_table(raws), out_dir / "traces.parquet")
-    _write_parquet(_labels_table(final), out_dir / "labels.parquet")
     manifest = DatasetManifest(
         version=version,
         files={},
@@ -308,7 +361,19 @@ def package(
         config={"seed": seed, "start_ms": START_MS},
         created_unix=int(time.time()),
     )
-    (out_dir / "DATASET_CARD.md").write_text(_render_card(manifest))
+    card = _render_card(manifest)
+    problems = _content_problems("DATASET_CARD.md", card)
+    problems += _content_problems("manifest.json", manifest.model_dump_json())
+    if problems:
+        raise ValueError("refusing to package: " + "; ".join(problems))
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "traces.jsonl").write_bytes(traces_blob)
+    (out_dir / "labels.jsonl").write_bytes(labels_blob)
+    _write_parquet(_traces_table(raws), out_dir / "traces.parquet")
+    _write_parquet(_labels_table(final), out_dir / "labels.parquet")
+    (out_dir / "DATASET_CARD.md").write_text(card)
     manifest.files = {
         n: hashlib.sha256((out_dir / n).read_bytes()).hexdigest()
         for n in (*_FILES, "DATASET_CARD.md")
@@ -347,19 +412,28 @@ def validate_dataset(
     """Check a packaged dataset directory; never raises on bad data, reports problems instead."""
     d = Path(dir)
     problems: list[str] = []
-    missing = [n for n in (*_FILES, "manifest.json") if not (d / n).is_file()]
+    missing = [n for n in (*_FILES, "manifest.json", "DATASET_CARD.md") if not (d / n).is_file()]
     if missing:
         return ValidationReport(ok=False, problems=[f"missing files: {missing}"])
     try:
         manifest = DatasetManifest.model_validate_json((d / "manifest.json").read_bytes())
     except ValueError as e:
         return ValidationReport(ok=False, problems=[f"manifest.json invalid: {e}"])
+    problems += [
+        f"manifest.json does not list {n}"
+        for n in (*_FILES, "DATASET_CARD.md")
+        if n not in manifest.files
+    ]
     for name, digest in sorted(manifest.files.items()):
         path = d / name
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             problems.append(f"{name}: sha256 does not match manifest.json")
-    for name in ("traces.jsonl", "labels.jsonl"):
-        problems += _content_problems(name, (d / name).read_text())
+    for path in sorted(d.iterdir()):  # every text file: data, manifest, card, anything extra
+        if path.is_file() and path.suffix != ".parquet":
+            try:
+                problems += _content_problems(path.name, path.read_text())
+            except UnicodeDecodeError:
+                problems.append(f"{path.name}: not UTF-8 text")
     try:
         raws = [
             RawCall.model_validate_json(x) for x in (d / "traces.jsonl").read_bytes().splitlines()

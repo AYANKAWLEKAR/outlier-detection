@@ -349,3 +349,126 @@ def test_fake_run_packages_validates_and_replays(tmp_path: Path) -> None:
     assert len(rows) == len(raws)
     assert any(x.label == "attack" for x in rows)
     assert not (out / "transcripts").exists()  # transcripts are not part of the public dataset
+
+
+# -- fix round 1: scanning scope, patterns, provenance --------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "sk-proj-abcdefghijklmnopqrstuvwx",
+        "key sk-abcdefghijklmnopqrstuv1234",
+        "rk_live_abc123",
+        "pk_test_abc123",
+        "whsec_abc123XYZ",
+        "xapp-1-A0B1-123-abc",
+        "xoxb-1-2-abc",
+        "authorization: bearer abc123",
+        "BEARER abc123",
+        "Bearer\\tabc123",  # JSON-escaped tab, as in raw serialized text
+        "Bearer\\nabc123",
+        "Bearer\tabc123",
+    ],
+)
+def test_scan_secrets_extended_patterns(text: str) -> None:
+    assert scan_secrets(text), text
+
+
+def test_scan_secrets_no_false_positive_on_short_sk_dash() -> None:
+    assert scan_secrets("sk-short and task-force and whsec") == []
+
+
+def test_secret_in_model_id_blocks_packaging(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])}, meta={"model": "sk_test_leak", "mode": "live"})
+    with pytest.raises(ValueError, match="secret"):
+        package([run], tmp_path / "out")
+    assert not (tmp_path / "out" / "traces.jsonl").exists()
+
+
+def test_secret_in_run_dir_name_blocks_packaging(tmp_path: Path) -> None:
+    run = tmp_path / "xoxb-123-leak"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])})
+    with pytest.raises(ValueError, match="secret"):
+        package([run], tmp_path / "out")
+
+
+def test_secret_split_by_json_escape_is_found(mini: Path) -> None:
+    p = mini / "traces.jsonl"
+    p.write_bytes(p.read_bytes().replace(b"T-1", b"Bearer\\tabc", 1))
+    rep = validate_dataset(mini, **LOW)
+    assert any("traces.jsonl" in x and "secret" in x for x in rep.problems)
+
+
+def test_secret_planted_in_card_and_manifest_is_flagged(mini: Path) -> None:
+    card = mini / "DATASET_CARD.md"
+    card.write_text(card.read_text() + "\nkey sk_live_abc123\n")
+    rep = validate_dataset(mini, **LOW)
+    assert any("DATASET_CARD.md" in x and "secret" in x for x in rep.problems)
+    man = mini / "manifest.json"
+    raw = orjson.loads(man.read_bytes())
+    raw["model"] = "xoxb-1-leak"
+    man.write_bytes(orjson.dumps(raw))
+    rep = validate_dataset(mini, **LOW)
+    assert any("manifest.json" in x and "secret" in x for x in rep.problems)
+
+
+def test_manifest_must_list_all_files(mini: Path) -> None:
+    man = mini / "manifest.json"
+    raw = orjson.loads(man.read_bytes())
+    del raw["files"]["traces.parquet"]
+    raw["files"].pop("DATASET_CARD.md")
+    man.write_bytes(orjson.dumps(raw))
+    rep = validate_dataset(mini, **LOW)
+    assert not rep.ok
+    assert any("traces.parquet" in x and "manifest" in x for x in rep.problems)
+    assert any("DATASET_CARD.md" in x and "manifest" in x for x in rep.problems)
+    raw["files"] = {}
+    man.write_bytes(orjson.dumps(raw))
+    assert not validate_dataset(mini, **LOW).ok
+
+
+def test_dotless_email_domain_rejected(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])}, email="eve@localhost")
+    with pytest.raises(ValueError, match="localhost"):
+        package([run], tmp_path / "out")
+
+
+def test_missing_raw_file_names_session_and_run(tmp_path: Path) -> None:
+    run = tmp_path / "myrun"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])})
+    (run / "raw" / "s0.jsonl").unlink()
+    with pytest.raises(ValueError, match=r"s0.*myrun|myrun.*s0"):
+        package([run], tmp_path / "out")
+
+
+def test_inconsistent_agent_in_session_rejected(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000, 1000])})
+    raw = run / "raw" / "s0.jsonl"
+    lines = raw.read_bytes().splitlines(keepends=True)
+    lines[1] = lines[1].replace(AGENT_IDS[0].encode(), AGENT_IDS[1].encode())
+    raw.write_bytes(b"".join(lines))
+    with pytest.raises(ValueError, match="agent"):
+        package([run], tmp_path / "out")
+
+
+def test_card_has_limitations_and_fake_banner(tmp_path: Path) -> None:
+    fake = tmp_path / "fake"
+    live = tmp_path / "live"
+    _write_run(fake, {"s0": (AGENT_IDS[0], [1000])}, meta={"model": "scripted", "mode": "fake"})
+    _write_run(live, {"s1": (AGENT_IDS[0], [1000])}, meta={"model": "m-1", "mode": "live"})
+    m = package([fake], tmp_path / "o_fake")
+    assert [r["mode"] for r in m.source_runs] == ["fake"]
+    card = (tmp_path / "o_fake" / "DATASET_CARD.md").read_text()
+    assert "## Limitations" in card
+    assert "FAKE" in card.split("## Limitations")[0]
+    package([live], tmp_path / "o_live")
+    live_card = (tmp_path / "o_live" / "DATASET_CARD.md").read_text()
+    assert "## Limitations" in live_card
+    assert "FAKE" not in live_card
+    both = package([fake, live], tmp_path / "o_both")
+    assert [r["mode"] for r in both.source_runs] == ["fake", "live"]
+    assert "FAKE" in (tmp_path / "o_both" / "DATASET_CARD.md").read_text()

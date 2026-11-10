@@ -1,5 +1,6 @@
 # Agent Action Firewall benchmark dataset {{version}}
 
+{{fake_banner}}
 Labeled tool-call traces from LLM agents running against sandboxed (or fake) Stripe, Salesforce,
 Slack, Zendesk and mail backends, with injected attacks. Produced by
 `python -m agentfw.sandbox.package` from `agentfw.sandbox.run` run directories.
@@ -48,10 +49,24 @@ are kept but clamped to 0.5-120 s, and `velocity_burst` gaps are kept exactly.
 
 * All data is synthetic. Every email address uses an RFC 2606 reserved domain (`.example`,
   `.test`) (D-016); `validate_dataset` fails on any other domain.
-* The files are scanned for credential patterns (Stripe `sk_*`, Slack `xox*`, bearer tokens,
-  Salesforce session ids); any hit fails validation. The manifest records the model id only.
+* The files are scanned for credential patterns (Stripe and OpenAI-style keys, Slack
+  tokens, authorization headers, Salesforce session ids); any hit fails validation. The manifest records the model id only.
 * Agent transcripts (prompts and model output) are **not** part of the public dataset and are never
   copied by the packager.
+
+## Limitations
+
+* One agent model and one synthetic company: results may not transfer to other models, tools or
+  organizations.
+* Attack prevalence is set by `--action-rate` / `--prompt-rate`, not drawn from natural traffic;
+  it is far above real-world base rates.
+* Attack labels are planted or matched ground truth (what the injector inserted or the payload
+  matcher recognized), not observed harm; a planted attack the agent ignored is still labeled where
+  it was injected.
+* `failed` and `budget_truncated` sessions are excluded, a survivorship bias toward sessions that
+  ran cleanly.
+* The calendar is retimed from a fixed start date; only in-session gaps (clamped to 0.5-120 s) and
+  `velocity_burst` gaps are real, session starts are simulated.
 
 ## How to build dataset/v1
 
