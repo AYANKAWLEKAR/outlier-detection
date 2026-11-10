@@ -47,7 +47,7 @@ from pydantic import BaseModel
 from agentfw.core.envelope import JsonValue, Label, RawCall, ResponseMeta
 from agentfw.core.patterns import email_domain
 from agentfw.sandbox.proxy_py.proxy import MutationResult, wall_ms
-from agentfw.sandbox.seed.company import Company
+from agentfw.sandbox.seed.company import Account, Company, Ticket
 from agentfw.sandbox.tools.stripe_server import fake_stripe_ids
 from agentfw.synth.attacks import (
     BURST_MAX,
@@ -69,6 +69,7 @@ from agentfw.synth.attacks import (
 )
 
 __all__ = [
+    "ACTION_TARGETS",
     "DEFAULT_EXFIL_BASELINE",
     "ActionInjector",
     "InjectionPlan",
@@ -114,6 +115,8 @@ _FIELD_MAPS: dict[str, Mapping[str, Any]] = {
     "novel_target": _NOVEL_FIELD,
     "scope_blowup": _SCOPE_FIELD,
 }
+ACTION_TARGETS: dict[str, frozenset[str]] = {f: frozenset(m) for f, m in _FIELD_MAPS.items()}
+"""The tools each single-call family can mutate (``velocity_burst``/``exfil_volume``: any tool)."""
 
 
 _STRENGTH_RANGE = {
@@ -404,7 +407,13 @@ class PromptInjector:
         self._backends = dict(backends)
         self._clock_ms = clock_ms
 
-    def plant(self, plan: InjectionPlan, company: Company) -> PlantHandle:
+    def plant(
+        self, plan: InjectionPlan, company: Company, *, record_key: str | None = None
+    ) -> PlantHandle:
+        """Plant ``plan``'s payload. ``record_key`` picks the carrier record (a company ticket key
+        for ``ticket_*``, an account key for ``sf_description``); default: the first one. The
+        ``{charge_id}`` placeholder becomes the chosen ticket's charge (``tickets[0]``'s otherwise).
+        """
         if plan.level != "prompt" or plan.payload_id is None:
             raise ValueError("PromptInjector needs a prompt-level plan with a payload_id")
         payload = load_payloads()[plan.payload_id]
@@ -416,19 +425,29 @@ class PromptInjector:
             raise ValueError(f"no {name} backend for carrier {payload.carrier}")
         if not (hasattr(be, "snapshot") and hasattr(be, "restore")):
             raise TypeError(f"{name} backend is not a fake/local backend (no snapshot/restore)")
-        charge_id = fake_stripe_ids(company)[company.tickets[0].charge_key]
+        ticket, account = company.tickets[0], company.accounts[0]
+        if record_key is not None and payload.carrier in ("ticket_body", "ticket_comment"):
+            tickets = [t for t in company.tickets if t.key == record_key]
+            if not tickets:
+                raise ValueError(f"no ticket {record_key!r} in the company")
+            ticket = tickets[0]
+        elif record_key is not None and payload.carrier == "sf_description":
+            accounts = [a for a in company.accounts if a.key == record_key]
+            if not accounts:
+                raise ValueError(f"no account {record_key!r} in the company")
+            account = accounts[0]
+        charge_id = fake_stripe_ids(company)[ticket.charge_key]
         text = payload.text.replace("{charge_id}", charge_id)
         snap = be.snapshot()
         try:
-            record_id = self._write(be, payload, text, company)
+            record_id = self._write(be, payload, text, ticket, account)
         except BaseException:
             be.restore(snap)  # never leave a half-planted state behind
             raise
         return PlantHandle(plan, payload, self._clock_ms(), name, snap, record_id)
 
     @staticmethod
-    def _write(be: Any, payload: PayloadSpec, text: str, company: Company) -> str:
-        ticket = company.tickets[0]
+    def _write(be: Any, payload: PayloadSpec, text: str, ticket: Ticket, account: Account) -> str:
         if payload.carrier == "ticket_body":
             body = be.get_ticket(ticket.key)["description"]
             be.set_ticket_body(ticket.key, f"{body}\n\n{text}")
@@ -437,16 +456,18 @@ class PromptInjector:
             be.add_comment(ticket.key, text, True)
             return str(ticket.key)
         if payload.carrier == "sf_description":
-            rid = str(be.ids()[company.accounts[0].key])
+            rid = str(be.ids()[account.key])
             be.update_record("Account", rid, {"Description": text})
             return rid
         be.post_message(be.channel_id, text)
         return str(be.channel_id)
 
     @contextmanager
-    def planted(self, plan: InjectionPlan, company: Company) -> Iterator[PlantHandle]:
+    def planted(
+        self, plan: InjectionPlan, company: Company, *, record_key: str | None = None
+    ) -> Iterator[PlantHandle]:
         """Plant for the duration of the block; state is restored on any exit."""
-        handle = self.plant(plan, company)
+        handle = self.plant(plan, company, record_key=record_key)
         try:
             yield handle
         finally:

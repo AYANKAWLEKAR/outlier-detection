@@ -591,14 +591,21 @@ def render_session(
             cand.remove(pick)
         seen.add(key)
         tasks.append(task)
-    if agent.batch_size == 1:
+    return compose_session(agent.agent_id, tasks)
+
+
+def compose_session(agent_id: str, tasks: list[RenderedTask]) -> RenderedSession:
+    """One session from rendered tasks: a single task's prompt, or a numbered queue (R1)."""
+    if not tasks:
+        raise ValueError("a session needs at least one task")
+    if len(tasks) == 1:
         prompt = tasks[0].prompt
     else:
         lines = [f"{n}. {t.prompt}" for n, t in enumerate(tasks, 1)]
         prompt = "Please work through this queue in order, then give me a one-line summary:\n\n"
         prompt += "\n".join(lines)
     return RenderedSession(
-        agent.agent_id,
+        agent_id,
         prompt,
         tasks,
         [x for t in tasks for x in t.expected_tools],

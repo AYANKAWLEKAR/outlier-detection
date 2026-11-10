@@ -14,6 +14,7 @@ from mcp.types import CallToolResult
 from agentfw.core.envelope import RawCall, ResponseMeta
 from agentfw.core.patterns import email_domain
 from agentfw.sandbox.injector import (
+    ACTION_TARGETS,
     ActionInjector,
     InjectionPlan,
     MatchSpec,
@@ -522,3 +523,32 @@ def test_handle_records_carrier_record_ids() -> None:
     )
     sl = inj.plant(_prompt_plan(_by_carrier("slack_message")), COMPANY)
     assert sl.record_id == "C0TEST"
+
+
+def test_plant_into_a_chosen_record() -> None:
+    """The runner plants into the record the session will read (``record_key``)."""
+    backends = _backends()
+    inj = PromptInjector(backends)
+    ticket = COMPANY.tickets[3]
+    mag = next(p for p in load_payloads().values() if p.id == "mag_refund_4200")
+    with inj.planted(_prompt_plan(mag), COMPANY, record_key=ticket.key) as handle:
+        assert handle.record_id == ticket.key
+        body = backends["zendesk"].get_ticket(ticket.key)["description"]
+        assert IDS[ticket.charge_key] in body  # {charge_id} is the chosen ticket's charge
+        assert (
+            "refund of $4,200"
+            not in backends["zendesk"].get_ticket(COMPANY.tickets[0].key)["description"]
+        )
+    acct = COMPANY.accounts[5]
+    sf = inj.plant(_prompt_plan(_by_carrier("sf_description")), COMPANY, record_key=acct.key)
+    sf_ids = salesforce_server.FakeSalesforceBackend(COMPANY).ids()
+    assert sf.record_id == sf_ids[acct.key]
+    assert backends["salesforce"].get_record("Account", sf_ids[acct.key])["Description"]
+    with pytest.raises(ValueError, match="no ticket"):
+        inj.plant(_prompt_plan(mag), COMPANY, record_key="tk_missing")
+
+
+def test_action_targets_cover_the_single_call_families() -> None:
+    assert ACTION_TARGETS["magnitude_spike"] == {"stripe.create_refund", "stripe.create_payout"}
+    assert "mail.send_email" in ACTION_TARGETS["scope_blowup"]
+    assert set(ACTION_TARGETS) == {"magnitude_spike", "prereq_skip", "novel_target", "scope_blowup"}
