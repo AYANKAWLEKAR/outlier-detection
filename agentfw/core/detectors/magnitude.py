@@ -94,7 +94,12 @@ class MagRecord:
         """Fold one raw value in; non-finite values are ignored."""
         if not math.isfinite(x):
             return
-        y = signed_log1p(x)
+        self.push_y(signed_log1p(x))
+
+    def push_y(self, y: float) -> None:
+        """Fold one already-transformed value ``y = signed_log1p(x)`` in; non-finite is ignored."""
+        if not math.isfinite(y):
+            return
         self.q.add(y)
         self.ewma.add(y)
         self.ewma2.add(y * y)

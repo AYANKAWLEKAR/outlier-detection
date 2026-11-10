@@ -68,6 +68,31 @@ class NoveltyRecord:
     def is_seen(self, v: str) -> bool:
         return v in self.seen or (self.evicted is not None and self.evicted.estimate(v) > 0)
 
+    def push(self, v: str, cfg: EngineConfig) -> None:
+        """Fold one value in: LRU + singleton bookkeeping, evicting to the sketch (D-011)."""
+        self.n_total += 1
+        count = self.seen.get(v)
+        if count is not None:
+            if count == 1:
+                self.n_singletons = max(0, self.n_singletons - 1)
+            self.seen[v] = count + 1
+            self.seen.move_to_end(v)
+            return
+        est = self.evicted.estimate(v) if self.evicted is not None else 0
+        if est > 0:  # evicted earlier: already counted in n_distinct
+            if est == 1:
+                self.n_singletons = max(0, self.n_singletons - 1)
+            self.seen[v] = est + 1
+        else:
+            self.seen[v] = 1
+            self.n_singletons += 1
+            self.n_distinct += 1
+        while len(self.seen) > cfg.novelty_lru:
+            old, c = self.seen.popitem(last=False)
+            if self.evicted is None:
+                self.evicted = CountMinSketch(cfg.cms_width, cfg.cms_depth)
+            self.evicted.add(old, c)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "seen": [[v, c] for v, c in self.seen.items()],  # LRU order, oldest first
@@ -169,30 +194,6 @@ class NoveltyDetector:
                 out.append(ds)
         return out
 
-    def _push(self, rec: NoveltyRecord, v: str) -> None:
-        rec.n_total += 1
-        count = rec.seen.get(v)
-        if count is not None:
-            if count == 1:
-                rec.n_singletons = max(0, rec.n_singletons - 1)
-            rec.seen[v] = count + 1
-            rec.seen.move_to_end(v)
-            return
-        est = rec.evicted.estimate(v) if rec.evicted is not None else 0
-        if est > 0:  # evicted earlier: already counted in n_distinct
-            if est == 1:
-                rec.n_singletons = max(0, rec.n_singletons - 1)
-            rec.seen[v] = est + 1
-        else:
-            rec.seen[v] = 1
-            rec.n_singletons += 1
-            rec.n_distinct += 1
-        while len(rec.seen) > self._cfg.novelty_lru:
-            old, c = rec.seen.popitem(last=False)
-            if rec.evicted is None:
-                rec.evicted = CountMinSketch(self._cfg.cms_width, self._cfg.cms_depth)
-            rec.evicted.add(old, c)
-
     def update(self, e: ActionEnvelope, types: TypeView) -> None:
         for path, values in iter_fields(e):
             if types(path) not in _SCORED:
@@ -205,4 +206,4 @@ class NoveltyDetector:
                 if rec is None:
                     rec = NoveltyRecord()
                     self._store.put(key, rec)
-                self._push(rec, str(raw))
+                rec.push(str(raw), self._cfg)
