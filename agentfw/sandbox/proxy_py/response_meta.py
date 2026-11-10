@@ -1,9 +1,13 @@
 """Bounded response metadata (spec 2.3, D-003) from an MCP ``CallToolResult``.
 
-* ``item_count``: the first text block is parsed as JSON. A top-level list counts its length; an
-  object counts the first list under ``data | records | items | messages | results | tickets`` (in
-  that order), else an integer ``totalSize``, else 1 (a single record such as a ticket). JSON
-  scalars, non-JSON text, empty results and error results carry no count (``None``).
+* ``item_count`` (ruling RM1: list-shaped results only): the first text block is parsed as JSON.
+  A top-level list counts its length; an object counts the first list under
+  ``data | records | items | messages | results | tickets`` (in that order), else an integer
+  ``totalSize``. Anything else -- a single JSON object (a fetched record, or a write's echo such as
+  a refund), a JSON scalar, non-JSON text, an empty or error result -- carries ``None``. The engine
+  infers write tools as "no ``response_meta.item_count`` and >= 1 id-typed arg" (spec 6.6c), so
+  counting a single object as 1 would turn ``create_refund`` / ``send_email`` / ``mass_update``
+  into reads and disable id-flow on real writes.
 * ``bytes``: UTF-8 length of every text block.
 * ``error``: the result's ``is_error`` flag (``isError`` on the wire).
 * ``ids``: up to 256 distinct id-like string *values* (``patterns.is_id_like``), in document order.
@@ -38,7 +42,7 @@ def _item_count(doc: object) -> int | None:
     total = doc.get("totalSize")
     if isinstance(total, int) and not isinstance(total, bool):
         return total
-    return 1
+    return None  # RM1: a single object is not a list
 
 
 def _strings(doc: object) -> Iterator[str]:

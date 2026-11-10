@@ -64,7 +64,8 @@ async def test_lists_namespaced_tools_and_forwards() -> None:
         assert raw.args == {"ticket_id": TICKET}
         assert raw.ts_unix_ms == 1_700_000_000_000
         assert raw.response_meta is not None
-        assert raw.response_meta.item_count == 1 and raw.response_meta.ids
+        assert raw.response_meta.item_count is None  # RM1: a single object is not a list
+        assert raw.response_meta.ids
         assert TICKET in raw.response_meta.ids
         assert all(is_id_like(i) for i in raw.response_meta.ids)
         assert raw.response_meta.error is False
@@ -75,6 +76,28 @@ async def test_lists_namespaced_tools_and_forwards() -> None:
         assert sink.calls[1].ts_unix_ms > sink.calls[0].ts_unix_ms
         assert len({c.envelope_id for c in sink.calls}) == 2
         assert sink.labels == [] and sink.verdicts == []
+
+
+async def test_item_count_only_for_list_shaped_results() -> None:
+    """RM1: write tools returning one object carry no item_count (keeps §6.6c write inference)."""
+    async with make_proxy() as (proxy, sink, _):
+        res = await proxy.call_tool("stripe.list_charges", {"limit": 100})
+        n = len(orjson.loads(_text(res))["data"])
+        assert n > 0 and sink.calls[-1].response_meta.item_count == n
+
+        res = await proxy.call_tool("zendesk.list_tickets", {"status": "open", "limit": 3})
+        assert sink.calls[-1].response_meta.item_count == 3
+
+        res = await proxy.call_tool(
+            "stripe.create_refund",
+            {"charge_id": CHARGE_ID, "amount": 0.5, "reason": "requested_by_customer"},
+        )
+        assert not res.is_error
+        refund = sink.calls[-1].response_meta
+        assert refund.item_count is None and refund.ids  # ids still flow from writes
+
+        await proxy.call_tool("zendesk.get_ticket", {"ticket_id": TICKET})
+        assert sink.calls[-1].response_meta.item_count is None
 
 
 async def test_downstream_failure_recorded_and_survivable() -> None:
@@ -222,7 +245,7 @@ async def test_unforwarded_mutation_returns_synthetic() -> None:
         # the mutator sees each call's final, response-carrying predecessors
         assert mut.seen[0][1] == ()
         assert mut.seen[1][1] == (first,)
-        assert first.response_meta is not None and first.response_meta.item_count == 1
+        assert first.response_meta is not None and TICKET in first.response_meta.ids
 
 
 async def test_unforwarded_mutation_without_synthetic_is_error() -> None:
@@ -301,9 +324,11 @@ async def test_shadow_scores_before_update() -> None:
     async with make_proxy(sink=sink) as (proxy, _, spies):
         spy = SpyDetector(dict(spies), sink)
         proxy.shadow = spy
-        res = await proxy.call_tool("zendesk.get_ticket", {"ticket_id": TICKET})
+        res = await proxy.call_tool("zendesk.list_tickets", {"status": "open", "limit": 5})
         assert not res.is_error  # shadow never blocks, even on a BLOCK decision
         await proxy.call_tool("flaky.ok", {})
+    listed = orjson.loads(_text(res))["data"]
+    assert len(listed) == 5
 
     kinds = [entry[0] for entry in spy.log]
     assert kinds == ["score", "update", "score", "update"]
@@ -312,12 +337,12 @@ async def test_shadow_scores_before_update() -> None:
     assert s0.response_meta is None and s0.prior_tools == ()
     assert fwd_u0 == 1 and outcome is Outcome.ALLOWED
     assert u0.envelope_id == s0.envelope_id
-    assert u0.response_meta is not None and u0.response_meta.item_count == 1
+    assert u0.response_meta is not None and u0.response_meta.item_count == 5
 
     s1 = spy.log[2][1]
-    assert s1.prior_tools == ("zendesk.get_ticket",)
-    assert s1.prev_response is not None and s1.prev_response.item_count == 1
-    assert TICKET in s1.session_ids_seen  # ids from the previous response are observed
+    assert s1.prior_tools == ("zendesk.list_tickets",)
+    assert s1.prev_response is not None and s1.prev_response.item_count == 5
+    assert listed[0]["id"] in s1.session_ids_seen  # ids from the previous response are observed
 
     assert [eid for eid, _ in sink.verdicts] == [c.envelope_id for c in sink.calls]
     assert sink.events.index(f"verdict:{s0.envelope_id}") < sink.events.index(

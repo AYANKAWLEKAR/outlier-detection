@@ -29,10 +29,11 @@ def test_response_meta_extraction_cases() -> None:
     # the first listed key wins; a list beats totalSize
     assert extract_response_meta(_json({"records": [0], "totalSize": 9})).item_count == 1
     assert extract_response_meta(_json({"data": [0, 0], "items": [0]})).item_count == 2
-    # a single JSON object is one item; a wrapper whose key is not a list falls through
-    assert extract_response_meta(_json({"id": "ch_0000000001", "amount": 5})).item_count == 1
-    assert extract_response_meta(_json({"data": {"x": 1}})).item_count == 1
-    assert extract_response_meta(_json({"totalSize": True})).item_count == 1
+    # RM1: only list-shaped results carry a count; a single object (a write's echo) does not
+    assert extract_response_meta(_json({"id": "ch_0000000001", "amount": 5})).item_count is None
+    assert extract_response_meta(_json({"data": {"x": 1}})).item_count is None
+    assert extract_response_meta(_json({"totalSize": True})).item_count is None
+    assert extract_response_meta(_json({"updated": 40, "failed": []})).item_count is None
     # JSON scalars and non-JSON text carry no count
     assert extract_response_meta(_json(42)).item_count is None
     assert extract_response_meta(_res("not json {")).item_count is None
