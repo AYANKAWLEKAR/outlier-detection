@@ -21,6 +21,12 @@ the old type (no numeric flag if it was numeric, no bool flag if bool, no id-lik
 This makes the new rule hold over the last 100 observations on their own, so a handful of odd
 values never flips a type.
 
+One exception (final-review fix I3): a ``BOOL`` field switches to ``NUMERIC`` *immediately* on the
+first number outside {0, 1} (a non-bool int, or a finite float / numeric string that is not
+id-like). Int/float 0 and 1 are boolish, so a count that starts as 0/1 would otherwise be typed
+BOOL and stay BOOL, and magnitude/novelty would skip it. Python ``bool`` and ``"true"``/``"false"``
+never trigger the switch, nor do NaN/inf.
+
 ``None`` values carry no information and are skipped. Strings of ``freetext_min_len`` or more
 characters are never stored: the distinct set, reservoir and window keep ``#<xxh64 hex>``
 instead (their true length still feeds ``sum_len``). The reservoir RNG is stateless (splitmix64
@@ -30,6 +36,7 @@ the 1024 cap is estimated as ``len(distinct) + distinct_overflow`` (an upper bou
 
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self
@@ -142,6 +149,16 @@ def _is_boolish(v: Scalar) -> bool:
     return isinstance(v, str) and v.strip().lower() in _BOOL_STRINGS
 
 
+def _contradicts_bool(v: Scalar, num: bool) -> bool:
+    """A number outside {0, 1}: evidence that a field typed BOOL is really a count (I3)."""
+    if isinstance(v, bool) or not num:
+        return False
+    if isinstance(v, int):  # exact, also for ints too large for a float
+        return v not in (0, 1)
+    x = try_number(v)
+    return x is not None and math.isfinite(x) and x not in (0.0, 1.0)
+
+
 def _render(v: Scalar) -> str:
     if isinstance(v, bool):
         return "true" if v else "false"
@@ -240,6 +257,12 @@ class TypeInference:
                 rec.reservoir[j] = stored
         rec.window.append((num, boolish, idlike, length, stored))
 
+        if rec.type is FieldType.BOOL and _contradicts_bool(v, num):
+            rec.type, rec.confidence = FieldType.NUMERIC, rec.n_numeric / rec.n_total
+            rec.changes += 1
+            return TypeChange(
+                key=key, old=FieldType.BOOL, new=FieldType.NUMERIC, n_total=rec.n_total
+            )
         if rec.type is FieldType.UNKNOWN:
             if rec.n_total >= self._cfg.type_min_obs:
                 n_distinct = min(rec.n_total, len(rec.distinct) + rec.distinct_overflow)

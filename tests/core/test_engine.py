@@ -628,3 +628,39 @@ def test_cal_censor_winsorize_ignores_blocked_calls_below_the_threshold(
     theta = eng.calibrator.threshold("a1")
     eng.update(ODD, Outcome.BLOCKED)  # no cache, but the engine would block it: censored
     assert fed == [("cens", theta)]
+
+
+def test_small_count_field_typed_bool_early_still_scores_a_huge_value() -> None:
+    """FR I3 probe: ``qty`` mostly 1 (the first 10 all 1), sometimes 2-4, then ``qty=10000``."""
+    rng = np.random.default_rng(0)
+    vals = [1] * 10 + [int(x) for x in np.where(rng.random(490) < 0.8, 1, rng.integers(2, 5, 490))]
+    eng, tr = Engine(), SessionTracker()
+    for i, v in enumerate(vals):
+        e = make_env(
+            tracker=tr,
+            envelope_id=f"e{i:06d}",
+            session_id=f"s{i}",
+            agent_id="a",
+            principal_id="p",
+            seq_no=0,
+            ts_unix_ms=T0 + i * 10 * MIN,
+            tool_id="shop.order",
+            args={"qty": v},
+        )
+        eng.score(e)
+        eng.update(e, Outcome.ALLOWED)
+        tr.observe(e)
+    atk = make_env(
+        tracker=tr,
+        envelope_id="atk",
+        session_id="sx",
+        agent_id="a",
+        principal_id="p",
+        seq_no=0,
+        ts_unix_ms=T0 + len(vals) * 10 * MIN,
+        tool_id="shop.order",
+        args={"qty": 10000},
+    )
+    res = eng.score(atk)
+    assert res.field_types["qty"] is FieldType.NUMERIC
+    assert res.fused_score > 0.9

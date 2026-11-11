@@ -242,3 +242,40 @@ def test_huge_int_end_to_end_through_normalizer(ti: TypeInference) -> None:
         for path, vals in {**env.flat_args, **env.derived}.items():
             ti.observe("a", "t", path, vals)
     assert ti.type_of("a", "t", "n") is FieldType.NUMERIC
+
+
+# -- FR I3: a count field that starts as 0/1 must not stay BOOL ------------------------------------
+
+
+def test_bool_field_switches_to_numeric_on_first_value_outside_0_1(ti: TypeInference) -> None:
+    for _ in range(50):
+        ti.observe("a", "t", "qty", (1,))
+    assert ti.type_of("a", "t", "qty") is FieldType.BOOL
+    ch = ti.observe("a", "t", "qty", (3,))  # immediately, not after a 100-observation window
+    assert isinstance(ch, TypeChange) and (ch.old, ch.new) == (FieldType.BOOL, FieldType.NUMERIC)
+    assert ti.type_of("a", "t", "qty") is FieldType.NUMERIC
+    for _ in range(300):  # and it stays numeric under 0/1 traffic (numeric residual)
+        ti.observe("a", "t", "qty", (1,))
+    assert ti.type_of("a", "t", "qty") is FieldType.NUMERIC
+
+
+@pytest.mark.parametrize("odd", [2.5, -1, "4", 10**400])
+def test_bool_switch_covers_floats_negatives_numeric_strings_huge_ints(
+    ti: TypeInference, odd: object
+) -> None:
+    for i in range(20):
+        ti.observe("a", "t", "f", (["0", "1"][i % 2],))
+    assert ti.type_of("a", "t", "f") is FieldType.BOOL
+    ti.observe("a", "t", "f", (odd,))  # type: ignore[arg-type]
+    assert ti.type_of("a", "t", "f") is FieldType.NUMERIC
+
+
+def test_genuine_bool_field_stays_bool(ti: TypeInference) -> None:
+    forms: list[object] = [True, False, "true", "False", 0, 1, "0", "1"]
+    for i in range(400):
+        ti.observe("a", "t", "flag", (forms[i % len(forms)],))  # type: ignore[arg-type]
+    for v in (float("nan"), float("inf"), "nan"):  # non-finite: no evidence of a count
+        ti.observe("a", "t", "flag", (v,))
+    assert ti.type_of("a", "t", "flag") is FieldType.BOOL
+    rec = ti.record("a", "t", "flag")
+    assert rec is not None and rec.changes == 0
