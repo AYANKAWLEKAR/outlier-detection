@@ -33,6 +33,11 @@ charge id. (Quarter-end mass-update sessions are scheduled by the sampler and la
 A field is "money/count" when its catalog ``ArgSpec.shape`` is ``money``/``count`` or it is a
 numeric arg named ``amount``/``count``/``qty``/``total``.
 
+``magnitude_mode="far"`` (Amendment A1.4): ``magnitude_spike`` makes the same two draws but lands
+the value at or beyond the field's far bound, ``magnitude_far_mult`` x the persona's own benign
+p99 (``far_bounds``; 5 x p99 is the level of the benign-labelled control). A session where no
+candidate can get there within ``M_MAX`` stays benign, consumes its attack id and is counted.
+
 ``inject`` draws only from the attack RNG it is handed, so persona streams, and therefore every
 non-attacked session, are unaffected by the attack rate.
 """
@@ -41,8 +46,8 @@ from __future__ import annotations
 
 import copy
 import math
-from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
@@ -67,6 +72,7 @@ __all__ = [
     "BURST_MIN",
     "BURST_W_MAX_S",
     "BURST_W_MIN_S",
+    "CONTROL_P99_MULT",
     "M_MAX",
     "M_MIN",
     "SCOPE_MAX",
@@ -78,6 +84,7 @@ __all__ = [
     "burst_duplicates",
     "eligible",
     "fabricate_id",
+    "far_bounds",
     "inject",
     "mutate_replace",
     "mutate_scale",
@@ -107,6 +114,9 @@ class AttackContext:
     attack_id: str
     persona_sessions: Sequence[list[RawCall]]
     session_index: int
+    # ``magnitude_mode="far"`` (A1.4): ``(tool, arg) -> far bound`` of this persona's money/count
+    # write fields (``far_bounds``); ``None`` = the spec 4.6 construction (mode "own").
+    far: Mapping[tuple[str, str], float] | None = None
 
 
 @dataclass(slots=True)
@@ -365,15 +375,81 @@ def _magnitude_cands(session: list[RawCall], ctx: AttackContext) -> list[tuple[i
     ]
 
 
+def far_bounds(
+    sessions: Sequence[list[RawCall]],
+    persona: Persona,
+    catalog: Catalog,
+    mult: float = CONTROL_P99_MULT,
+) -> dict[tuple[str, str], float]:
+    """``(tool, arg) -> mult x P99`` of each money/count arg of a write tool (A1.4), from one
+    persona's sessions BEFORE any injection. ``P99`` is the 99th percentile (linear interpolation)
+    of the arg's positive numeric values; on the arg the ``benign_unusual`` control mutates it is
+    at least the persona's declared p99, the value the control uses. Pure: reads the persona's own
+    benign values and the control's constant, nothing else."""
+    values: dict[tuple[str, str], list[float]] = {}
+    for session in sessions:
+        for c in session:
+            spec = catalog.get(c.tool_id)
+            if spec is None or spec.kind != "write":
+                continue
+            for name, a in spec.args.items():
+                v = c.args.get(name)
+                if _is_money_count(name, a) and _is_num(v) and float(v) > 0:  # type: ignore[arg-type]
+                    values.setdefault((c.tool_id, name), []).append(float(v))  # type: ignore[arg-type]
+    out: dict[tuple[str, str], float] = {}
+    for (tool, name), xs in values.items():
+        p99 = float(np.percentile(xs, 99.0))
+        control = _control_args(tool, persona, catalog)
+        if control is not None and control[0] == name:
+            p99 = max(p99, control[1])
+        out[(tool, name)] = mult * p99
+    return out
+
+
+def _far_feasible(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, str]]:
+    """Spike candidates whose own value x ``M_MAX`` reaches the field's far bound (A1.4 step 1)."""
+    far = ctx.far or {}
+    return [
+        (i, name)
+        for i, name in _magnitude_cands(session, ctx)
+        if (bound := far.get((session[i].tool_id, name))) is not None
+        and float(session[i].args[name]) * M_MAX >= bound  # type: ignore[arg-type]
+    ]
+
+
 def magnitude_spike(
     session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
 ) -> AttackResult | None:
+    """Mode "own" (``ctx.far is None``, spec 4.6): multiply the picked call's own value by ``m``,
+    log-uniform on ``[M_MIN, M_MAX]``. Mode "far" (A1.4): the same two draws in the same order;
+    the spiked call is the first feasible candidate in cyclic order from the picked one, and the
+    drawn ``ln m`` is mapped onto ``[max(M_MIN, bound / value), M_MAX]`` so the value lands at or
+    beyond the far bound. ``None`` (after both draws) when no candidate is feasible.
+    ``Label.strength`` is the realized multiplier in both modes."""
     cands = _magnitude_cands(session, ctx)
     if not cands:
         return None
-    i, name = cands[int(rng.integers(len(cands)))]
-    m = float(np.clip(np.exp(rng.uniform(np.log(M_MIN), np.log(M_MAX))), M_MIN, M_MAX))
-    new = mutate_scale(session[i], name, m)
+    k = int(rng.integers(len(cands)))
+    log_m = rng.uniform(np.log(M_MIN), np.log(M_MAX))
+    if ctx.far is None:
+        i, name = cands[k]
+        m = float(np.clip(np.exp(log_m), M_MIN, M_MAX))
+        new = mutate_scale(session[i], name, m)
+    else:
+        feasible = set(_far_feasible(session, ctx))
+        pick = next((c for c in [*cands[k:], *cands[:k]] if c in feasible), None)
+        if pick is None:
+            return None
+        i, name = pick
+        old = session[i].args[name]
+        bound = ctx.far[(session[i].tool_id, name)]
+        lo = math.log(max(M_MIN, bound / float(old)))  # type: ignore[arg-type]
+        t = (log_m - math.log(M_MIN)) / (math.log(M_MAX) - math.log(M_MIN))
+        m = min(math.exp(lo + t * (math.log(M_MAX) - lo)), M_MAX)
+        new = mutate_scale(session[i], name, m)
+        if float(new.args[name]) < bound:  # type: ignore[arg-type]  # rounding fell short
+            fix = math.ceil(bound) if isinstance(old, int) else math.ceil(bound * 100.0) / 100.0
+            new = mutate_replace(session[i], name, fix)
     old_v, new_v = float(session[i].args[name]), float(new.args[name])  # type: ignore[arg-type]
     return AttackResult(
         _replace_call(session, i, new),
@@ -743,6 +819,8 @@ def inject(
     cfg: GenerateConfig,
     rng: np.random.Generator,
     ctx_factory: CtxFactory,
+    *,
+    stats: dict[str, int] | None = None,
 ) -> tuple[dict[str, list[list[RawCall]]], list[Label]]:
     """Attack persona sessions with probability ``cfg.attack_rate`` (after warmup), and inject
     ``benign_unusual`` controls at ``cfg.control_rate`` when that family is enabled.
@@ -754,6 +832,15 @@ def inject(
     mutate); a session where none applies stays benign. ``benign_unusual`` is never chosen as an
     attack: its draw is independent of attack selection (a session is a control candidate only if it
     was not attacked), and with it disabled no control draw is made (streams are unchanged).
+
+    ``cfg.magnitude_mode == "far"`` (A1.4): each persona's far bounds are computed once, from its
+    untouched sessions (one extra ``ctx_factory`` call per persona, with an empty attack id, gives
+    the persona and catalog), and handed to the attack on a new context. A chosen
+    ``magnitude_spike`` with no feasible candidate leaves the session benign: its attack id is
+    consumed and the session gets no control, exactly as if the spike had taken it, so the attack
+    stream makes the draws it makes in mode "own" and every other attack and control is unchanged.
+    ``stats``, when given, receives ``magnitude_first_pass`` (spikes injected),
+    ``magnitude_dropped`` (those left benign) and ``magnitude_topup`` (0).
     """
     families = list(dict.fromkeys(cfg.families))
     unknown = sorted(set(families) - set(ATTACKS))
@@ -763,8 +850,15 @@ def inject(
     attack_fams = [f for f in families if f != CONTROL]
     out: dict[str, list[list[RawCall]]] = {}
     labels: list[Label] = []
+    n_dropped = 0
     for agent in sorted(sessions_by_persona):
         sessions = list(sessions_by_persona[agent])
+        far: dict[tuple[str, str], float] | None = None
+        if cfg.magnitude_mode == "far":  # from the untouched sessions, before any injection
+            base = ctx_factory(agent, "", sessions, 0)
+            far = far_bounds(
+                sessions_by_persona[agent], base.persona, base.catalog, cfg.magnitude_far_mult
+            )
         n_attacks = n_controls = 0
         idx = cfg.warmup_sessions
         while idx < len(sessions):
@@ -775,6 +869,8 @@ def inject(
             u_control = rng.random() if controls else 1.0
             if u_attack < cfg.attack_rate:
                 ctx = ctx_factory(agent, f"atk-{agent}-{n_attacks:05d}", sessions, idx)
+                if far is not None:
+                    ctx = replace(ctx, far=far)  # a new context: the factory's may be shared
                 fams = [
                     f
                     for f in attack_fams
@@ -782,14 +878,20 @@ def inject(
                 ]
                 if fams:
                     res = ATTACKS[fams[int(rng.integers(len(fams)))]](sessions[idx], rng, ctx)
-                    if res is not None:  # always true: applicable() guaranteed a candidate
-                        sessions[idx] = res.session
+                    if res is not None:  # None only for a far-mode spike with no feasible
+                        sessions[idx] = res.session  # candidate: applicable() found a candidate
                         for j, extra in enumerate(res.extra_sessions, start=1):
                             sessions[idx + j] = extra
                         labels += res.labels
                         n_attacks += 1
                         idx += 1 + len(res.extra_sessions)
                         continue
+                    # Dropped spike (A1.4 step 4): the session stays benign and takes no control,
+                    # and its attack id is consumed, so later attacks keep their mode-"own" ids.
+                    n_attacks += 1
+                    n_dropped += 1
+                    idx += 1
+                    continue
             if u_control < cfg.control_rate:
                 ctx = ctx_factory(agent, f"ctl-{agent}-{n_controls:05d}", sessions, idx)
                 if eligible(CONTROL, ctx.persona, ctx.catalog) and applicable(
@@ -802,4 +904,9 @@ def inject(
                         n_controls += 1
             idx += 1
         out[agent] = sessions
+    if stats is not None:
+        spikes = {lab.attack_id for lab in labels if lab.attack_family == "magnitude_spike"}
+        stats.update(
+            magnitude_first_pass=len(spikes), magnitude_dropped=n_dropped, magnitude_topup=0
+        )
     return out, labels

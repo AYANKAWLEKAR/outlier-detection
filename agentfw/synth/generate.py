@@ -12,6 +12,7 @@ import argparse
 import hashlib
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 import orjson
@@ -48,6 +49,11 @@ class GenerateConfig(BaseModel):
     families: list[str] = []
     persona_ids: list[str] | None = None  # select a subset of ``personas_dir`` (None = all)
     control_rate: float = 0.005
+    # Amendment A1.4. "own" = spec 4.6 (multiply the call's own value by m). "far" = the spike
+    # lands at or beyond ``magnitude_far_mult`` x the persona's benign p99 of the field
+    # (``attacks.far_bounds``); 5.0 = ``attacks.CONTROL_P99_MULT``, the benign-labelled control.
+    magnitude_mode: Literal["own", "far"] = "own"
+    magnitude_far_mult: float = Field(default=5.0, gt=0)
 
 
 class Manifest(BaseModel):
@@ -74,10 +80,12 @@ def _inject_attacks(
     catalog: Catalog,
     personas: list[Persona],
     by_persona: dict[str, list[list[RawCall]]],
-) -> tuple[dict[str, list[list[RawCall]]], dict[str, Label]]:
-    """Mutate benign sessions per ``cfg.families``; returns attack/control labels by envelope id."""
+) -> tuple[dict[str, list[list[RawCall]]], dict[str, Label], dict[str, int]]:
+    """Mutate benign sessions per ``cfg.families``; returns attack/control labels by envelope id
+    and the magnitude census (``inject``'s ``stats``)."""
+    stats = {"magnitude_first_pass": 0, "magnitude_dropped": 0, "magnitude_topup": 0}
     if not cfg.families:
-        return by_persona, {}
+        return by_persona, {}, stats
     by_id = {p.agent_id: p for p in personas}
 
     def ctx_factory(
@@ -90,8 +98,8 @@ def _inject_attacks(
         }
         return AttackContext(catalog, p, pools, attack_id, persona_sessions, idx)
 
-    out, labels = inject(by_persona, cfg, attack_rng(cfg.seed), ctx_factory)
-    return out, {lab.envelope_id: lab for lab in labels}
+    out, labels = inject(by_persona, cfg, attack_rng(cfg.seed), ctx_factory, stats=stats)
+    return out, {lab.envelope_id: lab for lab in labels}, stats
 
 
 def _jsonl(rows: list[dict[str, object]]) -> bytes:
@@ -121,7 +129,7 @@ def generate(cfg: GenerateConfig, out_dir: Path) -> Manifest:
         )
         by_persona[p.agent_id] = sampled.sessions
         quarter_end |= sampled.quarter_end_session_ids
-    by_persona, attack_labels = _inject_attacks(cfg, catalog, personas, by_persona)
+    by_persona, attack_labels, magnitude = _inject_attacks(cfg, catalog, personas, by_persona)
     sessions = [s for a in sorted(by_persona) for s in by_persona[a]]
     raws = sorted(
         (c for s in sessions for c in s), key=lambda c: (c.ts_unix_ms, c.session_id, c.seq_no)
@@ -151,6 +159,7 @@ def generate(cfg: GenerateConfig, out_dir: Path) -> Manifest:
             "sessions": len(sessions),
             "envelopes": len(raws),
             "attacks": len({lab.attack_id for lab in labels if lab.attack_id is not None}),
+            **(magnitude if cfg.magnitude_mode == "far" else {}),  # dropped spikes: never silent
         },
     )
     (out_dir / "manifest.json").write_bytes(
@@ -172,6 +181,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--catalog", type=Path, default=CATALOG_DIR)
     ap.add_argument("--max-sessions", type=int, default=None)
     ap.add_argument("--families", type=lambda s: [f for f in s.split(",") if f], default=[])
+    ap.add_argument("--magnitude-mode", choices=["own", "far"], default="own")
+    ap.add_argument("--magnitude-far-mult", type=float, default=5.0)
     a = ap.parse_args(argv)
     cfg = GenerateConfig(
         seed=a.seed,
@@ -181,6 +192,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         days=a.days,
         max_sessions=a.max_sessions,
         families=a.families,
+        magnitude_mode=a.magnitude_mode,
+        magnitude_far_mult=a.magnitude_far_mult,
     )
     m = generate(cfg, a.out)
     print(f"wrote {m.counts['envelopes']} envelopes in {m.counts['sessions']} sessions to {a.out}")

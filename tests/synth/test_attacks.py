@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import Callable
+import math
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
+from typing import cast
 
 import numpy as np
 import orjson
@@ -13,11 +15,17 @@ from agentfw.core.envelope import Label, RawCall
 from agentfw.core.patterns import email_domain, is_id_like
 from agentfw.synth.attacks import (
     ATTACKS,
+    CONTROL_P99_MULT,
+    M_MAX,
+    M_MIN,
     AttackContext,
+    AttackResult,
     applicable,
     eligible,
     fabricate_id,
+    far_bounds,
     inject,
+    magnitude_spike,
     mutate_replace,
     mutate_scale,
     novel_value,
@@ -416,3 +424,377 @@ def test_prereq_skip_labels_dependent_whose_id_came_from_deleted_read(
         assert not any(c.tool_id == "mail.send_email" and c.envelope_id in ids for c in r.session)
         return
     raise AssertionError("refund never chosen")  # pragma: no cover
+
+
+# --- far-mode magnitude_spike (Amendment A1.4) ----------------------------------------------------
+
+REFUND = ("stripe.create_refund", "amount")
+Far = Mapping[tuple[str, str], float]
+
+
+def declared_p99(world: World) -> float:
+    d = world.persona(PERSONA).fields["stripe.create_refund.amount"]
+    assert d.mu is not None and d.sigma is not None
+    return math.exp(d.mu + 2.326 * d.sigma)
+
+
+def refund_sessions(world: World, amounts: list[float]) -> list[list[RawCall]]:
+    """One copy of the benign refund session per amount (unique envelope and session ids)."""
+    base = _session(world)
+    return [
+        [
+            c.model_copy(
+                update={
+                    "envelope_id": f"{c.envelope_id}-{n}",
+                    "session_id": f"sess-{n}",
+                    "args": {**c.args, "amount": amt}
+                    if c.tool_id == "stripe.create_refund"
+                    else c.args,
+                }
+            )
+            for c in base
+        ]
+        for n, amt in enumerate(amounts)
+    ]
+
+
+def far_ctx(world: World, far: Far | None, agent: str = PERSONA) -> AttackContext:
+    return AttackContext(
+        catalog=world.catalog,
+        persona=world.persona(agent),
+        pools={},
+        attack_id=f"atk-{agent}-00000",
+        persona_sessions=[],
+        session_index=0,
+        far=far,
+    )
+
+
+def _spiked(session: list[RawCall], res: AttackResult) -> tuple[float, float, str]:
+    """``(new value, own value, envelope id)`` of the one call ``res`` changed."""
+    (lab,) = res.labels
+    old = next(c for c in session if c.envelope_id == lab.envelope_id)
+    new = next(c for c in res.session if c.envelope_id == lab.envelope_id)
+    (name,) = [k for k in new.args if new.args[k] != old.args[k]]
+    return _f(new.args[name]), _f(old.args[name]), lab.envelope_id
+
+
+class _FixedRng:
+    """Stands in for the attack stream: candidate index ``k`` and the drawn ``ln m``."""
+
+    def __init__(self, k: int, log_m: float) -> None:
+        self.k, self.log_m = k, log_m
+
+    def integers(self, n: int) -> int:
+        assert 0 <= self.k < n
+        return self.k
+
+    def uniform(self, low: float, high: float) -> float:
+        assert low - 1e-12 <= self.log_m <= high + 1e-12
+        return self.log_m
+
+
+def _fixed(k: int, log_m: float) -> np.random.Generator:
+    return cast(np.random.Generator, _FixedRng(k, log_m))
+
+
+def _task(due_in_days: int, n: int = 0) -> RawCall:
+    return RawCall(
+        envelope_id=f"task-{n}",
+        session_id="s",
+        agent_id="sales-ops-a",
+        principal_id="p",
+        seq_no=n,
+        ts_unix_ms=1 + n,
+        tool_id="salesforce.create_task",
+        args={"record_id": "006ABCDEFGHIJKLM", "subject": "hi", "due_in_days": due_in_days},
+    )
+
+
+def test_far_bounds_is_mult_times_benign_p99(world: World) -> None:
+    persona = world.persona(PERSONA)
+    sessions = refund_sessions(world, amounts=[float(a) for a in range(1, 101)])  # p99 = 99.01
+    far = far_bounds(sessions, persona, world.catalog)
+    assert declared_p99(world) > 99.01  # the control's declared p99 wins on its amount arg
+    assert far[REFUND] == pytest.approx(5.0 * max(99.01, declared_p99(world)))
+    assert CONTROL_P99_MULT == 5.0
+    assert far_bounds(sessions, persona, world.catalog, mult=1.0)[REFUND] * 5 == pytest.approx(
+        far[REFUND]
+    )
+    assert far_bounds([], persona, world.catalog) == {}
+    # only (write tool, money/count arg) pairs get a bound
+    assert set(far) == {REFUND}
+    # the sampled p99 wins when it is above the declared one (linear interpolation: 990.1)
+    big = refund_sessions(world, amounts=[10.0 * a for a in range(1, 101)])
+    assert declared_p99(world) < 990.1
+    assert far_bounds(big, persona, world.catalog)[REFUND] == pytest.approx(5.0 * 990.1)
+    assert far_bounds(big, persona, world.catalog, mult=2.0)[REFUND] == pytest.approx(2 * 990.1)
+
+
+def test_far_bounds_without_a_declared_p99_and_non_positive_values(world: World) -> None:
+    sales = world.persona("sales-ops-a")
+    # an integer count field no control touches: the sampled p99 alone (ties: p99 == the maximum)
+    tasks = [[_task(d, n)] for n, d in enumerate([3] * 50)]
+    key = ("salesforce.create_task", "due_in_days")
+    assert far_bounds(tasks, sales, world.catalog) == {key: pytest.approx(15.0)}
+    # zero, negative, bool and non-numeric values are not benign magnitudes
+    odd = [
+        [_task(4, 0)],
+        [_task(0, 1)],
+        [_task(-7, 2)],
+        [_task(4, 3).model_copy(update={"args": {"due_in_days": True}})],
+        [_task(4, 4).model_copy(update={"args": {"due_in_days": "9"}})],
+        [_task(4, 5).model_copy(update={"args": {"subject": "no count"}})],
+    ]
+    assert far_bounds(odd, sales, world.catalog) == {key: pytest.approx(20.0)}
+    before = copy.deepcopy(odd)
+    far_bounds(odd, sales, world.catalog)
+    assert odd == before  # pure
+
+
+def test_far_spike_lands_at_or_beyond_the_bound_with_strength_in_range(world: World) -> None:
+    sessions = refund_sessions(world, amounts=[float(a) for a in range(1, 101)])
+    far = far_bounds(sessions, world.persona(PERSONA), world.catalog)
+    bound = far[REFUND]
+    assert bound == pytest.approx(5.0 * declared_p99(world))  # about 932
+    hits = 0
+    for amount in (9.0, 9.4, 10.0, 37.25, 99.0, 400.0, 5000.0):
+        (session,) = refund_sessions(world, amounts=[amount])
+        before = copy.deepcopy(session)
+        for seed in range(200):
+            res = magnitude_spike(session, np.random.default_rng(seed), far_ctx(world, far))
+            if res is None:
+                assert amount * M_MAX < bound
+                continue
+            assert amount * M_MAX >= bound  # feasible exactly when value x 100 reaches the bound
+            (lab,) = res.labels
+            new, old, _ = _spiked(session, res)
+            assert old == amount and new >= bound
+            assert lab.strength is not None and M_MIN <= lab.strength <= M_MAX + 1e-9
+            assert lab.strength == pytest.approx(new / old)
+            assert lab.label == "attack" and lab.attack_family == "magnitude_spike"
+            assert lab.attack_id == f"atk-{PERSONA}-00000"
+            assert len(res.session) == len(session)
+            hits += 1
+        assert session == before  # pure
+    assert hits == 6 * 200  # 9.0 x 100 < bound: never spiked; every other amount always
+
+
+def test_far_multiplier_is_the_drawn_one_mapped_onto_the_feasible_range(world: World) -> None:
+    (session,) = refund_sessions(world, amounts=[20.0])
+    lo, hi = math.log(M_MIN), math.log(M_MAX)
+
+    def new_value(bound: float, log_m: float) -> float:
+        res = magnitude_spike(session, _fixed(0, log_m), far_ctx(world, {REFUND: bound}))
+        assert res is not None
+        return _spiked(session, res)[0]
+
+    # bound 800 -> feasible multipliers [40, 100]: t = 0 -> 40, t = 1 -> 100, t = 0.5 -> sqrt(4000)
+    assert new_value(800.0, lo) == pytest.approx(800.0)
+    assert new_value(800.0, hi) == pytest.approx(2000.0)
+    assert new_value(800.0, (lo + hi) / 2) == pytest.approx(
+        20.0 * math.sqrt(40.0 * 100.0), abs=0.01
+    )
+    # a bound at or below 3 x the value leaves the drawn multiplier as it is (mode "own")
+    for log_m in (lo, (lo + hi) / 2, 0.3 * lo + 0.7 * hi, hi):
+        own = magnitude_spike(session, _fixed(0, log_m), far_ctx(world, None))
+        assert own is not None
+        assert new_value(60.0, log_m) == pytest.approx(_spiked(session, own)[0], abs=0.01)
+        assert new_value(1.0, log_m) == pytest.approx(_spiked(session, own)[0], abs=0.01)
+    # the multiplier never exceeds 100, even when the bound sits exactly at 100 x the value
+    assert new_value(2000.0, lo) == new_value(2000.0, hi) == 2000.0
+
+
+def test_far_float_field_fixup_rounds_the_bound_up_to_cents(world: World) -> None:
+    (session,) = refund_sessions(world, amounts=[10.0])
+    bound = 932.0349  # t = 0: m = 93.20349, 10.0 x m rounds DOWN to 932.03 < bound
+    res = magnitude_spike(session, _fixed(0, math.log(M_MIN)), far_ctx(world, {REFUND: bound}))
+    assert res is not None
+    new, old, _ = _spiked(session, res)
+    assert new == 932.04 and new >= bound
+    assert res.labels[0].strength == pytest.approx(93.204) and new / old <= M_MAX
+
+
+def test_far_picks_the_first_feasible_candidate_in_cyclic_order_from_k(world: World) -> None:
+    session = [_task(3, 0), _task(1, 1), _task(2, 2)]
+    key = ("salesforce.create_task", "due_in_days")
+    ctx = far_ctx(world, {key: 150.0}, agent="sales-ops-a")  # feasible: task-0 (300), task-2 (200)
+    mid = math.log(30.0)
+    for k, want in ((0, "task-0"), (1, "task-2"), (2, "task-2")):
+        res = magnitude_spike(session, _fixed(k, mid), ctx)
+        assert res is not None and _spiked(session, res)[2] == want, k
+    # the cycle wraps: only task-0 is feasible; k = 1 starts at task-1, passes task-2, lands on it
+    wrap = far_ctx(world, {key: 250.0}, agent="sales-ops-a")
+    for k in (0, 1, 2):
+        res = magnitude_spike(session, _fixed(k, mid), wrap)
+        assert res is not None and _spiked(session, res)[2] == "task-0", k
+    # with every candidate feasible, far spikes the call mode "own" spikes
+    easy = far_ctx(world, {key: 1.0}, agent="sales-ops-a")
+    for seed in range(40):
+        own = magnitude_spike(
+            session, np.random.default_rng(seed), far_ctx(world, None, "sales-ops-a")
+        )
+        res = magnitude_spike(session, np.random.default_rng(seed), easy)
+        assert own is not None and res is not None
+        assert _spiked(session, res)[2] == _spiked(session, own)[2]
+    # a candidate whose field has no bound is not feasible
+    assert magnitude_spike(session, _fixed(0, mid), far_ctx(world, {}, "sales-ops-a")) is None
+
+
+def test_far_mode_makes_the_same_draws_as_own(world: World) -> None:
+    sessions = refund_sessions(world, amounts=[float(a) for a in range(1, 101)])
+    far = far_bounds(sessions, world.persona(PERSONA), world.catalog)
+    for amount, feasible in ((37.0, True), (5.0, False)):  # an infeasible session draws too
+        (session,) = refund_sessions(world, amounts=[amount])
+        for seed in range(20):
+            a, b = np.random.default_rng(seed), np.random.default_rng(seed)
+            own = magnitude_spike(session, a, far_ctx(world, None))
+            res = magnitude_spike(session, b, far_ctx(world, far))
+            assert own is not None and (res is not None) == feasible
+            assert a.bit_generator.state == b.bit_generator.state
+            assert a.random() == b.random()
+    # no candidate at all: no draw in either mode
+    reads = [c for c in sessions[0] if c.tool_id.startswith("zendesk.get")]
+    for far_map in (None, far):
+        rng = np.random.default_rng(1)
+        state = copy.deepcopy(rng.bit_generator.state)
+        assert magnitude_spike(reads, rng, far_ctx(world, far_map)) is None
+        assert rng.bit_generator.state == state
+
+
+def test_far_integer_field_fixup_within_m_max(world: World) -> None:
+    key = ("salesforce.create_task", "due_in_days")
+    session = [_task(1)]
+
+    def ctx(bound: float) -> AttackContext:
+        return far_ctx(world, {key: bound}, agent="sales-ops-a")
+
+    # drawn ln m = ln 3 (t = 0): m = 39.2, 1 x 39.2 rounds to 39 < 39.2, so the fix-up applies
+    res = magnitude_spike(session, _fixed(0, math.log(M_MIN)), ctx(39.2))
+    assert res is not None
+    new = res.session[0].args["due_in_days"]
+    assert isinstance(new, int) and new == 40  # ceil(39.2), still an integer
+    assert res.labels[0].strength == 40.0 <= M_MAX
+    for seed in range(200):  # never below the bound, never above 100 x the value
+        r = magnitude_spike(session, np.random.default_rng(seed), ctx(39.2))
+        assert r is not None
+        v = r.session[0].args["due_in_days"]
+        assert isinstance(v, int) and 40 <= v <= 100 and r.labels[0].strength == float(v)
+    # the bound exactly at 100 x the value is feasible and lands on it; ceil never passes m = 100
+    for bound, want in ((100.0, 100), (99.2, 100)):
+        r = magnitude_spike(session, _fixed(0, math.log(M_MIN)), ctx(bound))
+        assert r is not None and r.session[0].args["due_in_days"] == want
+        assert r.labels[0].strength == 100.0
+    # value 1 with bound 150: 1 x 100 < 150, infeasible
+    for seed in range(20):
+        assert magnitude_spike(session, np.random.default_rng(seed), ctx(150.0)) is None
+    # tied benign values (p99 == the maximum == 3): the bound is defined, 15 <= 3 x 100
+    sales = world.persona("sales-ops-a")
+    tied = far_bounds([[_task(3, n)] for n in range(40)], sales, world.catalog)
+    assert tied == {key: pytest.approx(15.0)}
+    for seed in range(50):
+        r = magnitude_spike(
+            [_task(3)], np.random.default_rng(seed), far_ctx(world, tied, "sales-ops-a")
+        )
+        assert r is not None and r.labels[0].strength is not None
+        assert _f(r.session[0].args["due_in_days"]) >= 15 and 3 <= r.labels[0].strength <= 100
+
+
+def _inject_refunds(
+    world: World, amounts: list[float], **kw: object
+) -> tuple[dict[str, list[list[RawCall]]], list[Label], dict[str, int], list[AttackContext]]:
+    """Run the schedule over refund sessions with every session attacked (rate 1, no warm-up)."""
+    sessions = refund_sessions(world, amounts)
+    cfg = _cfg(**{"attack_rate": 1.0, "warmup_sessions": 0, "families": ["magnitude_spike"], **kw})
+    stats: dict[str, int] = {}
+    seen: list[AttackContext] = []
+    shared = far_ctx(world, None)
+
+    def factory(agent: str, aid: str, ps: object, idx: int) -> AttackContext:
+        ctx = replace(shared, attack_id=aid)
+        seen.append(ctx)
+        return ctx
+
+    out, labels = inject({PERSONA: sessions}, cfg, np.random.default_rng(11), factory, stats=stats)
+    assert all(c.far is None for c in seen)  # the factory's contexts are never mutated
+    return out, labels, stats, seen
+
+
+AMOUNTS = [100.0, 100.0, 1.0, 100.0, 250.0]  # far bound 5 x 186.4 = 932: 1.0 x 100 falls short
+
+
+def test_far_infeasible_session_stays_benign_and_consumes_its_attack_id(world: World) -> None:
+    both = ["magnitude_spike", "benign_unusual"]
+    own_out, own_labels, own_stats, _ = _inject_refunds(world, AMOUNTS, families=both)
+    out, labels, stats, _ = _inject_refunds(
+        world, AMOUNTS, families=both, magnitude_mode="far", control_rate=1.0
+    )
+    ids = [f"atk-{PERSONA}-{n:05d}" for n in range(5)]
+    assert [lab.attack_id for lab in own_labels] == ids
+    assert [lab.attack_id for lab in labels] == [ids[0], ids[1], ids[3], ids[4]]  # 00002 is gone
+    dropped = refund_sessions(world, AMOUNTS)[2]
+    assert out[PERSONA][2] == dropped  # untouched: no spike and, at control_rate 1, no control
+    envs = {c.envelope_id for c in dropped}
+    assert not [lab for lab in labels if lab.envelope_id in envs]
+    assert all(lab.label == "attack" for lab in labels)
+    assert stats == {"magnitude_first_pass": 4, "magnitude_dropped": 1, "magnitude_topup": 0}
+    assert own_stats == {"magnitude_first_pass": 5, "magnitude_dropped": 0, "magnitude_topup": 0}
+    bound = 5.0 * declared_p99(world)
+    for i in (0, 1, 3, 4):
+        refund = next(c for c in out[PERSONA][i] if c.tool_id == "stripe.create_refund")
+        assert _f(refund.args["amount"]) >= bound
+    # without the attack draw that same session does take the control
+    _, ctl, _, _ = _inject_refunds(
+        world, AMOUNTS, families=both, magnitude_mode="far", control_rate=1.0, attack_rate=0.0
+    )
+    assert [lab.control_type for lab in ctl if lab.envelope_id in envs] == ["benign_unusual"]
+
+
+def test_far_bounds_come_from_the_untouched_sessions_and_the_configured_multiple(
+    world: World,
+) -> None:
+    # 400 sessions at 1000.0: sampled p99 = 1000 > declared 186.4, so far = mult x 1000. A spike
+    # that raised an earlier session must not raise the bound of a later one.
+    amounts = [1000.0] * 400
+    for mult in (5.0, 1.0):
+        out, labels, stats, _ = _inject_refunds(
+            world, amounts, magnitude_mode="far", magnitude_far_mult=mult
+        )
+        assert stats["magnitude_first_pass"] == 400 and stats["magnitude_dropped"] == 0
+        news = [
+            _f(c.args["amount"])
+            for s in out[PERSONA]
+            for c in s
+            if c.tool_id == "stripe.create_refund"
+        ]
+        lowest = max(M_MIN, mult) * 1000.0  # the feasible range starts AT the bound (or at 3 x)
+        assert lowest <= min(news) < 1.2 * lowest
+        assert max(news) <= 100_000.0
+    # mult = 1: the bound (1000) is below 3 x the value, so the spikes are those of mode "own"
+    own_out, own_labels, _, _ = _inject_refunds(world, amounts)
+    assert [lab.envelope_id for lab in labels] == [lab.envelope_id for lab in own_labels]
+    assert [lab.strength for lab in labels] == pytest.approx([lab.strength for lab in own_labels])
+
+
+def test_inject_stats_is_keyword_only_and_optional(world: World) -> None:
+    sessions = refund_sessions(world, [100.0] * 30)
+    cfg = _cfg(attack_rate=1.0, warmup_sessions=0, magnitude_mode="far")
+    shared = far_ctx(world, None)  # one context object handed out for every session
+
+    def factory(agent: str, aid: str, ps: object, idx: int) -> AttackContext:
+        return shared
+
+    with pytest.raises(TypeError):
+        inject({PERSONA: sessions}, cfg, np.random.default_rng(11), factory, {})  # type: ignore[call-arg]
+    a = inject({PERSONA: sessions}, cfg, np.random.default_rng(11), factory)
+    stats: dict[str, int] = {"stale": 7}
+    b = inject({PERSONA: sessions}, cfg, np.random.default_rng(11), factory, stats=stats)
+    assert a == b
+    assert set(stats) == {"stale", "magnitude_first_pass", "magnitude_dropped", "magnitude_topup"}
+    assert stats["magnitude_dropped"] == stats["magnitude_topup"] == 0
+    # the bounds reach magnitude_spike on a NEW context: the shared one is never written to
+    assert shared.far is None and stats["magnitude_first_pass"] > 0
+    bound = 5.0 * declared_p99(world)
+    spiked = {lab.envelope_id for lab in b[1] if lab.attack_family == "magnitude_spike"}
+    news = [_f(c.args["amount"]) for s in b[0][PERSONA] for c in s if c.envelope_id in spiked]
+    assert news and min(news) >= bound
