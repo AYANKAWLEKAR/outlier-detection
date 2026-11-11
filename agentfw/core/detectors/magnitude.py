@@ -12,7 +12,9 @@ score of the largest value).
   ``s = squash(z, z0, tau)``.
 - ``"tail"`` (spec A1.2): ``d = y - q50`` over a robust scale taken on the side ``d`` falls on,
   ``sigma = max((q75 - q50) / 0.6745, (q95 - q50) / 1.6449)`` for ``d >= 0`` and
-  ``max((q50 - q25) / 0.6745, (q50 - q05) / 1.6449)`` below, ``scale = max(sigma, mag_eps)``;
+  ``max((q50 - q25) / 0.6745, (q50 - q05) / 1.6449)`` below,
+  ``scale = max(sigma * inflate, mag_eps)`` (``inflate`` is 1 on a warm record and
+  ``prior_iqr_inflate`` on a pooled prior; the ``mag_eps`` floor itself is never inflated);
   ``up``: ``z = max(d / scale, 0)``, ``p = Q(z)``; ``both``: ``z = |d| / scale``,
   ``p = min(1, 2 Q(z))`` with ``Q`` the standard normal upper tail; and
   ``s = posterior(p, tail_prior)`` (exactly 1.0 when ``p`` is 0). Evidence gains ``p_tail``.
@@ -20,6 +22,8 @@ score of the largest value).
 Both rules read the same ``MagRecord`` markers: no state differs between them, so a record
 trained under either scores under the other. Any other ``mag_score`` is rejected when the
 detector is built (``ValueError``), so a mistyped value never silently selects the other rule.
+So is a ``tail_prior`` outside the open interval (0, 1) (NaN included), under either rule: it is
+a prior probability, degenerate at 0 and 1, and beyond them the tail score leaves [0, 1].
 
 Cold keys (``n < mag_cold_n``) score against the pooled prior (§6.10) with its scale inflated by
 ``prior_iqr_inflate`` and ``prior_used=True``; with no usable prior they score 0.0 with
@@ -173,6 +177,8 @@ class MagnitudeDetector:
     ) -> None:
         if cfg.mag_score not in _SCORE_MODELS:
             raise ValueError(f"unknown mag_score {cfg.mag_score!r}; known: {_SCORE_MODELS}")
+        if not 0.0 < cfg.tail_prior < 1.0:  # also rejects NaN
+            raise ValueError(f"tail_prior must be in (0, 1), got {cfg.tail_prior!r}")
         self._store = store
         self._cfg = cfg
         self._priors = priors

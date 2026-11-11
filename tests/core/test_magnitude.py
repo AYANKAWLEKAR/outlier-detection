@@ -568,11 +568,40 @@ def test_tail_scale_is_taken_on_the_side_the_value_falls_on() -> None:
         assert 0.05 < s.score < 0.999  # not saturated: the comparison above is informative
 
 
+def test_tail_lower_scale_takes_the_larger_of_quartile_and_q05_terms() -> None:
+    # 60 - Exp(5): the mirror image. Its heavy tail is below the median, where the q05 term
+    # exceeds the quartile term (on 40 + Exp(5) the quartile term wins on the lower side).
+    rng = np.random.default_rng(6)
+    t = build([60.0 - float(v) for v in rng.exponential(5.0, 2000)], path="latitude", cfg=TAIL)
+    q = record(t, "latitude").q
+    q05, q25, q50 = (q.quantile(p) for p in (0.05, 0.25, 0.5))
+    quartile_term, q05_term = (q50 - q25) / Z75, (q50 - q05) / Z95
+    assert TAIL.mag_eps < quartile_term < 0.7 * q05_term  # 0.087 and 0.143
+    x = 38.0
+    assert signed_log1p(x) < q50
+    (s,) = scores_for(t, {"latitude": x})
+    z = (q50 - signed_log1p(x)) / max(quartile_term, q05_term)
+    assert s.evidence["z"] == pytest.approx(z)
+    assert s.score == pytest.approx(posterior(2.0 * normal_sf(z), PRIOR))
+    assert 0.05 < s.score < 0.999  # not saturated: the quartile term alone gives a larger z
+
+
 def test_tail_warm_spike_and_normal(trained_tail: Trained) -> None:
     assert score_amount(trained_tail, 37.0) < 0.05  # 0.011
     assert score_amount(trained_tail, 37.0 * 20) > 0.98  # 0.991 (the §6.3 score is 0.82)
     assert score_amount(trained_tail, 37.0 * 100) > 0.9999
     assert score_amount(trained_tail, 37.0 / 20) < 0.05  # direction=up ignores small
+
+
+def test_tail_direction_up_clamps_z_at_zero_below_the_median(trained_tail: Trained) -> None:
+    # z = max(d / scale, 0): every value below the median scores exactly as the median does.
+    q50 = record(trained_tail, "amount").q.quantile(0.5)
+    for x in (37.0 / 20, 0.0, 20.0):
+        assert signed_log1p(x) < q50
+        (s,) = scores_for(trained_tail, {"amount": x})
+        assert s.evidence["direction"] == "up"
+        assert s.evidence["z"] == 0.0 and s.evidence["p_tail"] == 0.5
+        assert s.score == pytest.approx(posterior(0.5, PRIOR))
 
 
 @pytest.mark.parametrize(
@@ -637,6 +666,52 @@ def test_tail_constant_field() -> None:
     assert score_amount(t, 20.0) > 0.9999
 
 
+def test_tail_constant_field_floor_is_read_from_mag_eps() -> None:
+    wide = TAIL.replace(mag_eps=0.5)
+    t = build([10.0] * 100, cfg=wide)
+    (s,) = scores_for(t, {"amount": 11.5})
+    z = (math.log1p(11.5) - math.log1p(10.0)) / 0.5
+    assert s.evidence["z"] == pytest.approx(z)  # 0.256; the default floor 0.05 gives 2.56
+    assert s.score == pytest.approx(posterior(normal_sf(z), PRIOR))
+
+
+def test_tail_reads_tail_prior_and_not_cal_alpha() -> None:
+    """D-023: ``tail_prior`` is a field of its own so that a ``cal_alpha`` sweep moves thresholds
+    and never scores. A wiring check on one constant field, not a sweep of the fixed constant."""
+    values = [10.0] * 100
+    other = build(values, cfg=TAIL.replace(tail_prior=0.05))
+    assert score_amount(other, 10.0) == pytest.approx(posterior(0.5, 0.05))
+    assert posterior(0.5, 0.05) == pytest.approx(0.0952381, abs=1e-6)
+    (s,) = scores_for(build(values, cfg=TAIL.replace(tail_prior=0.02)), {"amount": 11.5})
+    p = s.evidence["p_tail"]
+    assert isinstance(p, float) and 0.0 < p < 0.5
+    assert s.score == pytest.approx(posterior(p, 0.02))  # 0.795; 0.487 at the default
+    swept = build(values, cfg=TAIL.replace(cal_alpha=0.05))  # the bench "alpha" sweep
+    assert score_amount(swept, 10.0) == pytest.approx(posterior(0.5, PRIOR))
+    assert score_amount(swept, 11.5) == score_amount(build(values, cfg=TAIL), 11.5)
+
+
+@pytest.mark.parametrize(
+    "value", [-1.0, -0.01, 0.0, 1.0, 1.5, float("nan"), float("inf"), float("-inf")]
+)
+def test_tail_prior_outside_the_open_unit_interval_rejected(value: float) -> None:
+    # A prior outside (0, 1) gives scores outside [0, 1] (or a division by zero at -1.0).
+    cfg = TAIL.replace(tail_prior=value)
+    with pytest.raises(ValueError, match=r"tail_prior must be in \(0, 1\)"):
+        MagnitudeDetector(DictStore(), cfg)
+    with pytest.raises(ValueError, match="tail_prior"):
+        Engine(cfg)
+    with pytest.raises(ValueError, match="tail_prior"):
+        Engine(EngineConfig().replace(tail_prior=value))  # checked under either rule
+
+
+@pytest.mark.parametrize("value", [1e-6, 0.005, 0.5, 0.999])
+def test_tail_prior_inside_the_open_unit_interval_accepted(value: float) -> None:
+    t = build([10.0] * 100, cfg=TAIL.replace(tail_prior=value))
+    for x in (10.0, 11.5, 1e6):
+        assert 0.0 <= score_amount(t, x) <= 1.0
+
+
 def test_tail_two_sided_for_direction_both(trained_both_tail: Trained) -> None:
     # uniform(30, 50), field "latitude"
     assert score_field(trained_both_tail, "latitude", 40.0) < 0.01  # p = min(1, 2 Q(z)) ~ 1
@@ -699,6 +774,20 @@ def test_tail_cold_and_prior() -> None:
     (warm,) = scores_for(pooled, {"amount": 370.0})
     assert warm.evidence["z"] == pytest.approx(z_inflated * TAIL.prior_iqr_inflate)
     assert 0.0 < s.score < warm.score < 1.0
+
+
+def test_tail_prior_inflation_is_applied_inside_the_mag_eps_floor() -> None:
+    # scale = max(sigma * inflate, mag_eps): a constant pooled prior (sigma = 0) is scaled by the
+    # floor itself, not by the floor times prior_iqr_inflate.
+    pooled = build([10.0] * 100, cfg=TAIL)
+    ref = record(pooled, "amount")
+    t = build([30.0 + i for i in range(12)], cfg=TAIL, priors=_FakePriors(ref))  # cold key
+    (s,) = scores_for(t, {"amount": 11.5})
+    assert s.evidence["prior_used"] is True and s.evidence["n"] == ref.n
+    z = (math.log1p(11.5) - math.log1p(10.0)) / TAIL.mag_eps
+    assert s.evidence["z"] == pytest.approx(z)  # 2.56; 1.71 if the floor were inflated
+    assert s.score == pytest.approx(posterior(normal_sf(z), PRIOR))
+    assert s.score == pytest.approx(score_amount(pooled, 11.5))  # same floor, warm or prior
 
 
 def test_tail_score_is_idempotent_and_pure(trained_tail: Trained) -> None:
