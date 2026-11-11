@@ -281,3 +281,47 @@ def test_int_beyond_str_digit_limit_does_not_raise(nov: NoveltyDetector) -> None
     assert score(nov, "currency", huge) == 0.0  # seen: equal huge ints share one key
     assert score(nov, "currency", other) > 0.0  # a different huge int is unseen
     assert all(len(v) < 40 for v in nov._store.get(key_nov(AGENT, TOOL, "currency")).seen)  # type: ignore[union-attr]
+
+
+# -- FR2 N1: a number outside {0, 1} in a BOOL-typed field is novel ------------------------------
+
+BOOL = StubTypes({"qty": FieldType.BOOL})
+
+
+def _feed_bool(det: NoveltyDetector, values: Iterable[Any]) -> None:
+    for v in values:
+        det.update(env({"qty": v}), BOOL)
+
+
+def _bool_score(det: NoveltyDetector, v: Any) -> DetectorScore | None:
+    out = [s for s in det.score(env({"qty": v}), BOOL) if s.field == "qty"]
+    assert len(out) <= 1
+    return out[0] if out else None
+
+
+def test_bool_field_scores_a_contradicting_number_as_unseen(nov: NoveltyDetector) -> None:
+    _feed_bool(nov, [0, 1] * 100)
+    s = _bool_score(nov, 10000)
+    assert s is not None and s.score == pytest.approx(1.0)  # stable {0,1}: no singletons
+    assert s.evidence["type_violation"] == "bool"
+    assert s.evidence["n_total"] == 200 and s.evidence["p_unseen"] == 0.0
+
+
+def test_young_bool_field_is_discounted_by_the_ramp(nov: NoveltyDetector) -> None:
+    _feed_bool(nov, [1] * 20)
+    s = _bool_score(nov, 7)
+    assert s is not None and s.score == pytest.approx(20 / 50)
+
+
+@pytest.mark.parametrize("v", [True, False, 0, 1, "true", "0", float("nan"), None])
+def test_bool_field_with_boolish_values_is_not_scored(nov: NoveltyDetector, v: Any) -> None:
+    _feed_bool(nov, [True, False] * 100)
+    assert _bool_score(nov, v) is None
+
+
+def test_bool_violation_score_is_pure(nov: NoveltyDetector) -> None:
+    _feed_bool(nov, [0, 1] * 100)
+    before = orjson.dumps(nov._store.get(key_nov(AGENT, TOOL, "qty")).to_dict())  # type: ignore[union-attr]
+    for _ in range(3):
+        _bool_score(nov, 10000)
+    assert orjson.dumps(nov._store.get(key_nov(AGENT, TOOL, "qty")).to_dict()) == before  # type: ignore[union-attr]

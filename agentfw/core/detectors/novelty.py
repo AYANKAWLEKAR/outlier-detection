@@ -13,6 +13,13 @@ over its values. Evidence: ``p_unseen`` (= n_singletons / n_total of the record 
 ``unseen_score`` (the unseen formula), ``n_total``, ``n_distinct``, ``value_hash`` (xxhash64
 hex), ``prior_used``; the raw value is added only for non-ID types.
 
+BOOL-typed paths (FR2 N1) are tracked too, but only a value that *contradicts* BOOL
+(``schema_infer.contradicts_bool``: a number outside {0, 1}) is scored there: as an unseen value
+against the field's observed boolean vocabulary, with the same formula and ramp, no prior, and
+evidence ``type_violation="bool"``. Boolean-like values in a BOOL path produce no score. Without
+this, a count field with only 0/1 history is typed BOOL and its first large value (scored before
+the update that retypes the field) would be invisible to every detector.
+
 Cold keys (``n_total < mag_cold_n``, ruling NV1) may consult the pooled prior (§6.10) via
 ``PriorSource.novelty_ref``: a value is then seen if either record has it, and an unseen value is
 scored with the prior's counts times ``prior_novelty_discount`` (D-012). With no prior the
@@ -34,7 +41,7 @@ import xxhash
 from agentfw.core.config import EngineConfig
 from agentfw.core.detectors.base import PriorSource, iter_fields, value_key
 from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType, Scalar
-from agentfw.core.schema_infer import TypeView
+from agentfw.core.schema_infer import TypeView, contradicts_bool
 from agentfw.core.sketch.cms import CountMinSketch
 from agentfw.core.state import StateStore, key_nov, register_record
 
@@ -42,6 +49,7 @@ __all__ = ["NAME", "NoveltyDetector", "NoveltyRecord"]
 
 NAME = "novelty"
 _SCORED = frozenset({FieldType.CATEGORICAL, FieldType.ID})
+_TRACKED = _SCORED | {FieldType.BOOL}  # BOOL: only type-violating values are scored
 
 
 @register_record
@@ -149,6 +157,7 @@ class NoveltyDetector:
         values: tuple[Scalar, ...],
         field_name: str,
         is_id: bool,
+        violation: str | None = None,
     ) -> DetectorScore | None:
         basis = prior if prior is not None else rec
         n_total = basis.n_total if basis is not None else 0
@@ -182,12 +191,22 @@ class NoveltyDetector:
         }
         if not is_id:
             ev["value"] = v
+        if violation is not None:
+            ev["type_violation"] = violation
         return DetectorScore(NAME, field_name, s, ev)
 
     def score(self, e: ActionEnvelope, types: TypeView) -> list[DetectorScore]:
         out: list[DetectorScore] = []
         for path, values in iter_fields(e):
             ft = types(path)
+            if ft is FieldType.BOOL:
+                bad = tuple(v for v in values if v is not None and contradicts_bool(v))
+                if bad:
+                    rec = self._record(key_nov(e.agent_id, e.tool_id, path))
+                    ds = self._score_path(rec, None, bad, path, False, violation="bool")
+                    if ds is not None:
+                        out.append(ds)
+                continue
             if ft not in _SCORED:
                 continue
             rec = self._record(key_nov(e.agent_id, e.tool_id, path))
@@ -199,7 +218,7 @@ class NoveltyDetector:
 
     def update(self, e: ActionEnvelope, types: TypeView) -> None:
         for path, values in iter_fields(e):
-            if types(path) not in _SCORED:
+            if types(path) not in _TRACKED:
                 continue
             key = key_nov(e.agent_id, e.tool_id, path)
             rec = self._record(key)

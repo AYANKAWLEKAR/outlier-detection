@@ -28,7 +28,7 @@ from agentfw.core.envelope import (
 )
 from agentfw.core.hints import ToolHint
 from agentfw.core.normalize import SessionTracker
-from agentfw.core.state import DictStore, key_cal, key_mag, key_prior_mag, key_prior_nov
+from agentfw.core.state import DictStore, key_cal, key_mag, key_nov, key_prior_mag, key_prior_nov
 from tests.factories import make_env
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -702,3 +702,62 @@ def test_small_count_field_typed_bool_early_still_scores_a_huge_value() -> None:
     res = eng.score(atk)
     assert res.field_types["qty"] is FieldType.NUMERIC
     assert res.fused_score > 0.9
+
+
+@pytest.mark.parametrize("kind", ["always_1", "flag_0_1"])
+def test_count_field_with_only_0_1_history_scores_a_huge_value(kind: str) -> None:
+    """FR2 N1 probes: ``qty`` always 1 (or a fair 0/1 flag) for 500 calls, then ``qty=10000``.
+
+    Agent-independent level: novelty scores an unseen value at
+    ``(1 - n_singletons/n_total) * min(1, n_total/novelty_full_n)``, which is exactly 1.0 here
+    (no singletons, n_total >= 50); fusion takes the top score, so fused is 1.0, above any
+    calibrated threshold."""
+    rng = np.random.default_rng(0)
+    vals = [1] * 500 if kind == "always_1" else [int(x) for x in rng.integers(0, 2, 500)]
+    eng, tr = Engine(), SessionTracker()
+    for i, v in enumerate(vals):
+        e = make_env(
+            tracker=tr,
+            envelope_id=f"e{i:06d}",
+            session_id=f"s{i}",
+            agent_id="a",
+            principal_id="p",
+            seq_no=0,
+            ts_unix_ms=T0 + i * 10 * MIN,
+            tool_id="shop.order",
+            args={"qty": v},
+        )
+        eng.score(e)
+        eng.update(e, Outcome.ALLOWED)
+        tr.observe(e)
+    atk = make_env(
+        tracker=tr,
+        envelope_id="atk",
+        session_id="sx",
+        agent_id="a",
+        principal_id="p",
+        seq_no=0,
+        ts_unix_ms=T0 + len(vals) * 10 * MIN,
+        tool_id="shop.order",
+        args={"qty": 10000},
+    )
+    dumped = orjson.dumps(eng.store.get(key_nov("a", "shop.order", "qty")).to_dict())  # type: ignore[union-attr]
+    res = eng.score(atk)
+    assert res.field_types["qty"] is FieldType.BOOL  # scored before the update retypes it
+    nov = by(res, "novelty", "qty")
+    assert nov.score == pytest.approx(1.0) and nov.evidence["type_violation"] == "bool"
+    assert res.fused_score == pytest.approx(1.0)
+    assert orjson.dumps(eng.store.get(key_nov("a", "shop.order", "qty")).to_dict()) == dumped  # type: ignore[union-attr]
+    # a genuine True/False value in the same field still scores low
+    ok = make_env(
+        tracker=tr,
+        envelope_id="ok",
+        session_id="sy",
+        agent_id="a",
+        principal_id="p",
+        seq_no=0,
+        ts_unix_ms=T0 + (len(vals) + 1) * 10 * MIN,
+        tool_id="shop.order",
+        args={"qty": True},
+    )
+    assert eng.score(ok).fused_score < 0.1

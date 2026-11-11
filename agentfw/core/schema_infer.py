@@ -48,7 +48,7 @@ from agentfw.core.envelope import FieldType, Scalar
 from agentfw.core.patterns import is_id_like, try_number
 from agentfw.core.state import StateStore, key_type, register_record
 
-__all__ = ["TypeChange", "TypeInference", "TypeRecord", "TypeView"]
+__all__ = ["TypeChange", "TypeInference", "TypeRecord", "TypeView", "contradicts_bool"]
 
 _DISTINCT_CAP = 1024
 _BIGINT = "<bigint>"  # bounded stand-in for ints too large to stringify
@@ -149,8 +149,18 @@ def _is_boolish(v: Scalar) -> bool:
     return isinstance(v, str) and v.strip().lower() in _BOOL_STRINGS
 
 
+def _is_num(v: Scalar) -> bool:
+    """The inference's numeric flag: parses as a number and is not id-like."""
+    return try_number(v) is not None and not (isinstance(v, str) and is_id_like(v))
+
+
+def contradicts_bool(v: Scalar) -> bool:
+    """A number outside {0, 1}: evidence that a field typed BOOL is really a count (I3). Novelty
+    scores such a value in a BOOL-typed field as unseen (FR2 N1)."""
+    return _contradicts_bool(v, _is_num(v))
+
+
 def _contradicts_bool(v: Scalar, num: bool) -> bool:
-    """A number outside {0, 1}: evidence that a field typed BOOL is really a count (I3)."""
     if isinstance(v, bool) or not num:
         return False
     if isinstance(v, int):  # exact, also for ints too large for a float
