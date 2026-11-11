@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Literal
+from typing import Literal, get_args
 
 import pytest
 
-from agentfw.core.config import EngineConfig
+from agentfw.core.config import EngineConfig, VelCountStat
 from agentfw.core.hints import ToolHint
 
 # Verbatim from global-constraints.md ("All tuned constants live in ... EngineConfig").
@@ -78,6 +78,9 @@ DECISION_OVERRIDES: dict[str, object] = {
     "prereq_rate": 0.90,  # docs/decisions/003-prereq-threshold.md
 }
 
+# Amendment A1 (spec A1.9). ``vel_count_stat`` stays at the §6.4 rule until Task 1.21 flips it.
+A1_DEFAULTS: dict[str, object] = {"vel_count_stat": "logz"}
+
 
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
@@ -86,8 +89,14 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | GATE_SWITCH_DEFAULTS
         | DECISION_OVERRIDES
         | USER_DECISION_DEFAULTS
+        | A1_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
+
+
+def test_vel_count_stat_values() -> None:
+    assert get_args(VelCountStat) == ("logz", "poisson")
+    assert EngineConfig().replace(vel_count_stat="poisson").vel_count_stat == "poisson"
 
 
 def test_user_decision_engine_defaults() -> None:

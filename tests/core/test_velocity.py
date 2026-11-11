@@ -10,13 +10,17 @@ from typing import Any
 import numpy as np
 import orjson
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from agentfw.core.config import EngineConfig
-from agentfw.core.detectors.velocity import VelocityDetector, VelocityRecord, _roll
+from agentfw.core.detectors.base import squash
+from agentfw.core.detectors.velocity import VelocityDetector, VelocityRecord, _count_z, _roll
 from agentfw.core.envelope import ActionEnvelope, DetectorScore
 from agentfw.core.hints import ToolHint
 from agentfw.core.schema_infer import TypeInference, TypeView
 from agentfw.core.state import DictStore, key_vel
+from agentfw.core.stats.p2 import P2Quantiles
 from tests.factories import make_env
 
 AGENT = "a1"
@@ -489,3 +493,254 @@ def _warm_det() -> VelocityDetector:
     det = new_det()
     _warm(det)
     return det
+
+
+# -- Amendment A1.1: the count signal as a Poisson tail deviate (vel_count_stat) ----------------
+
+POISSON = EngineConfig().replace(vel_count_stat="poisson")
+LOGZ = EngineConfig().replace(vel_count_stat="logz")
+EVIDENCE_KEYS = {"signal", "window_count", "baseline_median", "n_hist", "z", "cold"}
+# Every key a velocity record or its P² history had before the amendment (A1.1: no state changes).
+PRE_A1_COUNT_KEYS = {
+    "short_count",
+    "last_minute",
+    "long_ago",
+    "long_count",
+    "hist_count",
+    "hist_sum",
+}
+PRE_A1_MONEY_KEYS = PRE_A1_COUNT_KEYS | {"short_sum", "long_sum"}
+PRE_A1_P2_KEYS = {"probs", "n", "q", "pos", "buf"}
+NO_MONEY = {"customer": "cus_1"}  # no money field: only the count key exists
+
+
+def flat_key(cfg: EngineConfig) -> tuple[VelocityDetector, ActionEnvelope, int]:
+    """One call every 15 minutes for 3 days: every 10-minute window holds exactly one call.
+
+    Returns (detector, call template, a timestamp 15 minutes after the last call: empty window).
+    """
+    det = VelocityDetector(DictStore(), cfg)
+    e = env(T0, NO_MONEY)
+    last = 0
+    for last in cadence(T0, 3 * 24 * 60, 15):
+        det.update(at(e, last), TYPES)
+    return det, e, last + 15 * MIN
+
+
+def burst(cfg: EngineConfig, n: int) -> DetectorScore:
+    """The ``n``-th of ``n`` calls within one minute on the flat key (the first n-1 allowed)."""
+    det, e, start = flat_key(cfg)
+    for i in range(n - 1):
+        det.update(at(e, start + i * 1_000), TYPES)
+    [s] = det.score(at(e, start + (n - 1) * 1_000), TYPES)
+    assert s.evidence["window_count"] == n
+    return s
+
+
+def burst_score(cfg: EngineConfig, n: int) -> float:
+    return burst(cfg, n).score
+
+
+N_WRITTEN = 401
+
+
+def key_with_history(cfg: EngineConfig, heights: list[float]) -> VelocityDetector:
+    """A count key (empty window at T0) whose P² history is written directly.
+
+    ``heights`` are the markers (min, q25, q50, q75, max) of ``ln(1 + window count)``, placed at
+    their ideal positions ``1 + (n - 1) p``, so each quartile is its marker height exactly.
+    """
+    hist = P2Quantiles.from_dict(
+        {
+            "probs": [0.25, 0.5, 0.75],
+            "n": N_WRITTEN,
+            "q": heights,
+            "pos": [1 + i * (N_WRITTEN - 1) // 4 for i in range(5)],
+            "buf": [],
+        }
+    )
+    assert [hist.quantile(p) for p in (0.25, 0.5, 0.75)] == heights[1:4]
+    det = VelocityDetector(DictStore(), cfg)
+    rec = VelocityRecord.new(cfg, T0 // MIN, money=False)
+    rec.hist_count = hist
+    det._store.put(key_vel(AGENT, TOOL), rec)
+    return det
+
+
+def quartile_key_score(cfg: EngineConfig, c: int) -> float:
+    """Score of the ``c``-th call in one minute on a key whose window-count quartiles are 2/3/5.
+
+    The window is empty before the burst, so no sample is pending and the history is scored
+    exactly as written.
+    """
+    det = key_with_history(cfg, [math.log1p(k) for k in (1, 2, 3, 5, 12)])
+    e = env(T0, NO_MONEY)
+    start = T0 + 30 * MIN
+    for i in range(c - 1):
+        det.update(at(e, start + i * 1_000), TYPES)
+    [s] = det.score(at(e, start + (c - 1) * 1_000), TYPES)
+    assert s.evidence["window_count"] == c and s.evidence["n_hist"] == N_WRITTEN
+    return s.score
+
+
+def hist_state(det: VelocityDetector) -> dict[str, Any]:
+    h = record(det).hist_count
+    assert h is not None
+    return h.to_dict()
+
+
+def test_count_z_reference_values() -> None:
+    assert _count_z(11, 1.0, 1.0, 1.0) == pytest.approx(5.375466, abs=1e-6)  # exact Poisson: 5.61
+    assert _count_z(21, 3.0, 3.0, 3.0) == pytest.approx(6.488254, abs=1e-6)  # exact 6.68
+    # disp = 1.1524 > 1
+    assert _count_z(21, 2.0, 3.0, 5.0) == pytest.approx(6.488254 / 1.152411, abs=1e-3)
+
+
+def test_count_z_edges() -> None:
+    assert _count_z(0, 1.0, 1.0, 1.0) == 0.0 and _count_z(-3, 1.0, 1.0, 1.0) == 0.0
+    # not above the rate
+    assert _count_z(3, 3.0, 3.0, 3.0) == 0.0 and _count_z(2, 3.0, 3.0, 3.0) == 0.0
+    assert _count_z(1, 1.0, 1.0, 1.0) == 0.0
+    # rate floor: a median window of 0 calls never divides by zero
+    assert math.isfinite(_count_z(5, 0.0, 0.0, 0.0)) and _count_z(5, 0.0, 0.0, 0.0) > 0.0
+    # inverted quartiles: disp floors at 1
+    assert _count_z(10, 5.0, 3.0, 1.0) == _count_z(10, 3.0, 3.0, 3.0)
+
+
+@given(st.integers(1, 500), st.integers(1, 500), st.floats(0.0, 50.0))
+def test_count_z_monotone_in_count(a: int, b: int, rate: float) -> None:
+    lo, hi = sorted((a, b))
+    assert _count_z(lo, rate, rate, rate) <= _count_z(hi, rate, rate, rate) + 1e-12
+
+
+def test_poisson_flat_key_needs_ten_calls() -> None:
+    # one call every 15 min for 3 days (every window holds 1 call), then n calls in one minute
+    s6 = burst(POISSON, n=6)
+    assert s6.score == pytest.approx(squash(3.168, 3.0, 0.75), abs=2e-3)  # 0.556
+    assert burst_score(POISSON, n=10) > 0.9 and burst_score(POISSON, n=9) < 0.9
+    logz6 = burst(LOGZ, n=6)
+    assert logz6.score > 0.9  # §6.4 over-scores it
+    # the evidence keeps its keys; ``z`` is the deviate, the baseline is still the median count
+    assert set(s6.evidence) == EVIDENCE_KEYS == set(logz6.evidence)
+    assert s6.field is None and s6.evidence["signal"] == "count" and s6.evidence["cold"] is False
+    assert s6.evidence["z"] == pytest.approx(3.168, abs=2e-3)
+    assert s6.evidence["baseline_median"] == pytest.approx(1.0)
+    assert s6.evidence["baseline_median"] == logz6.evidence["baseline_median"]
+    assert s6.evidence["n_hist"] == logz6.evidence["n_hist"]
+
+
+def test_poisson_bursty_key_needs_eighteen_calls() -> None:
+    # history whose window quartiles are 2 / 3 / 5 calls (helpdesk-triage-b update_status, 008 §1)
+    assert quartile_key_score(POISSON, c=21) > 0.95  # 0.971
+    assert quartile_key_score(LOGZ, c=21) == pytest.approx(0.604, abs=2e-3)  # §6.4 scored 0.604
+    assert quartile_key_score(POISSON, c=19) > 0.9 > quartile_key_score(POISSON, c=15)
+    # A1.1 reference table: with exact quartiles the first count scoring >= 0.90 is 18
+    assert quartile_key_score(POISSON, c=18) >= 0.9 > quartile_key_score(POISSON, c=17)
+
+
+def test_poisson_cold_key_scores_zero() -> None:
+    det = VelocityDetector(DictStore(), POISSON)
+    e = env(T0, NO_MONEY)
+    [s] = det.score(e, TYPES)  # no record at all
+    assert s.score == 0.0 and s.evidence["cold"] is True and s.evidence["z"] is None
+    assert s.evidence["n_hist"] == 0
+    for ts in cadence(T0, 20, 1):  # 20 active minutes: fewer than vel_cold_n minute-samples
+        det.update(at(e, ts), TYPES)
+    for i in range(30):  # then a burst that would score ~1.0 on a warm key
+        det.update(at(e, T0 + 21 * MIN + i), TYPES)
+    [s] = det.score(at(e, T0 + 21 * MIN + 40), TYPES)
+    assert 0 < ev_int(s, "n_hist") < POISSON.vel_cold_n
+    assert ev_int(s, "window_count") > 30
+    assert s.score == 0.0 and s.evidence["cold"] is True and s.evidence["z"] is None
+    assert set(s.evidence) == EVIDENCE_KEYS
+
+
+def test_poisson_history_heights_beyond_expm1_range_do_not_raise() -> None:
+    # A state file may hold any finite marker height: exp() of it must saturate, never raise.
+    det = key_with_history(POISSON, [0.0, 800.0, 900.0, 1000.0, 1e308])
+    [s] = det.score(env(T0 + 30 * MIN, NO_MONEY), TYPES)
+    assert s.evidence["z"] == 0.0 and s.evidence["cold"] is False  # 1 call, far below that rate
+    assert s.score == squash(0.0, 3.0, 0.75)
+    assert s.evidence["baseline_median"] == sys.float_info.max
+
+
+def test_poisson_sum_signal_is_unchanged() -> None:
+    scores: list[DetectorScore] = []
+    for cfg in (LOGZ, POISSON):
+        det = VelocityDetector(DictStore(), cfg)
+        last = _warm(det, amount=37.5)  # every window: 2 calls, 75.0 of money
+        [s] = det.score(env(last + 5 * MIN, {"amount": 167.5}), TYPES)
+        assert s.field == "amount" and s.evidence["signal"] == "sum"
+        assert s.evidence["window_count"] == 2  # a normal count: only the money total is high
+        scores.append(s)
+    logz, poisson = scores
+    assert 0.5 < logz.score < 0.99  # not saturated, so equality below is a real comparison
+    assert poisson.score == logz.score  # bit-equal: the money sum keeps the §6.4 rule
+    assert poisson == logz
+
+
+def test_poisson_refused_attempts_count() -> None:
+    assert POISSON.vel_count_attempts is True
+    det, e, start = flat_key(POISSON)
+    hist_before = hist_state(det)
+    [base] = det.score(at(e, start), TYPES)
+    assert ev_int(base, "window_count") == 1 and base.score < 0.1
+    for i in range(9):  # nine refused (blocked / denied) attempts within the minute
+        det.observe_refused(at(e, start + i * 1_000))
+    [s] = det.score(at(e, start + 9_000), TYPES)
+    assert ev_int(s, "window_count") == 10  # refused attempts raise c ...
+    assert s.score > 0.9
+    assert s.score == pytest.approx(burst_score(POISSON, n=10), abs=1e-9)
+    assert s.evidence["z"] == pytest.approx(_count_z(10, 1.0, 1.0, 1.0), abs=1e-9)
+    assert hist_state(det) == hist_before  # ... and never the history
+    assert s.evidence["n_hist"] == base.evidence["n_hist"]
+    assert s.evidence["baseline_median"] == base.evidence["baseline_median"]
+    off, e, start = flat_key(POISSON.replace(vel_count_attempts=False))
+    for i in range(9):
+        off.observe_refused(at(e, start + i * 1_000))
+    assert off.score(at(e, start + 9_000), TYPES) == [base]
+
+
+def test_poisson_score_is_pure_and_idempotent(tmp_path: Path) -> None:
+    det = VelocityDetector(DictStore(), POISSON)
+    last = _warm(det)  # a count key and a money key
+    for i in range(3):
+        det.observe_refused(at(env(T0), last + MIN + i))
+    before, after = tmp_path / "before.jsonl", tmp_path / "after.jsonl"
+    det._store.dump(before)
+    e = env(last + 3 * MIN, {"amount": 41.0})  # pending virtual advance of 3 minutes
+    first = det.score(e, TYPES)
+    assert det.score(e, TYPES) == first
+    det._store.dump(after)
+    assert after.read_bytes() == before.read_bytes()
+    assert first[0].evidence["cold"] is False
+    assert first[0].evidence["window_count"] == 6  # 2 allowed calls in the window + 3 refused + 1
+
+
+def test_pre_a1_velocity_state_scores_immediately(tmp_path: Path) -> None:
+    old = VelocityDetector(DictStore(), LOGZ)  # the §6.4 rule: the engine before the amendment
+    last = _warm(old)
+    path, again = tmp_path / "pre-a1.jsonl", tmp_path / "reloaded.jsonl"
+    old._store.dump(path)
+    new = VelocityDetector(DictStore(), POISSON)
+    new._store.load(path)
+    new._store.dump(again)
+    assert again.read_bytes() == path.read_bytes()  # to_dict() is byte-equal to the dump
+    rows = {r["key"]: r["data"] for r in map(orjson.loads, path.read_bytes().splitlines())}
+    count, money = rows[key_vel(AGENT, TOOL)], rows[key_vel(AGENT, TOOL, "amount")]
+    assert len(rows) == 2  # no key the old code lacks
+    assert set(count) == PRE_A1_COUNT_KEYS and set(count["hist_count"]) == PRE_A1_P2_KEYS
+    assert set(money) == PRE_A1_MONEY_KEYS and set(money["hist_sum"]) == PRE_A1_P2_KEYS
+    e = env(T0, NO_MONEY)
+    start = last + 15 * MIN
+    [first] = new.score(at(e, start), TYPES)  # the first call after loading is scored warm
+    assert first.evidence["cold"] is False and first.evidence["z"] == 0.0
+    scores = [step(new, at(e, start + i * 1_000)) for i in range(25)]
+    assert ev_int(scores[-1], "window_count") == 25
+    assert scores[-1].score > 0.99 and scores[-1].evidence["signal"] == "count"
+    # scored by the new rule from the old history (every warm window held 2 calls)
+    assert scores[-1].evidence["z"] == pytest.approx(_count_z(25, 2.0, 2.0, 2.0), abs=1e-2)
+
+
+def test_default_is_still_logz() -> None:
+    assert EngineConfig().vel_count_stat == "logz"

@@ -5,11 +5,19 @@ from __future__ import annotations
 import dataclasses
 from typing import Any, Literal
 
-__all__ = ["CAL_CENSOR_MODES", "CalCensor", "Direction", "EngineConfig", "PriorsMode"]
+__all__ = [
+    "CAL_CENSOR_MODES",
+    "CalCensor",
+    "Direction",
+    "EngineConfig",
+    "PriorsMode",
+    "VelCountStat",
+]
 
 PriorsMode = Literal["all", "money_count_only", "off"]
 Direction = Literal["up", "both"]
 CalCensor = Literal["none", "drop", "winsorize"]
+VelCountStat = Literal["logz", "poisson"]
 CAL_CENSOR_MODES: tuple[CalCensor, ...] = ("none", "drop", "winsorize")
 
 
@@ -49,6 +57,10 @@ class EngineConfig:
     # the short window's scored count; they never enter the history baseline. Default on by user
     # decision (2026-11-10, decision 008 "User decision"); False = spec.
     vel_count_attempts: bool = True
+    # Amendment A1.1: how the count signal turns the short-window count into z. "logz" (spec
+    # §6.4): robust z of ln(1 + count); "poisson": the normal deviate of the Poisson upper tail
+    # at the key's median window count, over its over-dispersion. The money sum is always "logz".
+    vel_count_stat: VelCountStat = "logz"
     # Novelty (§6.5)
     novelty_lru: int = 10_000
     # Novelty ramp min(1, n / novelty_full_n): 50 by user decision (2026-11-10, decision 008);

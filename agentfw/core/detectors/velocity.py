@@ -19,13 +19,22 @@ over *active* minutes). After at most ``vel_short_min`` samples the window is em
 rest of the gap is skipped, so any idle gap costs O(``vel_short_min``). The window total is
 kept running (minus each evicted bucket) rather than re-summed every step.
 
-Score (one ``DetectorScore`` per envelope): ``y = log1p(window_count + 1)`` (this call
-included), ``z = max((y - q50) / max(IQR / 1.349, vel_eps), 0)`` against ``hist_count``,
-``s = squash(z, z0, tau)``; likewise for each money key with ``y = signed_log1p(window_sum +
-this call's sum)`` against ``hist_sum``. The highest wins (ties keep the count): ``field`` is
-``None`` for the count signal and the money path for a sum. A signal whose history has fewer
-than ``vel_cold_n`` samples scores 0. ``score`` performs the advance virtually on a copy of the
-ring and of the history (only when samples are pending); it never mutates state.
+Score (one ``DetectorScore`` per envelope): a count signal and one sum signal per money key,
+each ``s = squash(z, z0, tau)`` against the quartiles ``q25, q50, q75`` of its history. The
+highest wins (ties keep the count): ``field`` is ``None`` for the count signal and the money
+path for a sum. A signal whose history has fewer than ``vel_cold_n`` samples scores 0. ``score``
+performs the advance virtually on a copy of the ring and of the history (only when samples are
+pending); it never mutates state. Two rules give ``z``:
+
+- log z (spec §6.4): ``z = max((y - q50) / max(IQR / 1.349, vel_eps), 0)``. The money sum always
+  uses it, with ``y = signed_log1p(window_sum + this call's sum)`` against ``hist_sum``; the
+  count signal uses it under ``vel_count_stat="logz"``, with ``y = log1p(c)`` against
+  ``hist_count``, ``c`` being the calls in the window, this one included.
+- Poisson deviate (Amendment A1.1): the count signal under ``vel_count_stat="poisson"``.
+  ``z = _count_z(c, expm1(q25), expm1(q50), expm1(q75))``: how unlikely ``c`` calls are at the
+  key's normal rate (its median window count), as a normal deviate divided by the key's
+  over-dispersion relative to Poisson. It reads the same ``hist_count`` quartiles: no state
+  differs between the two rules, so a record trained under either scores under the other.
 
 Evidence: ``signal`` (``count``/``sum``), ``window_count`` (calls in the window, this one
 included), ``baseline_median`` (raw units, ``None`` without history), ``n_hist``, ``z`` (``None``
@@ -189,6 +198,28 @@ class VelocityRecord:
         )
 
 
+def _anscombe(k: float) -> float:
+    """Anscombe transform of a count: a Poisson count has standard deviation 1 under it."""
+    return 2.0 * math.sqrt(max(k, 0.0) + 0.375)
+
+
+def _count_z(c: int, k25: float, k50: float, k75: float) -> float:
+    """How unlikely a window of ``c`` calls is at the key's normal rate (Amendment A1.1); pure.
+
+    ``k25, k50, k75`` are the quartiles of the key's historical window count, in calls; the rate
+    is the median, floored at 1e-9. The Wilson-Hilferty normal deviate of the Poisson upper tail
+    ``P(N >= c | rate)`` is divided by the key's over-dispersion relative to Poisson (the IQR of
+    the Anscombe-transformed history over 1.349, never below 1). One-sided: 0 for ``c <= 0`` and
+    for a count not above the rate.
+    """
+    if c <= 0:
+        return 0.0
+    rate = max(k50, 1e-9)
+    dev: float = 3.0 * math.sqrt(c) * (1.0 - 1.0 / (9.0 * c) - (rate / c) ** (1.0 / 3.0))
+    disp = max((_anscombe(k75) - _anscombe(k25)) / IQR_TO_SIGMA, 1.0)
+    return max(dev / disp, 0.0)
+
+
 @dataclass(slots=True, frozen=True)
 class _Signal:
     score: float
@@ -241,8 +272,14 @@ class VelocityDetector:
         )
         return total, samples
 
-    def _signal(self, hist: P2Quantiles | None, pending: list[float], y: float) -> _Signal:
-        """Robust one-sided z of ``y`` against ``hist`` plus ``pending`` samples; pure."""
+    def _signal(
+        self, hist: P2Quantiles | None, pending: list[float], y: float, count: int | None = None
+    ) -> _Signal:
+        """One-sided z of ``y`` against ``hist`` plus ``pending`` samples; pure.
+
+        ``count`` is passed by the count signal only: under ``vel_count_stat="poisson"`` its z
+        is ``_count_z``. Otherwise, and always for a money sum, z is the robust log z of ``y``.
+        """
         cfg = self._cfg
         n = (hist.n if hist is not None else 0) + len(pending)
         if hist is None or n == 0:
@@ -255,7 +292,12 @@ class VelocityDetector:
         ev: dict[str, object] = {"baseline_median": signed_expm1(q50), "n_hist": n}
         if n < cfg.vel_cold_n:
             return _Signal(0.0, {**ev, "z": None, "cold": True})
-        z = max((y - q50) / max((q75 - q25) / IQR_TO_SIGMA, cfg.vel_eps), 0.0)
+        if count is not None and cfg.vel_count_stat == "poisson":
+            # signed_expm1 equals expm1 on every height a history can hold (>= 0) and saturates
+            # instead of raising on an absurd height read from a state file.
+            z = _count_z(count, signed_expm1(q25), signed_expm1(q50), signed_expm1(q75))
+        else:
+            z = max((y - q50) / max((q75 - q25) / IQR_TO_SIGMA, cfg.vel_eps), 0.0)
         return _Signal(squash(z, cfg.z0, cfg.tau), {**ev, "z": z, "cold": False})
 
     # -- SubDetector ----------------------------------------------------------------------------
@@ -272,7 +314,7 @@ class VelocityDetector:
                 lo = max(minute, rec.last_minute) - self._cfg.vel_short_min
                 count += sum(1 for m in rec.refused if m > lo)
         hist = rec.hist_count if rec is not None else None
-        sig = self._signal(hist, [math.log1p(c) for c, _ in samples], math.log1p(count))
+        sig = self._signal(hist, [math.log1p(c) for c, _ in samples], math.log1p(count), count)
         best_field: str | None = None
         best = _Signal(sig.score, {"signal": "count", "window_count": count, **sig.evidence})
         for path, x in self._money_sums(e):
