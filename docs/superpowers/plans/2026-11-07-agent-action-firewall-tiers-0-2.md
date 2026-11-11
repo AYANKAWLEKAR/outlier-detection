@@ -1395,3 +1395,838 @@ def test_tier2_exit() -> None:
   - §9 Tier 0/1/2 exits → 0.12 / 1.15 / 2.9 + 2.11. §10 → 1.14.
 - **Out of scope by design.** §1.3–1.4, §6.9, the §8 parity tests and the §8 drift evasion case (Tiers 3–5).
 - **Type consistency.** These names are used identically in every task that references them: `RawCall`, `ActionEnvelope`, `ResponseMeta.ids`, `PrevResponse`, `IdSnapshot`, `Label.strength/step`, `DetectorResult.threshold/decision/field_types`, `TypeView`, `SubDetector.score/update`, `Calibrator.threshold/decide/observe`, `PooledPriors.magnitude_ref/novelty_ref`, `ActionMutator.mutate → MutationResult`, `ChatClient.complete → ChatTurn`, `canonical_hash`, `make_detector`.
+
+---
+
+## Amendment A1 (2026-11-11): Tier-1 gate
+
+**Spec:** `docs/spec.md`, section "Amendment A1 (2026-11-11)" (references below: A1.n). **Why:** `docs/decisions/008-tier1-gate.md`. Tasks 1.16–1.26 run after Task 2.11, in order. Before Task 1.16 the controller appends the spec amendment to `docs/spec.md` and this section to this plan in one docs-only commit (`docs: Amendment A1 spec and plan`).
+
+**What was decided, and from which measured prototype.** Three designs were prototyped and judged by two reviewers. Adopted per item:
+
+| item | adopted from | rule |
+|---|---|---|
+| velocity | minimal-change | Poisson tail deviate (Wilson–Hilferty) at the key's median rate, divided by the key's over-dispersion; no new state (A1.1) |
+| magnitude | model-based | two-piece robust log scale → normal tail → posterior at `tail_prior` (A1.2) |
+| generator far rule | model-based | spike at or beyond 5 × the persona's benign p99, the control's level; multiplier still in [3, 100] (A1.4) |
+| generator count | reviewers' change to model-based | per-session top-up **rate** on a separate stream instead of a fixed count of 120 (A1.4) |
+| BOOL-typed numerics | carried over from the final review (ruling FR5) | magnitude learns and scores them; novelty is the fallback (A1.3) |
+| gate | user decisions | both protocols; among-the-reasons attribution; top-1 reported beside it (A1.5–A1.7) |
+
+The engine combination (velocity + magnitude) was measured by both reviewers on model-based's data. The combination **with the rate-based top-up and the BOOL item** was measured only on a draft prototype tree (`amend/draft/`, base `f185072` with the core tests of `312344d`), not on an implementation. Its numbers are in spec A1.11 and are **expectations**. Task 1.23 is the measurement that confirms or refutes them; nothing is pinned or published before it.
+
+### Global constraints that apply to every task below
+
+- TDD with a real RED first: write the test, run it, see it fail for the stated reason, then implement. A test that passes before the implementation is a defect in the test.
+- Everything runs through `uv run`. `./scripts/gate.sh` must be green before every commit; `./scripts/gate.sh --full` where a task says so. No task starts until the previous task's gate is green.
+- No live calls, no network, no credentials. Never push.
+- `agentfw.core` imports no scipy, pandas or sklearn; `score()` never mutates state; `BLOCKED` / `DENIED` never move a baseline; the engine reads no labels; the generator reads no detector, score or threshold.
+- All tuned constants live in `EngineConfig` / `GenerateConfig`. `tail_prior`, `magnitude_far_mult` and `magnitude_topup_rate` are fixed by the spec and are **never** swept or changed against seed 0 or seed 1 recall. If a measured number disappoints, stop and report; do not retune.
+- The original formulas stay selectable; `tests/golden/engine-spec-allow.sha256` and its literal `c4042bc4…` in `tests/core/test_engine.py` are never edited.
+- The default generator output never changes: CI, tiny, validation and decision-008 datasets stay byte-identical (SW1 seed 0 legacy: traces `e7b3bc2a2f20`, labels `bd94a3197d82`).
+- No prototype-only code ships: no `anscombe` or `budget` modes, no negative-binomial `count_tail`, no winsorizing fence, no `seen` sums, no `--attack-rate` flag.
+
+### Spec clarifications this amendment commits to
+
+D-021 is cited in the code but missing from `docs/decisions/000-plan-clarifications.md`; Task 1.26 backfills it with the text below and adds D-022 to D-028.
+
+| ID | Clarification |
+|---|---|
+| D-021 | Per-agent operating point: the smallest α (highest thresholds) whose pooled test recall ≥ the target. The plan's "largest" would always pick the maximum α and the maximum FPR (the same slip D-007 fixed). |
+| D-022 | Velocity "normal rate" is the median of the key's historical window count (already in state, robust to learned bursts). The money-sum signal keeps the §6.4 rule so both signals share one scale. |
+| D-023 | `tail_prior` equals `cal_alpha` by definition (0.005). It is a separate field so a `cal_alpha` sweep moves thresholds only. It is not tuned. |
+| D-024 | In a BOOL-typed field magnitude learns values that `try_number` parses as finite (Python bools are not numbers) and scores only values that contradict BOOL. Novelty scores the contradiction only when magnitude has no usable reference. Pooled priors still learn NUMERIC-typed paths only. |
+| D-025 | "Far outside the normal range" = at or beyond `magnitude_far_mult` (5) × the persona's own benign p99 of the field, taken before injection; 5 × p99 is the level of the benign-labelled control. A first-pass session with no feasible candidate stays benign, consumes its attack id and is counted in the manifest. |
+| D-026 | The top-up is a second, magnitude-only pass on the stream `default_rng([seed, stable_hash("attacks:magnitude_topup")])`, one draw per eligible untouched session. On SW1 its rate equals `attack_rate` (0.015). The benchmark's magnitude gate cell must hold ≥ 50 attacks. |
+| D-027 | Among-the-reasons share: per detected attack of a gated family in its gate bucket, attributed when some **flagged** row carries a targeted-detector score `> reason_min`. `top_reason_share` is unchanged (family-wide) and is printed beside it as "original spec §9 criterion". |
+| D-028 | The Tier-1 gate is evaluated under both protocols and always shown as two labelled results. Which protocol's result closes Tier 1 is the user's open decision; no document may say "Tier-1 gate met" on the review result alone. |
+
+### Review Focus (Amendment A1)
+
+1. **Count 0, count below the rate, rate 0.** `_count_z` returns 0.0 for `c ≤ 0` and for `c ≤ rate`; a history whose median window is 0 calls uses `rate = 1e-9` and never divides by zero. Pinned by Task 1.16 `test_count_z_edges`.
+2. **Zero, negative and non-finite values; constant fields.** The tail score keeps `y = sign(x)·ln(1+|x|)`; a constant field uses the `mag_eps` floor; `p = 0` or NaN gives exactly 1.0; ±inf scores 1.0 and is never pushed. Pinned by Task 1.17 `test_tail_zero_negative_and_non_finite`, `test_tail_constant_field`.
+3. **Empty and short history.** Cold keys behave exactly as before under both new scores (0 with `cold`, or the pooled prior with `prior_used`). Pinned by Tasks 1.16 `test_poisson_cold_key_scores_zero`, 1.17 `test_tail_cold_and_prior`.
+4. **Old state files.** No record layout changes. A state dump written by the pre-amendment engine loads and scores on the first call; a dump written by the new engine loads in the old code when no BOOL-typed numeric record exists. Pinned by Tasks 1.16 `test_pre_a1_velocity_state_scores_immediately`, 1.17 `test_pre_a1_mag_state_scores_immediately`.
+5. **BOOL-typed fields with no numeric history** (`True`/`False` only, or fewer than `mag_cold_n` numbers). Novelty's fallback must still fire. Pinned by Task 1.18 `test_bool_field_without_numeric_reference_falls_back_to_novelty`.
+6. **Generator determinism and isolation.** Same seed gives byte-identical files in every mode; mode `"far"` and the top-up leave every other family's rows and every control byte-identical; the default config reproduces today's bytes. Pinned by Tasks 1.19 and 1.20.
+7. **Fields with too few or tied benign values** (p99 equals the maximum; integer fields). The far bound is still defined and the fix-up never produces a multiplier above 100. Pinned by Task 1.19 `test_far_integer_field_fixup_within_m_max`.
+
+---
+
+### Task 1.16: Velocity count statistic (`vel_count_stat`)
+
+**Files:**
+- Modify: `agentfw/core/config.py`, `agentfw/core/detectors/velocity.py`
+- Test: `tests/core/test_velocity.py`, `tests/core/test_config.py`
+
+**Interfaces:**
+- Consumes: `VelocityRecord`, `P2Quantiles`, `base.squash`, `base.IQR_TO_SIGMA`
+- Produces:
+  - `config.VelCountStat = Literal["logz", "poisson"]`; `EngineConfig.vel_count_stat: VelCountStat = "logz"` (the default flips in Task 1.21)
+  - `velocity._count_z(c: int, k25: float, k50: float, k75: float) -> float` (module-level, pure): A1.1's `z`
+  - `VelocityDetector._signal(hist, pending, y, count: int | None = None)`: when `count is not None` and `vel_count_stat == "poisson"`, `z = _count_z(count, expm1(q25), expm1(q50), expm1(q75))`; otherwise the existing z. The squash, cold gate and evidence keys are unchanged. The money-sum call passes no `count`.
+  - No change to `VelocityRecord`, `to_dict`, `from_dict`, `update`, `observe_refused`.
+
+- [ ] **Step 1: Write failing tests** (in `tests/core/test_velocity.py`; `POISSON = EngineConfig().replace(vel_count_stat="poisson")`)
+
+```python
+def test_count_z_reference_values() -> None:
+    assert _count_z(11, 1.0, 1.0, 1.0) == pytest.approx(5.375466, abs=1e-6)   # exact Poisson deviate 5.61
+    assert _count_z(21, 3.0, 3.0, 3.0) == pytest.approx(6.488254, abs=1e-6)   # exact 6.68
+    assert _count_z(21, 2.0, 3.0, 5.0) == pytest.approx(6.488254 / 1.152411, abs=1e-3)  # disp = 1.1524 > 1
+
+def test_count_z_edges() -> None:
+    assert _count_z(0, 1.0, 1.0, 1.0) == 0.0 and _count_z(-3, 1.0, 1.0, 1.0) == 0.0
+    assert _count_z(3, 3.0, 3.0, 3.0) == 0.0 and _count_z(2, 3.0, 3.0, 3.0) == 0.0   # not above the rate
+    assert _count_z(1, 1.0, 1.0, 1.0) == 0.0
+    assert math.isfinite(_count_z(5, 0.0, 0.0, 0.0)) and _count_z(5, 0.0, 0.0, 0.0) > 0.0  # rate floor
+    assert _count_z(10, 5.0, 3.0, 1.0) == _count_z(10, 3.0, 3.0, 3.0)   # inverted quartiles: disp floors at 1
+
+@given(st.integers(1, 500), st.integers(1, 500), st.floats(0.0, 50.0))
+def test_count_z_monotone_in_count(a: int, b: int, rate: float) -> None:
+    lo, hi = sorted((a, b)); assert _count_z(lo, rate, rate, rate) <= _count_z(hi, rate, rate, rate) + 1e-12
+
+def test_poisson_flat_key_needs_ten_calls() -> None:
+    # one call every 15 min for 3 days (every window holds 1 call), then n calls in one minute
+    assert burst_score(POISSON, n=6) == pytest.approx(squash(3.168, 3.0, 0.75), abs=2e-3)   # 0.556
+    assert burst_score(POISSON, n=10) > 0.9 and burst_score(POISSON, n=9) < 0.9
+    assert burst_score(EngineConfig().replace(vel_count_stat="logz"), n=6) > 0.9            # §6.4 over-scores it
+
+def test_poisson_bursty_key_needs_eighteen_calls() -> None:
+    # history whose window quartiles are 2 / 3 / 5 calls (helpdesk-triage-b update_status, 008 §1)
+    assert quartile_key_score(POISSON, c=21) > 0.95                # 0.971; §6.4 scored 0.604
+    assert quartile_key_score(POISSON, c=19) > 0.9 > quartile_key_score(POISSON, c=15)   # crosses 0.90 at 18 (exact quartiles)
+
+def test_poisson_cold_key_scores_zero() -> None: ...       # < vel_cold_n samples: 0.0, evidence cold True, z None
+def test_poisson_sum_signal_is_unchanged() -> None: ...    # a money-sum score is bit-equal under "logz" and "poisson"
+def test_poisson_refused_attempts_count() -> None: ...     # vel_count_attempts: refused minutes raise c, not the history
+def test_poisson_score_is_pure_and_idempotent() -> None: ...   # store dump identical before/after two score() calls
+def test_pre_a1_velocity_state_scores_immediately() -> None:
+    # dump a record trained under "logz", load it into a "poisson" engine: to_dict() is byte-equal to the
+    # dump, it has no key the old code lacks, and a 25-call burst right after load scores > 0.99
+    ...
+def test_default_is_still_logz() -> None:
+    assert EngineConfig().vel_count_stat == "logz"
+```
+
+Also create `A1_DEFAULTS: dict[str, object] = {"vel_count_stat": "logz"}` in `tests/core/test_config.py` and add it to the union in `test_engine_config_defaults_match_global_constraints`.
+
+- [ ] **Step 2: Run** `uv run pytest tests/core/test_velocity.py tests/core/test_config.py -q`. Expected: FAIL (`ImportError: _count_z`, unknown field `vel_count_stat`).
+- [ ] **Step 3: Implement.** The algorithm is fixed by A1.1:
+
+```python
+def _anscombe(k: float) -> float:
+    return 2.0 * math.sqrt(max(k, 0.0) + 0.375)
+
+def _count_z(c: int, k25: float, k50: float, k75: float) -> float:
+    if c <= 0:
+        return 0.0
+    rate = max(k50, 1e-9)
+    dev = 3.0 * math.sqrt(c) * (1.0 - 1.0 / (9.0 * c) - (rate / c) ** (1.0 / 3.0))
+    disp = max((_anscombe(k75) - _anscombe(k25)) / IQR_TO_SIGMA, 1.0)
+    return max(dev / disp, 0.0)
+```
+
+  Update the module docstring (both rules, which signal each applies to).
+- [ ] **Step 4: Run the tests.** Expected: PASS, and the existing velocity tests pass unchanged.
+- [ ] **Step 5: Run `./scripts/gate.sh`.** Expected: green; goldens unchanged (the default is still `"logz"`).
+- [ ] **Step 6: Commit** `git commit -am "feat(core): velocity count signal as a Poisson tail deviate behind vel_count_stat (A1.1)"`
+
+### Task 1.17: Magnitude tail score (`mag_score`, `tail_prior`)
+
+**Files:**
+- Modify: `agentfw/core/config.py`, `agentfw/core/detectors/base.py`, `agentfw/core/detectors/magnitude.py`
+- Test: `tests/core/test_detector_base.py`, `tests/core/test_magnitude.py`, `tests/core/test_priors.py`, `tests/core/test_config.py`
+
+**Interfaces:**
+- Consumes: `MagRecord.q` (markers q05, q25, q50, q75, q95 already present), `_Ref.inflate`
+- Produces:
+  - `config.ScoreModel = Literal["z", "tail"]`; `EngineConfig.mag_score: ScoreModel = "z"` (flips in Task 1.21); `EngineConfig.tail_prior: float = 0.005`
+  - `base.normal_sf(z: float) -> float` = `0.5 * math.erfc(z / sqrt(2))`
+  - `base.posterior(p: float, prior: float) -> float` = `prior / (prior + (1 - prior) * min(p, 1.0))`; returns `1.0` when `not p > 0.0` (0, negative, NaN)
+  - `MagnitudeDetector._score_value` dispatches on `cfg.mag_score`; the tail branch follows A1.2 with constants `_Z75 = 0.6744897501960817`, `_Z95 = 1.6448536269514722`; evidence = today's keys plus `p_tail`
+  - No change to `MagRecord`, `update`, cold start, non-finite handling, response field.
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+# tests/core/test_detector_base.py
+def test_posterior_anchor_points() -> None:
+    assert posterior(1.0, 0.005) == pytest.approx(0.005)
+    assert posterior(0.005 / 0.995, 0.005) == pytest.approx(0.5)
+    assert posterior(2.0, 0.005) == pytest.approx(0.005)                  # p clipped at 1
+    assert posterior(0.0, 0.005) == 1.0 and posterior(-1e-18, 0.005) == 1.0
+    assert posterior(float("nan"), 0.005) == 1.0
+    assert posterior(1e-3, 0.005) == pytest.approx(0.834028, abs=1e-6)
+
+def test_normal_sf_reference_values() -> None:
+    assert normal_sf(0.0) == 0.5
+    assert normal_sf(0.6744897501960817) == pytest.approx(0.25, abs=1e-12)
+    assert normal_sf(1.6448536269514722) == pytest.approx(0.05, abs=1e-12)
+    assert normal_sf(40.0) == 0.0 and normal_sf(-40.0) == 1.0
+
+# tests/core/test_magnitude.py   (TAIL = EngineConfig().replace(mag_score="tail"); build(..., cfg=TAIL))
+def test_tail_score_matches_formula(trained_tail) -> None:        # 500 lognormal(3.6, 0.7), field "amount" (up)
+    (s,) = scores_for(trained_tail, {"amount": 370.0})
+    q = record(trained_tail, "amount").q
+    d = signed_log1p(370.0) - q.quantile(0.5)
+    sigma = max((q.quantile(0.75) - q.quantile(0.5)) / 0.6744897501960817,
+                (q.quantile(0.95) - q.quantile(0.5)) / 1.6448536269514722)
+    z = d / max(sigma, 0.05)
+    assert s.evidence["z"] == pytest.approx(z) and s.evidence["p_tail"] == pytest.approx(normal_sf(z))
+    assert s.score == pytest.approx(posterior(normal_sf(z), 0.005))
+
+def test_tail_warm_spike_and_normal(trained_tail) -> None:
+    assert score_amount(trained_tail, 37.0) < 0.05             # 0.011
+    assert score_amount(trained_tail, 37.0 * 20) > 0.98        # 0.991 (the §6.3 score is 0.82)
+    assert score_amount(trained_tail, 37.0 * 100) > 0.9999
+    assert score_amount(trained_tail, 37.0 / 20) < 0.05        # direction=up ignores small
+
+@pytest.mark.parametrize(("sigma", "x10", "x100"), [(0.5, (0.99, 1.0), (0.9999, 1.0)),
+                                                    (0.86, (0.40, 0.72), (0.999, 1.0)),
+                                                    (2.3, (0.0, 0.08), (0.05, 0.35))])
+def test_tail_is_relative_to_the_fields_log_dispersion(sigma, x10, x100) -> None:
+    # 5,000 lognormal(3.6, sigma) values; k x exp(3.6). Exact log-normal values: 1.000/1.000, 0.575/1.000, 0.031/0.182
+    ...
+
+def test_tail_zero_negative_and_non_finite() -> None:
+    # field "balance_delta" ~ normal(-200, 20), direction both
+    assert score(-200.0) < 0.02 and score(-20000.0) > 0.999 and score(0.0) > 0.999 and score(200.0) > 0.999
+    # nan -> no score; +inf / -inf -> 1.0 with evidence["non_finite"]; record n unchanged after update
+    ...
+
+def test_tail_constant_field() -> None:
+    t = build([10.0] * 100, cfg=TAIL)
+    assert score_amount(t, 10.0) == pytest.approx(0.00995025, abs=1e-6)     # posterior(0.5, 0.005)
+    assert score_amount(t, 11.5) == pytest.approx(0.487, abs=5e-3)          # scale = mag_eps = 0.05
+    assert score_amount(t, 20.0) > 0.9999
+
+def test_tail_two_sided_for_direction_both(trained_both_tail) -> None:      # uniform(30, 50), field "latitude"
+    assert score_field(trained_both_tail, "latitude", 40.0) < 0.01          # p = min(1, 2 Q(z)) ~ 1
+    assert score_field(trained_both_tail, "latitude", 2.0) > 0.999 and score_field(trained_both_tail, "latitude", 800.0) > 0.999
+
+def test_tail_small_integer_field_pinned_limitation() -> None:
+    """PINS a known limitation (spec A1.12 item 8): upper markers of a tied integer field coincide."""
+    t = build([1, 2, 3, 4] * 100, path="qty", cfg=TAIL)
+    assert score_field(t, "qty", 4) < 0.1
+    assert 0.2 < score_field(t, "qty", 5) < 0.5      # 0.327 on the prototype; §6.3 gives 0.10
+    assert score_field(t, "qty", 8) > 0.99
+
+@given(st.floats(0, 1e7), st.floats(0, 1e7))
+def test_tail_monotone_in_x_for_direction_up(trained_tail, a: float, b: float) -> None: ...
+def test_tail_cold_and_prior() -> None: ...            # cold without prior: 0.0 + cold; with prior: prior_used, scale x 1.5,
+                                                       # score == posterior(normal_sf(z_inflated), 0.005) < the un-inflated score
+def test_tail_score_is_idempotent_and_pure(trained_tail) -> None: ...
+def test_pre_a1_mag_state_scores_immediately() -> None: ...   # record dumped under "z" scores under "tail"; dump unchanged
+def test_default_is_still_z() -> None:
+    assert EngineConfig().mag_score == "z" and EngineConfig().tail_prior == 0.005
+```
+
+  `build` gains `cfg: EngineConfig = EngineConfig()`. New in `tests/core/test_magnitude.py`: `def record(t: Trained, path: str) -> MagRecord` (reads `t.store.get(key_mag(AGENT, TOOL, path))`), and module fixtures `trained_tail = build(_lognormal(), cfg=TAIL)`, `trained_both_tail = build(uniform(30, 50) x 300, path='latitude', cfg=TAIL)`. Make the two tests that assert the §6.3 formula explicit about it, so Task 1.21 does not touch them: `test_cold_key_scores_against_prior_with_inflated_iqr` (`tests/core/test_magnitude.py`) and `test_prior_z_matches_manually_inflated_iqr` (`tests/core/test_priors.py`) build with `EngineConfig().replace(mag_score="z")`. Add `"mag_score": "z"`, `"tail_prior": 0.005` to `A1_DEFAULTS` in `tests/core/test_config.py`.
+
+- [ ] **Step 2: Run** `uv run pytest tests/core/test_detector_base.py tests/core/test_magnitude.py tests/core/test_priors.py tests/core/test_config.py -q`. Expected: FAIL (`ImportError: posterior`, unknown fields).
+- [ ] **Step 3: Implement** `normal_sf`, `posterior`, the config fields and the tail branch exactly as A1.2 states. Read `q.quantile(0.95)` / `q.quantile(0.05)` only on the side `d` falls on.
+- [ ] **Step 4: Run the tests.** Expected: PASS.
+- [ ] **Step 5: Run `./scripts/gate.sh`.** Expected: green; goldens unchanged.
+- [ ] **Step 6: Commit** `git commit -am "feat(core): magnitude tail score on a two-piece log scale behind mag_score (A1.2)"`
+
+### Task 1.18: Magnitude learns numeric values of BOOL-typed fields (`mag_bool_numeric`)
+
+Carried over from the final review (ruling FR5): closes the two limitations pinned by `test_pinned_spike_right_after_a_learned_bool_to_numeric_switch_scores_low` and `test_pinned_first_non_bool_number_scores_one_and_persists_while_blocked`.
+
+**Files:**
+- Modify: `agentfw/core/config.py`, `agentfw/core/detectors/magnitude.py`, `agentfw/core/detectors/novelty.py`, `agentfw/core/engine.py`, `agentfw/core/schema_infer.py` (docstring only)
+- Test: `tests/core/test_engine.py`, `tests/core/test_novelty.py`, `tests/core/test_config.py`
+
+**Interfaces:**
+- Consumes: `schema_infer.contradicts_bool`, `patterns.try_number`, `FieldType.BOOL`
+- Produces:
+  - `EngineConfig.mag_bool_numeric: bool = False` (flips in Task 1.21)
+  - `MagnitudeDetector.update`: with the switch on, a BOOL-typed path is pushed like a NUMERIC one (`_push` already drops what `try_number` rejects, so Python bools and `"true"`/`"false"` are never pushed)
+  - `MagnitudeDetector.score`: with the switch on, a BOOL-typed path is scored on `tuple(v for v in values if v is not None and contradicts_bool(v))` only, with `extra = {"type_violation": "bool"}`; nothing is emitted when that tuple is empty
+  - `MagnitudeDetector.has_ref(agent: str, tool: str, path: str) -> bool`: `self._ref(agent, tool, path).rec is not None`
+  - `NoveltyDetector(store, cfg, priors=None, numeric_ref: Callable[[str, str, str], bool] | None = None)`: in a BOOL-typed path, skip the FR2 N1 score when `numeric_ref is not None and numeric_ref(agent, tool, path)`. Tracking of BOOL paths in `update` is unchanged.
+  - `Engine.__init__` passes `numeric_ref = magnitude.has_ref` only when `"magnitude" in enabled and cfg.mag_bool_numeric`; otherwise `None` (pre-amendment behaviour, also in the `engine-no-magnitude` ablation)
+  - Pooled priors unchanged.
+
+- [ ] **Step 1: Write failing tests** (`tests/core/test_engine.py`; add `import math`; `_qty_engine(history, cfg=EngineConfig())` gains the `cfg` parameter; `A1 = EngineConfig().replace(mag_bool_numeric=True, mag_score="tail")`, `PRE = EngineConfig().replace(mag_bool_numeric=False)`)
+
+```python
+def test_bool_to_numeric_retype_does_not_start_cold() -> None:
+    eng, tr = _qty_engine([1] * 500 + [2], A1)
+    res = eng.score(_qty_env(tr, 501, 10000))
+    assert res.field_types["qty"] is FieldType.NUMERIC
+    mag = by(res, "magnitude", "qty")
+    assert "cold" not in mag.evidence and mag.evidence["n"] == 491        # 500 - type_min_obs + the learned 2
+    assert mag.score > 0.999 and res.fused_score > 0.999
+
+def test_first_non_bool_number_is_scored_by_magnitude_and_persists_while_blocked() -> None:
+    eng, tr = _qty_engine([1] * 60, A1)
+    first = _qty_env(tr, 60, 2)
+    res = eng.score(first)
+    assert res.field_types["qty"] is FieldType.BOOL
+    mag = by(res, "magnitude", "qty")
+    assert mag.evidence["type_violation"] == "bool" and mag.evidence["n"] == 50
+    assert mag.evidence["z"] == pytest.approx((math.log(3) - math.log(2)) / 0.05)   # 8.109: constant field, mag_eps
+    assert mag.score > 0.999
+    assert not [d for d in res.per_detector if d.detector == "novelty" and d.field == "qty"]
+    eng.update(first, Outcome.BLOCKED)                                    # a blocked call learns nothing
+    again = eng.score(_qty_env(tr, 61, 2))
+    assert again.field_types["qty"] is FieldType.BOOL
+    assert by(again, "magnitude", "qty").score == mag.score and by(again, "magnitude", "qty").evidence["n"] == 50
+
+def test_contradicting_value_is_scored_by_its_size() -> None:
+    eng, tr = _qty_engine([0, 1] * 40, A1)                               # the field varies: 0 and 1
+    s = {v: by(eng.score(_qty_env(tr, 80, v)), "magnitude", "qty").score for v in (2, 5, 10, 10000)}
+    assert s[2] < 0.1 and 0.2 < s[5] < 0.5 and 0.8 < s[10] < 0.95 and s[10000] > 0.999   # 0.048, 0.335, 0.893, 1.0
+    assert eng.score(_qty_env(tr, 80, 2)).fused_score < 0.1               # a benign 1 -> 2 is no longer 1.0
+    for ok in (0, 1, True):                                               # boolean-like values: no magnitude score
+        assert not [d for d in eng.score(_qty_env(tr, 80, ok)).per_detector if d.field == "qty"]
+
+def test_bool_field_without_numeric_reference_falls_back_to_novelty() -> None:
+    eng, tr = _qty_engine([True] * 60, A1)                               # Python bools are never pushed
+    res = eng.score(_qty_env(tr, 60, 2))
+    assert eng.store.get(key_mag("a", "shop.order", "qty")) is None
+    nov = by(res, "novelty", "qty")
+    assert nov.score == pytest.approx(1.0) and nov.evidence["type_violation"] == "bool"
+    eng2, tr2 = _qty_engine([1] * 25, A1)                                # 15 numbers learned: magnitude cold
+    res2 = eng2.score(_qty_env(tr2, 25, 2))
+    assert by(res2, "magnitude", "qty").evidence["cold"] is True
+    assert by(res2, "novelty", "qty").score == pytest.approx(0.3)          # (1 - 0) * 15 / novelty_full_n
+
+def test_engine_without_magnitude_keeps_the_novelty_score() -> None:
+    # Engine(A1, enabled=ALL_DETECTORS - {"magnitude"}): [1]*60 then 2 -> novelty 1.0, type_violation "bool"
+    ...
+def test_bool_numeric_spec_score_also_scores_by_size() -> None:
+    # mag_bool_numeric=True with mag_score="z": [1]*60 then 2 -> 0.9989 (squash(8.109)); [0,1]*40 then 2 -> 0.147
+    ...
+def test_numeric_strings_in_a_bool_field_are_learned() -> None: ...       # ["1"]*60 then "2": magnitude > 0.999, n == 50
+def test_default_is_still_pre_a1() -> None:
+    assert EngineConfig().mag_bool_numeric is False
+```
+
+  Keep the two existing pin tests and `test_count_field_with_only_0_1_history_scores_a_huge_value` (both params) as they are, but build their engines with `PRE` explicitly (`Engine(PRE)` in `test_count_field_with_only_0_1_history_scores_a_huge_value`, which builds its engine inline) and rename the two pins `..._pre_a1`; their docstrings say "pre-amendment behaviour, `mag_bool_numeric=False`". Add `"mag_bool_numeric": False` to `A1_DEFAULTS` in `tests/core/test_config.py`. In `tests/core/test_novelty.py` add `test_numeric_ref_true_silences_bool_violation` and `test_numeric_ref_none_keeps_fr2_n1` on the detector alone.
+
+- [ ] **Step 2: Run** `uv run pytest tests/core/test_engine.py tests/core/test_novelty.py tests/core/test_config.py -q`. Expected: FAIL (unknown field `mag_bool_numeric`, `TypeError: numeric_ref`).
+- [ ] **Step 3: Implement** as in Interfaces. Replace the "Known limitation" paragraphs in `schema_infer.py` and `novelty.py` with the new rule and the remaining limits (cold window; constant history flags the next integer through `mag_eps`).
+- [ ] **Step 4: Run the tests.** Expected: PASS.
+- [ ] **Step 5: Run `./scripts/gate.sh`.** Expected: green; goldens unchanged (default off).
+- [ ] **Step 6: Commit** `git commit -am "feat(core): magnitude learns and scores numeric values of BOOL-typed fields behind mag_bool_numeric (A1.3)"`
+
+### Task 1.19: Generator: far-mode `magnitude_spike` (`magnitude_mode`, `magnitude_far_mult`)
+
+**Files:**
+- Modify: `agentfw/synth/attacks.py`, `agentfw/synth/generate.py`
+- Test: `tests/synth/test_attacks.py`, `tests/synth/test_generate.py`
+
+**Interfaces:**
+- Consumes: `_magnitude_cands`, `_control_args`, `CONTROL_P99_MULT`, `M_MIN`, `M_MAX`, `mutate_scale`, `mutate_replace`
+- Produces:
+  - `GenerateConfig.magnitude_mode: Literal["own", "far"] = "own"`; `GenerateConfig.magnitude_far_mult: float = Field(default=5.0, gt=0)`
+  - `attacks.far_bounds(sessions: Sequence[list[RawCall]], persona: Persona, catalog: Catalog, mult: float = CONTROL_P99_MULT) -> dict[tuple[str, str], float]`: `(tool, arg) -> mult × P99` per A1.4 (positive numeric values of money/count args of write tools; `np.percentile(..., 99.0)`; `max` with the control's declared p99 on the control's amount arg). Pure; called on the persona's sessions before any injection. `inject()` computes `far_bounds` once per persona, before its session loop, from `sessions_by_persona[agent]`; it is never computed from `ctx.persona_sessions`.
+  - `AttackContext.far: Mapping[tuple[str, str], float] | None = None` (a new context is built with it; never mutate a shared context)
+  - `magnitude_spike(session, rng, ctx)`: with `ctx.far is None` exactly today's code path and draws; otherwise A1.4 steps 1–3; returns `None` when no candidate is feasible
+  - `inject(sessions_by_persona, cfg, rng, ctx_factory, *, stats: dict[str, int] | None = None)`: return type unchanged. In mode `"far"`, a `None` from `magnitude_spike` leaves the session benign, **advances the persona's attack counter** (the id is consumed), injects no control into that session (as in mode `"own"`, where the attack would have taken it) and increments a dropped counter. When `stats` is given it is filled with `{"magnitude_first_pass": int, "magnitude_dropped": int, "magnitude_topup": 0}`.
+  - `Manifest.counts` gains those three keys only when `magnitude_mode == "far"` (Task 1.20 adds the top-up condition)
+  - CLI: `--magnitude-mode {own,far}`, `--magnitude-far-mult FLOAT`
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+def test_far_bounds_is_mult_times_benign_p99(world: World) -> None:
+    sessions = refund_sessions(world, amounts=[float(a) for a in range(1, 101)])     # p99 = 99.01
+    far = far_bounds(sessions, world.persona(PERSONA), world.catalog)
+    assert far[("stripe.create_refund", "amount")] == pytest.approx(5.0 * max(99.01, declared_p99(world)))
+    assert far_bounds(sessions, world.persona(PERSONA), world.catalog, mult=1.0)[("stripe.create_refund", "amount")] * 5 \
+        == pytest.approx(far[("stripe.create_refund", "amount")])
+    assert far_bounds([], world.persona(PERSONA), world.catalog) == {}
+
+def test_far_spike_lands_at_or_beyond_the_bound_with_strength_in_range(world: World) -> None:
+    for seed in range(200):
+        res = magnitude_spike(session, np.random.default_rng(seed), far_ctx(world, session))
+        if res is None: continue
+        (lab,) = res.labels; new, old = spiked_value(res), own_value(session, res)
+        assert new >= bound and 3.0 <= lab.strength <= 100.0 + 1e-9 and lab.strength == pytest.approx(new / old)
+
+def test_far_mode_makes_the_same_draws_as_own(world: World) -> None:
+    a, b = np.random.default_rng(5), np.random.default_rng(5)
+    magnitude_spike(session, a, own_ctx(world, session)); magnitude_spike(session, b, far_ctx(world, session))
+    assert a.bit_generator.state == b.bit_generator.state
+
+def test_far_infeasible_session_stays_benign_and_is_counted(tmp_path: Path) -> None:
+    # every candidate x 100 < far: the session has no attack label and no control label, the next attack of
+    # that persona skips one id, and manifest.counts["magnitude_dropped"] == 1
+    ...
+def test_far_integer_field_fixup_within_m_max(world: World) -> None:
+    # due_in_days = 1 with bound 39.2: new value == 40 (ceil), strength == 40.0 <= 100; value 1 with bound 150: infeasible
+    # (with the drawn ln m = ln 3 (t = 0), so m = 39.2 rounds to 39 and the fix-up applies)
+    ...
+def test_far_mode_leaves_other_families_and_controls_byte_identical(tmp_path: Path) -> None:
+    own, far = gen(tmp_path / "own", magnitude_mode="own"), gen(tmp_path / "far", magnitude_mode="far")
+    keep = lambda rows: [r for r in rows if r.get("attack_family") != "magnitude_spike"
+                         and r["envelope_id"] not in spiked_or_dropped]      # compare raw JSON lines
+    assert label_lines(own, keep) == label_lines(far, keep)
+    assert trace_lines(own, exclude=spiked_or_dropped) == trace_lines(far, exclude=spiked_or_dropped)
+    assert all(l["strength"] >= 3.0 for l in far_spikes) and min_ratio_to_field_benign_max(far) > 1.0
+    assert count_at_or_below_control(far) == 0 < count_at_or_below_control(own)
+
+def test_far_mode_is_deterministic(tmp_path: Path) -> None: ...    # two runs: identical sha256 of both files
+def test_default_generator_is_unchanged(tmp_path: Path) -> None:
+    cfg = small_cfg(); assert cfg.magnitude_mode == "own" and cfg.magnitude_far_mult == CONTROL_P99_MULT
+    m = generate(cfg, tmp_path); assert set(m.counts) == {"sessions", "envelopes", "attacks"}
+def test_cli_magnitude_flags(tmp_path: Path) -> None: ...          # --magnitude-mode far lands in manifest.config
+```
+
+- [ ] **Step 2: Run** `uv run pytest tests/synth/test_attacks.py tests/synth/test_generate.py -q`. Expected: FAIL (`ImportError: far_bounds`, unknown config fields).
+- [ ] **Step 3: Implement.** Mapping of the drawn `ln m` onto the feasible range (the only step the tests do not fully determine):
+
+```python
+lo = math.log(max(M_MIN, bound / float(old)))
+t = (log_m - math.log(M_MIN)) / (math.log(M_MAX) - math.log(M_MIN))
+m = min(math.exp(lo + t * (math.log(M_MAX) - lo)), M_MAX)
+new = mutate_scale(session[i], name, m)
+if float(new.args[name]) < bound:   # rounding fell short
+    fix = math.ceil(bound) if isinstance(old, int) else math.ceil(bound * 100.0) / 100.0
+    new = mutate_replace(session[i], name, fix)
+```
+
+  Candidate choice: `next(c for c in [*cands[k:], *cands[:k]] if feasible(c))`.
+- [ ] **Step 4: Run the tests, then** `uv run pytest tests/synth -q` **and** `uv run python scripts/update_golden.py --golden all` **followed by** `git diff --stat tests/golden`. Expected: PASS and no golden change (the default mode is `"own"`).
+- [ ] **Step 5: Run `./scripts/gate.sh`.** Expected: green.
+- [ ] **Step 6: Commit** `git commit -am "feat(synth): far-mode magnitude spikes at or beyond 5 x the benign p99 (A1.4)"`
+
+### Task 1.20: Generator: magnitude top-up rate, `sw1_config`, manifest census
+
+**Files:**
+- Modify: `agentfw/synth/attacks.py`, `agentfw/synth/generate.py`
+- Test: `tests/synth/test_attacks.py`, `tests/synth/test_generate.py`
+
+**Interfaces:**
+- Consumes: Task 1.19
+- Produces:
+  - `GenerateConfig.magnitude_topup_rate: float = Field(default=0.0, ge=0.0, le=1.0)`
+  - `generate.topup_rng(seed: int) -> np.random.Generator` = `np.random.default_rng([seed, stable_hash("attacks:magnitude_topup")])`
+  - `inject(sessions_by_persona, cfg, rng, ctx_factory, *, topup_rng: np.random.Generator | None = None, stats: dict[str, int] | None = None)` (both new parameters keyword-only; `stats["magnitude_topup"]` = attacks the pass injected); `ValueError` when `cfg.magnitude_topup_rate > 0` and `topup_rng is None`. The top-up pass follows A1.4 exactly: sorted personas, sessions from `warmup_sessions`, skip touched sessions (attacked, consumed by a multi-session attack, or control-injected), skip sessions without a (feasible) candidate **without drawing**, one `rng.random()` per remaining session, attack ids `atk-{agent}-m{k:05d}`.
+  - `Manifest.counts` carries the three `magnitude_*` keys when `magnitude_mode == "far" or magnitude_topup_rate > 0`, and under the same condition `magnitude_strength_ge_10` (the number of `magnitude_spike` attacks with `Label.strength ≥ 10`; spec A1.4)
+  - `generate.sw1_config(seed: int = 0) -> GenerateConfig`: 20 personas, `days=90`, `families=sorted(ATTACKS)`, `attack_rate=0.015`, `magnitude_mode="far"`, `magnitude_topup_rate=0.015` (the single source of truth for SW1; the two literals in `tests/acceptance/test_tier1_exit.py` and `scripts/build_leaderboard.py` are replaced in Tasks 1.24 and 1.25)
+  - CLI: `--magnitude-topup-rate FLOAT`
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+def test_topup_does_not_change_the_first_pass(tmp_path: Path) -> None:
+    a = gen(tmp_path / "a", magnitude_mode="far", magnitude_topup_rate=0.0)
+    b = gen(tmp_path / "b", magnitude_mode="far", magnitude_topup_rate=0.5)
+    first = lambda d: [ln for ln in label_lines(d) if b'-m0' not in attack_id_bytes(ln)]
+    topped = topup_envelope_ids(b)
+    assert [ln for ln in label_lines(a) if env_id(ln) not in topped] == [ln for ln in first(b) if env_id(ln) not in topped]
+    assert trace_lines(a, exclude=topped) == trace_lines(b, exclude=topped)
+
+def test_topup_rate_one_spikes_every_eligible_untouched_session(tmp_path: Path) -> None:
+    d = gen(tmp_path, magnitude_mode="far", magnitude_topup_rate=1.0)
+    assert sessions_with_topup(d) == eligible_untouched_sessions(d)          # post-warmup, untouched, feasible candidate
+    assert all(re.fullmatch(r"atk-.+-m\d{5}", a) for a in topup_attack_ids(d))
+    assert all(l["attack_family"] == "magnitude_spike" for l in topup_labels(d))
+    assert not sessions_with_topup(d) & first_pass_touched_sessions(d)
+    assert all(session_index(s) >= cfg.warmup_sessions for s in sessions_with_topup(d))
+
+def test_topup_counts_in_manifest(tmp_path: Path) -> None:
+    m = manifest(gen(tmp_path, magnitude_mode="far", magnitude_topup_rate=0.5))
+    assert m.counts["magnitude_first_pass"] + m.counts["magnitude_topup"] == n_distinct_magnitude_attack_ids
+    assert m.counts["magnitude_dropped"] >= 0 and m.counts["attacks"] == n_distinct_attack_ids
+
+def test_manifest_counts_magnitude_strength_ge_10(tmp_path: Path) -> None:
+    d = gen(tmp_path, magnitude_mode="far", magnitude_topup_rate=0.5)
+    assert manifest(d).counts["magnitude_strength_ge_10"] == sum(l["strength"] >= 10.0 for l in magnitude_spike_labels(d))
+
+def test_topup_is_deterministic_and_uses_its_own_stream(tmp_path: Path) -> None:
+    # two runs: identical sha256; topup_rng(0) != attack_rng(0) streams; rate 0 -> no topup ids, bytes == Task 1.19's far dataset
+    ...
+def test_topup_in_own_mode_uses_all_candidates(tmp_path: Path) -> None: ...
+def test_topup_rejects_missing_stream() -> None:
+    with pytest.raises(ValueError, match="topup_rng"): inject(sessions, cfg_with_rate, attack_rng(0), ctx_factory)
+def test_sw1_config() -> None:
+    c = sw1_config(); assert (c.seed, c.days, c.attack_rate) == (0, 90, 0.015)
+    assert c.magnitude_mode == "far" and c.magnitude_topup_rate == c.attack_rate and c.magnitude_far_mult == 5.0
+    assert c.families == sorted(ATTACKS) and sw1_config(seed=2).seed == 2
+def test_pre_a1_sw1_manifest_is_refused() -> None:
+    old = sw1_config().model_dump(mode="json")                  # a manifest config written before the amendment
+    for k in ("magnitude_mode", "magnitude_far_mult", "magnitude_topup_rate"):
+        del old[k]
+    assert GenerateConfig.model_validate(old) != sw1_config()   # so the SW1 guards refuse a stale traces/ directory
+```
+
+- [ ] **Step 2: Run** `uv run pytest tests/synth -q`. Expected: FAIL (unknown field `magnitude_topup_rate`, `ImportError: sw1_config`).
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run the tests and** `uv run python scripts/update_golden.py --golden all && git diff --stat tests/golden`. Expected: PASS, no golden change.
+- [ ] **Step 5: Verify the legacy bytes once:** generate the old SW1 (`sw1_config()` with `magnitude_mode="own"`, `magnitude_topup_rate=0.0`) into a temp dir under the workspace and check `manifest.files["traces.jsonl"]` starts with `e7b3bc2a2f20` and `labels.jsonl` with `bd94a3197d82`. Expected: equal.
+- [ ] **Step 6: Run `./scripts/gate.sh`.** Expected: green.
+- [ ] **Step 7: Commit** `git commit -am "feat(synth): magnitude top-up pass on its own stream; sw1_config; manifest census (A1.4)"`
+
+### Task 1.21: New scoring becomes the default; `SPEC_SWITCHES` pins the old one; goldens and CI baseline
+
+**Files:**
+- Modify: `agentfw/core/config.py` (three defaults), `agentfw/bench/sweeps.py`, `tests/golden/engine.sha256`, `agentfw/bench/baseline_metrics.json`, `docs/decisions/007-ablation-dominance.md` (dated addendum, only if the xfail flips), `docs/decisions/evidence/008-root-causes/{replay_variants,shares}.py` (docstrings only)
+- Test: `tests/core/test_config.py`, `tests/bench/test_ablation_sweeps.py`, `tests/bench/test_evidence_scripts.py`, `tests/core/test_engine.py`
+
+**Interfaces:**
+- Produces:
+  - `EngineConfig` defaults: `vel_count_stat="poisson"`, `mag_score="tail"`, `mag_bool_numeric=True` (`tail_prior` stays 0.005)
+  - `sweeps.PRE_A1_SWITCHES: dict[str, object] = {"vel_count_stat": "logz", "mag_score": "z", "mag_bool_numeric": False}`
+  - `sweeps.SPEC_SWITCHES = {"vel_count_attempts": False, "seq_prereq_graded": False, "novelty_full_n": 200, **PRE_A1_SWITCHES}`
+  - `GATE_CANDIDATES` unchanged in names and order (every row already starts from `SPEC_SWITCHES`); `REVIEW_NOTE` says the 008 row "oracle-reviewer, vel attempts, graded prereq, novelty_full_n=50" is the engine **before Amendment A1**
+  - The `z0tau` suite stays. Add `Z0TAU_NOTE` to `sweeps.py` (at the defaults the suite moves velocity only, A1.2) and print it under the `z0tau` suite in `main()`; test that `sweeps.md` contains it.
+
+- [ ] **Step 1: Write failing tests**
+
+```python
+# tests/core/test_config.py  (A1_DEFAULTS exists since Task 1.16 and is already in the union; this task changes three of its values)
+A1_DEFAULTS: dict[str, object] = {"vel_count_stat": "poisson", "mag_score": "tail", "tail_prior": 0.005,
+                                  "mag_bool_numeric": True}
+def test_engine_config_defaults_match_global_constraints() -> None:
+    expected = (GLOBAL_CONSTRAINT_VALUES | SWEEP_SWITCH_DEFAULTS | GATE_SWITCH_DEFAULTS | DECISION_OVERRIDES
+                | USER_DECISION_DEFAULTS | A1_DEFAULTS)
+    assert dataclasses.asdict(EngineConfig()) == expected
+def test_tail_prior_equals_cal_alpha_by_default() -> None:
+    assert EngineConfig().tail_prior == EngineConfig().cal_alpha == 0.005
+
+# tests/bench/test_ablation_sweeps.py
+def test_gate_candidates_pin_the_spec_switches() -> None:
+    assert PRE_A1_SWITCHES == {"vel_count_stat": "logz", "mag_score": "z", "mag_bool_numeric": False}
+    assert SPEC_SWITCHES == {"vel_count_attempts": False, "seq_prereq_graded": False, "novelty_full_n": 200,
+                             **PRE_A1_SWITCHES}
+    by_name = {n: (p, o) for n, p, o in GATE_CANDIDATES}
+    assert by_name["default"] == (SPEC_SWITCHES, "allow")
+    rec, mode = by_name["oracle-reviewer, vel attempts, graded prereq, novelty_full_n=50"]
+    assert EngineConfig().replace(**rec) == EngineConfig().replace(**PRE_A1_SWITCHES) and mode == "review"
+    assert EngineConfig().replace(**PRE_A1_SWITCHES) != EngineConfig()
+def test_z0tau_note_is_printed_in_sweeps_md(...) -> None: ...   # sweeps.md of the z0tau suite contains Z0TAU_NOTE
+
+# tests/bench/test_evidence_scripts.py  (both scripts)
+    rec = {"vel_count_attempts": True, "seq_prereq_graded": True, "novelty_full_n": 50}
+    assert mod.spec_config(rec) == EngineConfig().replace(**PRE_A1_SWITCHES)    # 008's candidate = the pre-A1 engine
+    assert mod.spec_config({**rec, "vel_count_stat": "poisson", "mag_score": "tail", "mag_bool_numeric": True}) == EngineConfig()
+```
+
+  `test_golden_engine_spec_allow` is not edited and must stay green: it is the proof that the old scoring is still selectable.
+
+- [ ] **Step 2: Run** `uv run pytest tests/core/test_config.py tests/bench/test_ablation_sweeps.py tests/bench/test_evidence_scripts.py -q`. Expected: FAIL (defaults differ; `ImportError: PRE_A1_SWITCHES`).
+- [ ] **Step 3: Implement** the three defaults and the two constants.
+- [ ] **Step 4: Run** `uv run pytest -q -m "not slow and not live"`. Expected failures, and only these: `test_golden_engine` (hash) and, if the prototype's finding holds, an XPASS(strict) on `test_full_engine_auprc_at_least_every_single_detector_ablation[engine-no-magnitude]`. Any other failure is a test that still relies on a default: make it explicit (`PRE_A1_SWITCHES`) if it tests pre-amendment behaviour, otherwise investigate with superpowers:systematic-debugging.
+- [ ] **Step 5: Regenerate and record old → new.**
+  - `uv run python scripts/update_golden.py --golden engine`. Record the old and new hash in the commit message. `static_threshold.sha256` and `engine-spec-allow.sha256` must be unchanged (`git diff --stat tests/golden` shows one file).
+  - `uv run python -m agentfw.bench.ci_regress --write-baseline`. Record old → new (old: engine AUPRC 0.5000, FPR@95 0.008403). Expected: unchanged; if it changes, state the cause in the commit message (the CI test split holds one attack row, so AUPRC = 1 / its rank).
+  - If the `engine-no-magnitude` xfail XPASSes: remove the `_MAG_HURTS` mark and append a dated addendum to `docs/decisions/007-ablation-dominance.md` with both AUPRC values. If it still fails as expected, leave it.
+- [ ] **Step 6: Run `./scripts/gate.sh`.** Expected: green.
+- [ ] **Step 7: Commit** `git commit -am "feat(core)!: Amendment A1 scoring is the default; SPEC_SWITCHES pins the spec formulas; engine golden <old12> -> <new12>"`
+
+### Task 1.22: Among-the-reasons metric, amended `gate_preview`, dual-protocol gate table
+
+**Files:**
+- Create: `agentfw/bench/gate.py`, `tests/bench/test_gate.py`
+- Modify: `agentfw/bench/metrics.py`, `agentfw/bench/report.py`, `agentfw/bench/sweeps.py`
+- Test: `tests/bench/test_metrics.py`, `tests/bench/test_report.py`, `tests/bench/test_ablation_sweeps.py`
+
+**Interfaces:**
+- Consumes: `ScoreRow.per_detector_json`, `GATE_FAMILIES`, `PROTOCOL_LABELS`, `replay_detector`, `PRE_A1_SWITCHES`
+- Produces (`metrics.py`):
+  - `GATE_REASON_MIN = 0.3` (a test asserts it equals `EngineConfig().reason_min`), `GATE_SHARE = 0.90`, `GATE_BENIGN_FPR = 0.02`
+  - `among_reasons_share(rows: Sequence[ScoreRow], family: str, detector: str, thresholds: Thresholds, *, bucket: str = "all", reason_min: float = GATE_REASON_MIN) -> float` (A1.6; NaN when no attack of the family in the bucket is detected)
+  - `GateCell` gains `among_reasons_share: float` (after `top_reason_share`, which keeps its meaning)
+  - `GatePreview` gains `failures: tuple[str, ...]` (e.g. `"recall:novel_target"`, `"among:exfil_volume"`, `"benign_fpr"`); `passed` = no missing family, every recall ≥ `GATE_RECALL`, every among-the-reasons share ≥ `GATE_SHARE`, `benign_fpr ≤ GATE_BENIGN_FPR`. A NaN `benign_fpr` (no benign row) or a NaN among-the-reasons share fails the gate and is listed in `failures`.
+  - `top_reason_share` unchanged
+- Produces (`gate.py`):
+  - `ORIGINAL_CRITERION_LABEL = "original spec §9 criterion"`
+  - `gate_matrix(traces_dir: Path, cfg: EngineConfig = EngineConfig(), *, protocols: Sequence[OutcomeMode] = ("review", "allow")) -> dict[OutcomeMode, GatePreview]`; raises `ValueError` unless both `"review"` and `"allow"` are requested
+  - `render_gate_matrix(results: Mapping[str, Mapping[OutcomeMode, GatePreview]]) -> str`: one block per named engine row, one line per protocol under its `PROTOCOL_LABELS` text verbatim; per family `recall (n/N); among; top-1`; the top-1 column header carries `ORIGINAL_CRITERION_LABEL`; PASS/FAIL per protocol with the failures listed
+  - CLI `python -m agentfw.bench.gate --traces DIR [--pre-a1] [--out FILE.md] [--json FILE.json]` (`--pre-a1` adds the `PRE_A1_SWITCHES` engine row; both protocols always)
+- Produces (`report.py`, `sweeps.py`): `_gate_md` heads the section with the run's protocol label verbatim, prints columns `Family | Bucket | Detector | Attack recall | Among-the-reasons share | Top-1 share (original spec §9 criterion)`, and ends with the line `amended criterion under <label>: PASS|FAIL (one protocol only; this is not the Tier-1 gate result, see the dual-protocol table)` by the amended criterion with the failure list; it never prints the bare words "gate PASS" (spec A1.5); `_gate_keys` adds `among:{family}`; `gate_table` prints `rec (among; top-1)`.
+
+- [ ] **Step 1: Write failing tests** (hand-built `ScoreRow`s with the file's existing row factory)
+
+```python
+def test_among_reasons_counts_a_targeted_reason_on_any_flagged_row() -> None:
+    rows = [atk("A1", fused=0.95, thr=0.9, per=[("sequence", 0.95), ("velocity", 0.31)]),     # flagged, velocity a reason
+            atk("A2", fused=0.95, thr=0.9, per=[("sequence", 0.95), ("velocity", 0.30)]),     # 0.30 is not > reason_min
+            atk("A3", fused=0.50, thr=0.9, per=[("velocity", 0.50)]),                         # only on an unflagged row
+            atk("A3", fused=0.95, thr=0.9, per=[("sequence", 0.95)]),
+            atk("A4", fused=0.10, thr=0.9, per=[("velocity", 0.10)])]                         # not detected
+    assert among_reasons_share(rows, "velocity_burst", "velocity", "row") == pytest.approx(1 / 3)
+    assert top_reason_share(rows, "velocity_burst", "velocity", "row") == 0.0
+
+def test_among_reasons_respects_the_gate_bucket() -> None:
+    # magnitude spikes with strength 5 (attributed) and 20 (not attributed), both detected
+    assert among_reasons_share(rows, "magnitude_spike", "magnitude", "row", bucket="10-100") == 0.0
+    assert among_reasons_share(rows, "magnitude_spike", "magnitude", "row") == 0.5
+
+def test_among_reasons_nan_without_detection() -> None: ...
+def test_gate_reason_min_matches_engine_config() -> None:
+    assert GATE_REASON_MIN == EngineConfig().reason_min == 0.3
+
+def test_gate_preview_passed_is_the_amended_criterion() -> None:
+    assert gate_preview(all_recall_1_among_1_fpr_low).passed is True
+    g = gate_preview(recall_1_but_exfil_among_0_89);  assert g.passed is False and g.failures == ("among:exfil_volume",)
+    g = gate_preview(recall_1_among_1_benign_fpr_0_03);  assert g.passed is False and g.failures == ("benign_fpr",)
+    g = gate_preview(velocity_top1_0_3_among_1);  assert g.passed is True            # top-1 is reported, not gated
+    assert g.cells["velocity_burst"].top_reason_share == pytest.approx(0.3)
+
+# tests/bench/test_gate.py  (tiny_dataset)
+def test_gate_matrix_runs_both_protocols(tiny_dataset: Path) -> None:
+    res = gate_matrix(tiny_dataset);  assert list(res) == ["review", "allow"]
+    with pytest.raises(ValueError, match="both"): gate_matrix(tiny_dataset, protocols=("review",))
+def test_render_gate_matrix_labels_verbatim(tiny_dataset: Path) -> None:
+    md = render_gate_matrix({"engine": gate_matrix(tiny_dataset)})
+    assert "spec §5.2 allow-all" in md
+    assert "oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)" in md
+    assert "original spec §9 criterion" in md and "among" in md.lower()
+    assert md.index(PROTOCOL_LABELS["review"]) < md.index(PROTOCOL_LABELS["allow"])
+def test_gate_cli_writes_md_and_json(tiny_dataset: Path, tmp_path: Path) -> None: ...   # --pre-a1 adds a second engine row
+# tests/bench/test_report.py
+def test_gate_section_shows_both_shares_and_the_protocol(...) -> None: ...   # header cells and label as in Interfaces
+def test_gate_section_never_prints_bare_gate_pass(...) -> None:
+    # passing and failing run: the section ends with "amended criterion under <label>: PASS|FAIL (one protocol only;
+    # this is not the Tier-1 gate result, see the dual-protocol table)" and the report never contains "gate PASS"
+    ...
+```
+
+  Update `test_gate_preview_passes_only_with_every_gated_family_present` (`tests/bench/test_ablation_sweeps.py`): give each attack row a per-detector entry of its targeted detector with score > 0.3 and add one unflagged benign row.
+
+- [ ] **Step 2: Run** `uv run pytest tests/bench/test_metrics.py tests/bench/test_gate.py tests/bench/test_report.py tests/bench/test_ablation_sweeps.py -q`. Expected: FAIL (`ImportError: among_reasons_share`, no module `agentfw.bench.gate`).
+- [ ] **Step 3: Implement.** `among_reasons_share` follows the inline loop in `main()` of `docs/decisions/evidence/008-root-causes/shares.py` (the value it prints as `reason_share`): group warm rows by `attack_id`, keep the family and bucket (`_bucket_of`), flagged = `_flag(r, thresholds)`, attributed = any flagged row with an item `detector == target and score > reason_min`. The evidence script keeps working and is not edited.
+- [ ] **Step 4: Run the tests; then check the metric against the recorded evidence:** `uv run python -m agentfw.bench.gate --traces traces/sweep-seed0 --pre-a1`, run against the pre-A1 dataset `traces/sweep-seed0` (git-ignored; in a fresh worktree the controller supplies its path, read-only; if it is not available the check is skipped and the report says so), must show, for the pre-A1 engine under the oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic), exfil_volume among-the-reasons 0.89 (17/19) and 1.00 for the other five families (decision 008 evidence §3).
+- [ ] **Step 5: Run `./scripts/gate.sh`.** Expected: green.
+- [ ] **Step 6: Commit** `git commit -am "feat(bench): among-the-reasons attribution, amended gate criterion, dual-protocol gate table (A1.5-A1.7)"`
+
+### Task 1.23: Confirm the combination (first measurement of the implemented design)
+
+The engine parts and the generator parts were never measured together in an implementation. This task does that before anything is pinned. It changes no detector, generator or constant.
+
+**Files:**
+- Create: `docs/decisions/evidence/a1-gate/run.sh`, `docs/decisions/evidence/a1-gate/matrix.md`, `docs/decisions/evidence/a1-gate/matrix.json`, `tests/bench/test_a1_evidence.py`
+- Data (git-ignored): `traces/sw1-seed0`, `traces/sw1-seed1`, `traces/sw1-seed2`, `traces/sw1-sens-seed0`
+
+**Interfaces:**
+- Consumes: `sw1_config(seed)`, `python -m agentfw.bench.gate --pre-a1`, `tests/perf/test_latency.py`
+- Produces: `matrix.json` = `{"rows": [{"dataset": "sw1"|"sens", "seed": int, "dataset_sha": str, "engine": "a1"|"pre-a1", "protocol": "review"|"allow", "families": {fam: {"recall", "n_detected", "n_total", "among", "top1"}}, "benign_fpr", "control_fpr", "benign_share_ge_0_5": {"magnitude", "velocity"}, "per_agent_benign_velocity_share_ge_0_5": {agent: float}, "passed", "failures"}], "counts": {seed: manifest.counts}, "census": {seed: {"gated_test_n", "by_persona", "share_strength_ge_10", "median_strength"}}, "latency_p99_us": float | null}`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+def test_a1_matrix_is_complete() -> None:
+    m = orjson.loads((EVIDENCE / "matrix.json").read_bytes())
+    have = {(r["dataset"], r["seed"], r["engine"], r["protocol"]) for r in m["rows"]}
+    want = {("sw1", s, e, p) for s in (0, 1, 2) for e in ("a1", "pre-a1") for p in ("review", "allow")}
+    want |= {("sens", 0, e, p) for e in ("a1", "pre-a1") for p in ("review", "allow")}
+    assert have == want
+    for s in ("0", "1", "2"):
+        assert m["census"][s]["gated_test_n"] >= 50 and m["counts"][s]["magnitude_dropped"] >= 0
+    md = (EVIDENCE / "matrix.md").read_text()
+    assert PROTOCOL_LABELS["allow"] in md and PROTOCOL_LABELS["review"] in md and "original spec §9 criterion" in md
+```
+
+- [ ] **Step 2: Run it.** Expected: FAIL (`FileNotFoundError`).
+- [ ] **Step 3: Write `run.sh` and run it** (at most 4 processes; 16 replays (about 35 s each on an idle machine) plus four dataset generations of about 50 s): generate the four datasets (`sw1_config(seed)` for 0, 1, 2; seed 0 with `magnitude_far_mult=1.0` for the sensitivity set), run `agentfw.bench.gate --pre-a1` on each, merge into `matrix.json`, render `matrix.md` with `render_gate_matrix`. Seed 2 is generated and replayed **after** seeds 0 and 1 are written down, with nothing changed in between.
+- [ ] **Step 4: Compare with the expectation** (spec A1.11; prototype, seed 0 / seed 1):
+
+  Rows marked review are under: oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic). Rows marked allow are under: spec §5.2 allow-all.
+
+  | check | expected | stop if |
+  |---|---|---|
+  | dataset sha (traces) | `a455b10c705d` / `e783c301bf21` | different: the generator differs from the prototype; find out why before reading any recall |
+  | spikes: first pass / dropped / top-up | 53 / 2 / 211 and 49 / 1 / 203 | different |
+  | magnitude gate cell n | 81 / 85 | below 50 on any seed |
+  | review: recall, six families | 1.000 ×6 / 1.000 ×5 and velocity 0.981 | any family below 0.90 on seed 0 or 1 |
+  | review: among-the-reasons | 1.00 everywhere | any family below 0.90 |
+  | review: benign FPR; control FPR | 0.58 % / 0.62 %; 3.5 % / 2.8 % | benign FPR above 2 % |
+  | allow: magnitude; scope; exfil; prereq; novel; velocity | 0.938, 1.000, 0.579, 0.533, 0.163, 0.800 / 0.824, 1.000, 0.655, 0.667, 0.222, 0.808 | (expected to fail; record) |
+  | pre-A1 engine on the new data, magnitude, review / allow | 0.975 / 0.753 and 0.988 / 0.788 | — |
+  | sensitivity (seed 0), magnitude, review / allow: A1; pre-A1 | 0.797 / 0.656; 0.688 / 0.578 | — |
+  | share of benign magnitude scores ≥ 0.5 | 0.47 % / 0.52 % | above 1.0 % (twice the prior) |
+  | per-agent benign velocity share ≥ 0.5 | record the table | (no threshold; reported to the user as the judge's open condition) |
+  | seed 2 (no expectation exists) | amended gate passes under review | fails under review |
+
+  Score hashes are not expected to match the prototype (it was built on `f185072`); recalls within one attack of the table are a match. **If a "stop" condition holds: do not change a constant, a formula or the dataset. Report status BLOCKED to the controller with the matrix.** The user decides what happens next.
+- [ ] **Step 5: Latency.** On an idle machine run `uv run pytest tests/perf/test_latency.py -m slow -q -s` and read the line "Engine.score latency: p50=... us p99=... us". Expected: p99 < 200 µs. Write the number into `matrix.json`; if the machine is not idle, write `null` and say so in `matrix.md` (do not pin a number measured under load).
+- [ ] **Step 6: Run the test and `./scripts/gate.sh`.** Expected: PASS, green.
+- [ ] **Step 7: Commit** `git add docs/decisions/evidence/a1-gate tests/bench/test_a1_evidence.py && git commit -m "docs(bench): Amendment A1 gate matrix on seeds 0-2 under both protocols (first measurement of the combination)"`
+
+### Task 1.24: Dual-protocol Tier-1 acceptance gate
+
+**Files:**
+- Modify: `tests/acceptance/test_tier1_exit.py`
+
+**Interfaces:**
+- Consumes: `sw1_config()`, `run(..., outcomes=...)`, `gate_preview`, `among_reasons_share`, `top_reason_share`, the seed-0 rows of `docs/decisions/evidence/a1-gate/matrix.json`
+- Produces: `SW1 = sw1_config()`; `PROTOCOLS: tuple[OutcomeMode, ...] = ("review", "allow")`; session fixture `tier1_runs -> dict[OutcomeMode, tuple[Path, Path]]` (one dataset; the review run carries the ablation table, the allow-all run does not); `MEASURED: dict[OutcomeMode, dict[str, tuple[float, float]]]` = per family `(recall, among)` copied from Task 1.23's seed-0 A1 rows; `TOLERANCE = 0.1`; `MIN_MAGNITUDE_N = 50`; `_cell(rows, fam) -> RecallCell` = `recall_by_family` on warm test rows of that family, gate bucket; `_among(rows, fam) -> float` = `among_reasons_share(warm test rows, fam, TARGETS[fam], "row", bucket=gate bucket)`; session fixtures `tier1_rows -> dict[OutcomeMode, list[ScoreRow]]` and `tier1_reports -> dict[OutcomeMode, dict[str, Any]]` built from `tier1_runs`
+
+- [ ] **Step 1: Rewrite the tests** (module docstring: both protocols, labels verbatim, which test is the gate)
+
+```python
+_ALLOW_XFAIL = pytest.mark.xfail(strict=True, raises=AssertionError,
+    reason="Tier-1 gate (Amendment A1) not met under spec §5.2 allow-all: the replay learns the attack rows; "
+           "see docs/decisions/008-tier1-gate.md")
+
+@pytest.mark.parametrize("mode", ["review", pytest.param("allow", marks=_ALLOW_XFAIL)])
+def test_tier1_exit(tier1_rows: dict[OutcomeMode, list[ScoreRow]], mode: OutcomeMode) -> None:
+    """Amended gate (spec A1.7), per protocol.
+    "review" = oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic);
+    "allow" = spec §5.2 allow-all."""
+    warm_test = _warm_test(tier1_rows[mode])
+    for fam, det in TARGETS.items():
+        rows = [r for r in warm_test if r.attack_family in (None, fam)]
+        bucket = "10-100" if fam == "magnitude_spike" else "all"
+        cell = recall_by_family(rows, "row", level="attack")[fam][bucket]
+        assert cell.recall >= 0.90, (mode, fam, cell)
+        assert among_reasons_share(rows, fam, det, "row", bucket=bucket) >= 0.90, (mode, fam)
+    assert benign_fpr(warm_test, "row") <= 0.02
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+def test_tier1_magnitude_cell_size(tier1_rows, mode) -> None:
+    assert _cell(tier1_rows[mode], "magnitude_spike").n_total >= MIN_MAGNITUDE_N
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+def test_tier1_benign_fpr_guard(tier1_rows, mode) -> None:
+    assert benign_fpr(_warm_test(tier1_rows[mode]), "row") <= 0.02
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+def test_tier1_report_shows_both_shares(tier1_reports, mode) -> None:
+    gate = tier1_reports[mode]["gate"]
+    assert tier1_reports[mode]["extras"]["outcomes"] == mode
+    for fam in TARGETS:
+        assert {"among_reasons_share", "top_reason_share"} <= gate["cells"][fam].keys()
+    assert gate["passed"] is (mode == "review")     # the report.json field; not a rendered claim (spec A1.5)
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+def test_tier1_no_regression(tier1_rows, mode) -> None:
+    for fam, (recall, among) in MEASURED[mode].items():
+        assert _family_recall(_warm_test(tier1_rows[mode]), fam) >= recall - TOLERANCE, (mode, fam)
+        assert _among(tier1_rows[mode], fam) >= among - TOLERANCE, (mode, fam)
+```
+
+  `test_tier1_ablation_table`, `test_tier1_cold_start_curve_and_drift` and `test_tier1_score_latency_p99` keep their assertions and read the review run. Expected values for `MEASURED` (to be replaced by Task 1.23's measured seed-0 numbers; recall, among): review (oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)) `1.000` for all six, among `1.00`; allow (spec §5.2 allow-all) magnitude `0.938`, scope `1.000`, exfil `0.579`, prereq `0.533`, novel `0.163`, velocity `0.800`, among `1.00`.
+
+- [ ] **Step 2: Run** `AFW_TIER1_TRACES=traces/sw1-seed0 uv run pytest tests/acceptance/test_tier1_exit.py -m slow -v` **with `MEASURED` still holding the old review numbers and without the `allow` xfail mark.** Expected: `test_tier1_exit[allow]` FAILS on recall (this is the RED that justifies the xfail); `test_tier1_exit[review]` passes.
+- [ ] **Step 3: Pin.** Add the strict xfail to the `allow` parameter only, copy `MEASURED` from `matrix.json`. No xfail on `review`: if it fails, that is Task 1.23's stop condition, not a reason to add a mark.
+- [ ] **Step 4: Run the file again.** Expected: all pass, 1 xfailed.
+- [ ] **Step 5: Run `./scripts/gate.sh --full`.** Expected: green.
+- [ ] **Step 6: Commit** `git commit -am "test: Tier-1 acceptance gate under both protocols with among-the-reasons attribution (A1.7)"`
+
+### Task 1.25: Regenerate SW1, rerun the benchmarks under both protocols, rebuild the leaderboard
+
+**Files:**
+- Modify: `scripts/build_leaderboard.py`, `agentfw/bench/leaderboard.py`, `agentfw/bench/run.py`, `docs/leaderboard.md` (generated)
+- Test: `tests/bench/test_leaderboard.py`, `tests/bench/test_run_protocol.py`
+
+**Interfaces:**
+- Consumes: `sw1_config()`, `PRE_A1_SWITCHES`, each run's `report.json["gate"]`
+- Produces:
+  - `build_leaderboard.SW1 = sw1_config()`; `RUNS: tuple[tuple[str, str, OutcomeMode, EngineConfig | None], ...]` = today's five rows plus `("engine-pre-a1", "engine", "review", EngineConfig().replace(**PRE_A1_SWITCHES))` and `("engine-pre-a1-allow-all", "engine", "allow", same)`. `_job`, `_fresh` and both loops in `main()` take the fourth `RUNS` element.
+  - `run._config_record` writes an `EngineConfig` keyword as `dataclasses.asdict(cfg)` (tuples as lists); test: the engine-pre-a1 report's `meta.detector_config.cfg` contains `vel_count_stat="logz"`, `mag_score="z"`, `mag_bool_numeric=False`.
+  - `leaderboard.render_gate_section(reports: Mapping[str, Mapping[str, Any]]) -> str`: the Tier-1 gate of `engine` (review) and `engine-allow-all` side by side, then the two pre-A1 rows, each under its `PROTOCOL_LABELS` text verbatim, with among-the-reasons and top-1 (`original spec §9 criterion`) per family; raises `ValueError` when either protocol of a pair is missing
+  - `build_leaderboard._doc(sections, sha, reports)` header: dataset sha, the new SW1 definition, "the amended gate passes under <review label> and is not met under <allow label>" taken from the reports (never hard-coded), the sensitivity rows (both engines, both protocols) copied from `docs/decisions/evidence/a1-gate/matrix.json`, and the sentence that AUPRC is not comparable with the pre-A1 leaderboard (snapshot `6451d56`)
+
+- [ ] **Step 1: Write failing tests** (tests load `scripts/build_leaderboard.py` with `importlib.util.spec_from_file_location`; the `reports` fixture builds four report dicts with a `gate` section and `extras.outcomes`)
+
+```python
+def test_gate_section_shows_both_protocols_side_by_side(reports) -> None:
+    md = render_gate_section(reports)
+    assert PROTOCOL_LABELS["review"] in md and PROTOCOL_LABELS["allow"] in md
+    assert "original spec §9 criterion" in md and "among" in md.lower()
+    assert "engine-pre-a1" in md
+def test_gate_section_refuses_a_single_protocol(reports) -> None:
+    with pytest.raises(ValueError, match="both protocols"):
+        render_gate_section({k: v for k, v in reports.items() if k != "engine-allow-all"})
+def test_build_leaderboard_uses_sw1_config() -> None:
+    assert build_leaderboard_script.SW1 == sw1_config()
+    assert {n for n, *_ in build_leaderboard_script.RUNS} >= {"engine", "engine-allow-all", "engine-pre-a1", "engine-pre-a1-allow-all"}
+
+# tests/bench/test_run_protocol.py
+def test_config_record_writes_the_engine_config(tiny_dataset: Path, tmp_path: Path) -> None:
+    # a run with cfg=EngineConfig().replace(**PRE_A1_SWITCHES), as in the engine-pre-a1 row: the report's
+    # meta.detector_config.cfg contains vel_count_stat "logz", mag_score "z", mag_bool_numeric False
+    ...
+```
+
+- [ ] **Step 2: Run** `uv run pytest tests/bench/test_leaderboard.py tests/bench/test_run_protocol.py -q`. Expected: FAIL (`ImportError: render_gate_section`).
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run the tests and `./scripts/gate.sh`.** Expected: green.
+- [ ] **Step 5: Rebuild (background, about 25 minutes plus the two extra engine rows).** `traces/sw1-seed0` already holds the new SW1 from Task 1.23 (the config guard refuses an old directory). Start `mkdir -p results && uv run python scripts/build_leaderboard.py --jobs 6 > results/synth-v1-a1.log 2>&1` with `run_in_background`; do not use `--reuse`. When it exits: `tail results/synth-v1-a1.log`, confirm 14 runs finished, and confirm the gate section of `docs/leaderboard.md` equals the seed-0 rows of `matrix.json` (same recalls and shares; bootstrapping does not change them).
+- [ ] **Step 6: Commit** `git add scripts agentfw tests docs/leaderboard.md && git commit -m "docs(bench): SW1 leaderboard after Amendment A1, gate under both protocols"`
+
+### Task 1.26: Decision 008, README, writeup, dataset card, constraints
+
+**Files:**
+- Modify: `docs/decisions/008-tier1-gate.md` (append `## Amendment A1 (2026-11-11)`; nothing above it is edited except the Status line), `docs/decisions/000-plan-clarifications.md` (D-021 backfilled, D-022–D-028), the SDD workspace file `global-constraints.md` (outside the git tree: `.superpowers/` is git-ignored; the controller edits it in place and it is not part of the Task 1.26 commit; constants list: the four engine fields and three generator fields; the third RNG stream; D-009 wording unchanged), `README.md` (Tier 1 status; the dual-protocol table from `matrix.md`, with the pre-A1 and sensitivity rows, directly above the report block; report block via `update_readme` from the review run), `docs/writeup.md` (§3 protocol, §4 dataset row, §5 results, §6 Tier-1 status, §7 failure cases, §8 limitations, §9 reproduce), `docs/dataset_card.md` (the sandbox template quotes no SW1 number: audit it, and change wording only where it describes `magnitude_spike` or `Label.strength`, whose meaning is unchanged)
+- Create: `tests/bench/test_docs_numbers.py`
+
+**Interfaces:**
+- Consumes: `docs/decisions/evidence/a1-gate/matrix.json`, `docs/leaderboard.md`, `results/synth-v1/time/engine/report.md`
+- Produces: every gate number quoted in README, writeup and decision 008 is a cell of `matrix.json`, formatted `0.938 (76/81)`
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+DOCS = {"README.md": ROOT / "README.md", "writeup": ROOT / "docs/writeup.md", "008": ROOT / "docs/decisions/008-tier1-gate.md"}
+
+@pytest.mark.parametrize("name", DOCS)
+def test_doc_quotes_the_generated_gate_cells(name: str) -> None:
+    text = DOCS[name].read_text()
+    assert PROTOCOL_LABELS["allow"] in text and PROTOCOL_LABELS["review"] in text
+    assert "original spec §9 criterion" in text
+    for row in a1_rows(dataset="sw1", seed=0, engine="a1"):                 # both protocols
+        for fam, c in row["families"].items():
+            assert f"{c['recall']:.3f} ({c['n_detected']}/{c['n_total']})" in text, (name, row["protocol"], fam)
+    assert sha12("sw1", 0) in text
+
+GATE_CLAIM = re.compile(
+    r"(?i)(tier[- ]?1|amended|exit)\b[^.]{0,80}\b(gate|criterion)\b[^.]{0,40}\b(met|passe[sd]|pass)\b"
+    r"|\bgate\W{0,4}pass\b|\b(passes|meets)\b[^.]{0,40}\bgate\b")
+NEGATIONS = ("not ", "never ", "neither", "whether")
+
+def unqualified_gate_claims(text: str) -> list[str]:
+    """Paragraphs (split on blank lines, whitespace collapsed) with a gate claim that is not qualified: the
+    paragraph must contain both protocol labels verbatim, or one of NEGATIONS must stand within 12 characters
+    before the match or within 20 characters after it in the same sentence, or the match must be a quoted
+    mention (a double quote directly before and after it)."""
+    bad: list[str] = []
+    for para in (" ".join(p.split()) for p in re.split(r"\n\s*\n", text)):
+        both = PROTOCOL_LABELS["review"] in para and PROTOCOL_LABELS["allow"] in para
+        for m in GATE_CLAIM.finditer(para):
+            before = para[max(0, m.start() - 12):m.start()].lower()
+            after = para[m.end():m.end() + 20].split(".")[0].lower()
+            quoted = para[max(0, m.start() - 1):m.start()] == '"' and para[m.end():m.end() + 1] == '"'
+            if not (both or quoted or any(n in before or n in after for n in NEGATIONS)):
+                bad.append(para)
+    return bad
+
+def test_docs_never_claim_the_gate_is_met_unqualified() -> None:
+    for p in (*DOCS.values(), ROOT / "docs/leaderboard.md"):
+        assert unqualified_gate_claims(p.read_text()) == [], p
+
+@pytest.mark.parametrize("sentence", [
+    "Tier 1 gate is met.", "The Tier-1 gate **met**", "The Tier-1 gate has been met.", "The Tier-1 gate is fully met.",
+    "now passes the Tier-1 gate", "meets the Tier-1 exit gate", "Tier-1 gate: PASS", "gate PASS",
+    "The amended gate passes.", "Tier-1 exit criterion met.", "The Tier-1 gate is met; allow-all is a diagnostic only."])
+def test_gate_claim_checker_flags_violations(sentence: str) -> None:
+    assert unqualified_gate_claims(sentence)
+
+@pytest.mark.parametrize("sentence", [
+    "The Tier-1 gate is met under neither protocol.",
+    "Whether the Tier-1 gate is met is the user's open decision.",
+    'No document may say "Tier-1 gate met" on the review result alone.'])
+def test_gate_claim_checker_accepts_legitimate_sentences(sentence: str) -> None:
+    assert unqualified_gate_claims(sentence) == []
+
+def test_readme_report_block_is_the_review_run() -> None: ...   # the block between the report markers names the review label
+def test_readme_report_block_never_prints_bare_gate_pass() -> None:
+    block = readme_report_block()                     # the text between the report markers
+    assert "one protocol only" in block and "gate PASS" not in block
+def test_clarifications_table_has_d021_to_d028() -> None: ...
+```
+
+- [ ] **Step 2: Run** `uv run pytest tests/bench/test_docs_numbers.py -q`. Expected: FAIL (old numbers, old sha `e7b3bc2a2f20`).
+- [ ] **Step 3: Write the documents.** Decision 008's appended section must contain, in this order: what was adopted and from which design; the dual-protocol table for seeds 0, 1 and 2 (copied from `matrix.md`); the companion rows (pre-A1 engine on the new data; sensitivity dataset); the old → new record (dataset sha `e7b3bc2a2f20` → new, attacks 599 → new, engine golden, CI baseline, magnitude gate cell 13 → new); the dataset census (first pass / dropped / top-up, share with strength ≥ 10, median strength, per-persona counts of the gate cell); "What is still not met" taken from spec A1.12 with the measured numbers; and the open user decisions (spec A1.13, copied verbatim). The README places the dual-protocol table from `matrix.md` (with the pre-A1 and sensitivity rows) directly above the report block. Rules for all four documents: both labels verbatim wherever a gate number appears; the review result is never called "the Tier-1 gate met"; the control-FPR drop is attributed to the velocity change; no AUPRC comparison across the old and new dataset; "×10 scores close to 1" is stated only for narrow fields. Plain technical prose, short sentences, no marketing language.
+- [ ] **Step 4: Run the test and `./scripts/gate.sh --full`, then** `uv run python -m agentfw.bench.ci_regress`. Expected: green.
+- [ ] **Step 5: Commit** `git commit -am "docs: Amendment A1 results in decision 008, README, writeup; clarifications D-021..D-028"`
+
+**Amendment A1 exit:** amended gate evaluated under both protocols on SW1 seed 0 with seeds 1 and 2 reported; `test_tier1_exit[review]` passes, `test_tier1_exit[allow]` is the only strict xfail left in the acceptance file; `engine-spec-allow` still hashes to `c4042bc4…`; every published number traces to `docs/decisions/evidence/a1-gate/matrix.json`.
