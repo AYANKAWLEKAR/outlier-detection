@@ -70,7 +70,7 @@ def test_cold_agent_x50_high_with_prior() -> None:
 
 
 def test_prior_z_matches_manually_inflated_iqr() -> None:
-    cfg = EngineConfig()
+    cfg = EngineConfig().replace(mag_score="z")  # the §6.3 rule, whatever the default is
     pp = _pool(cfg)
     s = _score(pp, cfg, "amount", 1850)
     rec = pp.magnitude_ref(TOOL, "amount", "up")

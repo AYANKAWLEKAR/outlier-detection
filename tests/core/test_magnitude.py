@@ -4,6 +4,7 @@ import dataclasses
 import math
 from collections.abc import Iterable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -13,8 +14,9 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from agentfw.core.config import EngineConfig
-from agentfw.core.detectors.base import iter_fields, signed_log1p, squash
+from agentfw.core.detectors.base import iter_fields, normal_sf, posterior, signed_log1p, squash
 from agentfw.core.detectors.magnitude import MagnitudeDetector, MagRecord, direction_for
+from agentfw.core.engine import Engine
 from agentfw.core.envelope import ActionEnvelope, DetectorScore
 from agentfw.core.hints import ToolHint
 from agentfw.core.normalize import SessionTracker
@@ -24,6 +26,9 @@ from tests.factories import make_env
 
 AGENT = "a1"
 TOOL = "stripe.create_refund"
+DEFAULT = EngineConfig()
+Z = EngineConfig().replace(mag_score="z")  # the §6.3 rule, whatever the default is
+TAIL = EngineConfig().replace(mag_score="tail")  # Amendment A1.2
 
 
 @dataclass
@@ -43,9 +48,10 @@ def _learn(t: Trained, e: ActionEnvelope) -> None:
     t.det.update(e, t.view(e.tool_id))
 
 
-def build(values: Iterable[Any], path: str = "amount", **det_kw: Any) -> Trained:
+def build(
+    values: Iterable[Any], path: str = "amount", cfg: EngineConfig = DEFAULT, **det_kw: Any
+) -> Trained:
     store = DictStore()
-    cfg = EngineConfig()
     t = Trained(MagnitudeDetector(store, cfg, **det_kw), TypeInference(store, cfg), store)
     for v in values:
         _learn(t, make_env(agent_id=AGENT, tool_id=TOOL, args={path: v}))
@@ -67,6 +73,12 @@ def score_amount(t: Trained, x: float) -> float:
     return score_field(t, "amount", x)
 
 
+def record(t: Trained, path: str) -> MagRecord:
+    rec = t.store.get(key_mag(AGENT, TOOL, path))
+    assert isinstance(rec, MagRecord)
+    return rec
+
+
 def _lognormal(n: int = 500, seed: int = 0) -> list[float]:
     rng = np.random.default_rng(seed)
     return [float(v) for v in rng.lognormal(3.6, 0.7, n)]
@@ -77,10 +89,24 @@ def trained_mag() -> Trained:
     return build(_lognormal())
 
 
+def _uniform() -> list[float]:
+    rng = np.random.default_rng(1)
+    return [float(v) for v in rng.uniform(30.0, 50.0, 300)]
+
+
 @pytest.fixture(scope="module")
 def trained_both() -> Trained:
-    rng = np.random.default_rng(1)
-    return build([float(v) for v in rng.uniform(30.0, 50.0, 300)], path="latitude")
+    return build(_uniform(), path="latitude")
+
+
+@pytest.fixture(scope="module")
+def trained_tail() -> Trained:
+    return build(_lognormal(), cfg=TAIL)
+
+
+@pytest.fixture(scope="module")
+def trained_both_tail() -> Trained:
+    return build(_uniform(), path="latitude", cfg=TAIL)
 
 
 def _dump(store: DictStore) -> bytes:
@@ -236,12 +262,12 @@ class _FakePriors:
 
 
 def test_cold_key_scores_against_prior_with_inflated_iqr() -> None:
-    cfg = EngineConfig()
-    pooled = build(_lognormal(seed=3))
+    cfg = Z  # this test pins the §6.3 formula
+    pooled = build(_lognormal(seed=3), cfg=cfg)
     ref = pooled.store.get(key_mag(AGENT, TOOL, "amount"))
     assert isinstance(ref, MagRecord)
     priors = _FakePriors(ref)
-    t = build([30.0 + i for i in range(12)], priors=priors)  # cold per-agent key
+    t = build([30.0 + i for i in range(12)], cfg=cfg, priors=priors)  # cold per-agent key
     (s,) = scores_for(t, {"amount": 37.0 * 30})
     assert priors.calls[-1] == (TOOL, "amount", "up")
     assert s.evidence["prior_used"] is True and "cold" not in s.evidence
@@ -331,10 +357,9 @@ def _resp_score(scores: list[DetectorScore]) -> DetectorScore:
     return s
 
 
-def _train_session() -> tuple[Trained, SessionTracker]:
+def _train_session(cfg: EngineConfig = DEFAULT) -> tuple[Trained, SessionTracker]:
     """One session of 200 allowed SOQL queries, each returning 10-30 rows."""
     store = DictStore()
-    cfg = EngineConfig()
     t = Trained(MagnitudeDetector(store, cfg), TypeInference(store, cfg), store)
     tracker = SessionTracker()
     rng = np.random.default_rng(4)
@@ -459,3 +484,276 @@ def test_response_signal_off_neither_scores_nor_learns_response_counts() -> None
         assert all(s.field != "__resp__.item_count" for s in scores)
         tracker.observe(e)
     assert store.get(RESP_KEY) is None
+
+
+# --- Amendment A1.2: tail score on a two-piece log scale (mag_score="tail") -------------------
+
+Z75 = 0.6744897501960817  # inverse normal cdf at 0.75
+Z95 = 1.6448536269514722  # inverse normal cdf at 0.95
+PRIOR = 0.005  # tail_prior
+PRE_A1_MAG_KEYS = {"q", "ewma", "ewma2", "direction", "n"}
+TAIL_EVIDENCE_KEYS = {
+    "observed",
+    "z",
+    "p_tail",
+    "percentile",
+    "median_raw",
+    "iqr_raw",
+    "n",
+    "direction",
+    "prior_used",
+}
+
+
+def test_default_is_still_z() -> None:
+    assert EngineConfig().mag_score == "z" and EngineConfig().tail_prior == 0.005
+
+
+def test_z_rule_is_unchanged_and_has_no_p_tail(trained_mag: Trained) -> None:
+    explicit = build(_lognormal(), cfg=Z)
+    for x in (37.0, 370.0, 740.0):
+        (default,) = scores_for(trained_mag, {"amount": x})
+        (same,) = scores_for(explicit, {"amount": x})
+        assert default == same
+        assert set(default.evidence) == TAIL_EVIDENCE_KEYS - {"p_tail"}
+        z = default.evidence["z"]
+        assert isinstance(z, float) and default.score == squash(z, Z.z0, Z.tau)
+
+
+@pytest.mark.parametrize("value", ["Tail", "zscore", "", None, 1])
+def test_unknown_mag_score_rejected(value: object) -> None:
+    # A mistyped switch must not silently run the other rule (like vel_count_stat).
+    cfg = EngineConfig().replace(mag_score=value)
+    with pytest.raises(ValueError, match=r"unknown mag_score .*known: \('z', 'tail'\)"):
+        MagnitudeDetector(DictStore(), cfg)
+    with pytest.raises(ValueError, match="mag_score"):
+        Engine(cfg)
+    with pytest.raises(ValueError, match="mag_score"):
+        Engine(cfg, enabled=frozenset({"velocity"}))  # the engine always builds the detector
+
+
+def test_tail_score_matches_formula(trained_tail: Trained) -> None:
+    # 500 lognormal(3.6, 0.7), field "amount" (up)
+    (s,) = scores_for(trained_tail, {"amount": 370.0})
+    q = record(trained_tail, "amount").q
+    d = signed_log1p(370.0) - q.quantile(0.5)
+    sigma = max(
+        (q.quantile(0.75) - q.quantile(0.5)) / 0.6744897501960817,
+        (q.quantile(0.95) - q.quantile(0.5)) / 1.6448536269514722,
+    )
+    z = d / max(sigma, 0.05)
+    assert s.evidence["z"] == pytest.approx(z) and s.evidence["p_tail"] == pytest.approx(
+        normal_sf(z)
+    )
+    assert s.score == pytest.approx(posterior(normal_sf(z), 0.005))
+    assert set(s.evidence) == TAIL_EVIDENCE_KEYS  # today's keys plus p_tail
+    assert s.evidence["observed"] == 370.0 and s.evidence["prior_used"] is False
+
+
+def test_tail_scale_is_taken_on_the_side_the_value_falls_on() -> None:
+    # 40 + Exp(5): the upper half is about twice as wide (in log units) as the lower half.
+    rng = np.random.default_rng(6)
+    t = build([40.0 + float(v) for v in rng.exponential(5.0, 2000)], path="latitude", cfg=TAIL)
+    q = record(t, "latitude").q
+    q05, q25, q50, q75, q95 = (q.quantile(p) for p in (0.05, 0.25, 0.5, 0.75, 0.95))
+    lower = max((q50 - q25) / Z75, (q50 - q05) / Z95)
+    upper = max((q75 - q50) / Z75, (q95 - q50) / Z95)
+    assert TAIL.mag_eps < lower < 0.7 * upper  # two different scales, both above the floor
+    for x, sigma in ((35.0, lower), (67.0, upper)):
+        (s,) = scores_for(t, {"latitude": x})
+        z = abs(signed_log1p(x) - q50) / sigma
+        assert s.evidence["z"] == pytest.approx(z)
+        assert s.evidence["p_tail"] == pytest.approx(2.0 * normal_sf(z))  # direction both
+        assert s.score == pytest.approx(posterior(2.0 * normal_sf(z), PRIOR))
+        assert 0.05 < s.score < 0.999  # not saturated: the comparison above is informative
+
+
+def test_tail_warm_spike_and_normal(trained_tail: Trained) -> None:
+    assert score_amount(trained_tail, 37.0) < 0.05  # 0.011
+    assert score_amount(trained_tail, 37.0 * 20) > 0.98  # 0.991 (the §6.3 score is 0.82)
+    assert score_amount(trained_tail, 37.0 * 100) > 0.9999
+    assert score_amount(trained_tail, 37.0 / 20) < 0.05  # direction=up ignores small
+
+
+@pytest.mark.parametrize(
+    ("sigma", "x10", "x100"),
+    [
+        (0.5, (0.99, 1.0), (0.9999, 1.0)),
+        (0.86, (0.40, 0.72), (0.999, 1.0)),
+        (2.3, (0.0, 0.08), (0.05, 0.35)),
+    ],
+)
+def test_tail_is_relative_to_the_fields_log_dispersion(
+    sigma: float, x10: tuple[float, float], x100: tuple[float, float]
+) -> None:
+    # 5,000 lognormal(3.6, sigma) values; k x exp(3.6).
+    # Exact log-normal values: 1.000/1.000, 0.575/1.000, 0.031/0.182
+    rng = np.random.default_rng(0)
+    t = build([float(v) for v in rng.lognormal(3.6, sigma, 5000)], cfg=TAIL)
+    median = math.exp(3.6)
+    assert x10[0] <= score_amount(t, 10.0 * median) <= x10[1]
+    assert x100[0] <= score_amount(t, 100.0 * median) <= x100[1]
+
+
+def test_tail_zero_negative_and_non_finite() -> None:
+    # field "balance_delta" ~ normal(-200, 20), direction both
+    rng = np.random.default_rng(5)
+    path = "balance_delta"
+    t = build([float(v) for v in rng.normal(-200.0, 20.0, 500)], path=path, cfg=TAIL)
+    rec = record(t, path)
+    assert rec.direction == "both"
+
+    def score(x: float) -> float:
+        return score_field(t, path, x)
+
+    assert score(-200.0) < 0.02 and score(-20000.0) > 0.999
+    assert score(0.0) > 0.999 and score(200.0) > 0.999
+    # y = sign(x) * ln(1 + |x|): zero is y = 0 and lies above this field's (negative) median,
+    # so it is scaled by the upper markers; -20000 lies below and is scaled by the lower ones.
+    q05, q25, q50, q75, q95 = (rec.q.quantile(p) for p in (0.05, 0.25, 0.5, 0.75, 0.95))
+    assert q95 < 0.0
+    upper = max((q75 - q50) / Z75, (q95 - q50) / Z95)
+    lower = max((q50 - q25) / Z75, (q50 - q05) / Z95)
+    assert min(upper, lower) > TAIL.mag_eps
+    for x, y, sigma in ((0.0, 0.0, upper), (-20000.0, -math.log1p(20000.0), lower)):
+        (s,) = scores_for(t, {path: x})
+        assert s.evidence["z"] == pytest.approx(abs(y - q50) / sigma)
+        assert s.evidence["p_tail"] == 0.0 and s.score == 1.0  # p = 0 gives exactly 1.0
+    n0 = rec.n
+    assert scores_for(t, {path: float("nan")}) == []  # NaN: no score
+    for bad in (float("inf"), float("-inf")):
+        (s,) = scores_for(t, {path: bad})
+        assert s.score == 1.0 and s.evidence["non_finite"] is True
+        assert "p_tail" not in s.evidence and s.evidence["n"] == n0
+        _learn(t, make_env(agent_id=AGENT, tool_id=TOOL, args={path: bad}))
+    _learn(t, make_env(agent_id=AGENT, tool_id=TOOL, args={path: float("nan")}))
+    assert rec.n == n0  # neither NaN nor inf is ever pushed
+
+
+def test_tail_constant_field() -> None:
+    t = build([10.0] * 100, cfg=TAIL)
+    assert score_amount(t, 10.0) == pytest.approx(0.00995025, abs=1e-6)  # posterior(0.5, 0.005)
+    assert score_amount(t, 11.5) == pytest.approx(0.487, abs=5e-3)  # scale = mag_eps = 0.05
+    assert score_amount(t, 20.0) > 0.9999
+
+
+def test_tail_two_sided_for_direction_both(trained_both_tail: Trained) -> None:
+    # uniform(30, 50), field "latitude"
+    assert score_field(trained_both_tail, "latitude", 40.0) < 0.01  # p = min(1, 2 Q(z)) ~ 1
+    assert score_field(trained_both_tail, "latitude", 2.0) > 0.999
+    assert score_field(trained_both_tail, "latitude", 800.0) > 0.999
+    (at_median,) = scores_for(
+        trained_both_tail,
+        {"latitude": math.expm1(record(trained_both_tail, "latitude").q.quantile(0.5))},
+    )
+    assert at_median.evidence["p_tail"] == pytest.approx(1.0)  # 2 Q(0), clipped to at most 1
+    assert at_median.score == pytest.approx(PRIOR)
+
+
+def test_tail_small_integer_field_pinned_limitation() -> None:
+    """PINS a known limitation (spec A1.12 item 8): the upper markers of a tied integer field
+    coincide."""
+    t = build([1, 2, 3, 4] * 100, path="qty", cfg=TAIL)
+    assert score_field(t, "qty", 4) < 0.1
+    assert 0.2 < score_field(t, "qty", 5) < 0.5  # 0.327 on the prototype; §6.3 gives 0.10
+    assert score_field(t, "qty", 8) > 0.99
+
+
+@given(st.floats(0, 1e7), st.floats(0, 1e7))
+def test_tail_monotone_in_x_for_direction_up(trained_tail: Trained, a: float, b: float) -> None:
+    lo, hi = sorted((a, b))
+    assert score_amount(trained_tail, lo) <= score_amount(trained_tail, hi)
+
+
+@given(st.floats(allow_nan=False, allow_infinity=False))
+def test_tail_scores_stay_in_the_unit_interval(trained_both_tail: Trained, x: float) -> None:
+    (s,) = scores_for(trained_both_tail, {"latitude": x})
+    assert 0.0 <= s.score <= 1.0
+    p = s.evidence["p_tail"]
+    assert isinstance(p, float) and 0.0 <= p <= 1.0
+
+
+def test_tail_cold_and_prior() -> None:
+    cold = build([30.0 + i for i in range(12)], cfg=TAIL)  # n < mag_cold_n, no prior
+    (c,) = scores_for(cold, {"amount": 1e9})
+    assert c.score == 0.0
+    assert dict(c.evidence) == {"cold": True, "n": 3, "direction": "up", "prior_used": False}
+
+    pooled = build(_lognormal(seed=3), cfg=TAIL)
+    ref = record(pooled, "amount")
+    priors = _FakePriors(ref)
+    t = build([30.0 + i for i in range(12)], cfg=TAIL, priors=priors)  # cold per-agent key
+    (s,) = scores_for(t, {"amount": 370.0})
+    assert priors.calls[-1] == (TOOL, "amount", "up")
+    assert s.evidence["prior_used"] is True and "cold" not in s.evidence
+    assert s.evidence["n"] == ref.n
+    d = signed_log1p(370.0) - ref.q.quantile(0.5)
+    sigma = max(
+        (ref.q.quantile(0.75) - ref.q.quantile(0.5)) / Z75,
+        (ref.q.quantile(0.95) - ref.q.quantile(0.5)) / Z95,
+    )
+    z_inflated = d / max(sigma * TAIL.prior_iqr_inflate, TAIL.mag_eps)  # scale x 1.5
+    assert s.evidence["z"] == pytest.approx(z_inflated)
+    assert s.score == pytest.approx(posterior(normal_sf(z_inflated), 0.005))
+    # The same value against the pooled record directly (no inflation) scores strictly higher.
+    (warm,) = scores_for(pooled, {"amount": 370.0})
+    assert warm.evidence["z"] == pytest.approx(z_inflated * TAIL.prior_iqr_inflate)
+    assert 0.0 < s.score < warm.score < 1.0
+
+
+def test_tail_score_is_idempotent_and_pure(trained_tail: Trained) -> None:
+    store = trained_tail.store
+    before, n_keys = _dump(store), len(store)
+    tracker = SessionTracker()
+    prev = make_env(agent_id=AGENT, tool_id="never.seen", args={}, response_meta={"item_count": 5})
+    tracker.observe(prev)
+    e = make_env(tracker=tracker, agent_id=AGENT, tool_id=TOOL, args={"amount": 9999.0})
+    first = trained_tail.det.score(e, trained_tail.view())
+    second = trained_tail.det.score(e, trained_tail.view())
+    assert first == second
+    assert {s.field for s in first} == {"amount", "__resp__.item_count"}
+    assert "p_tail" in first[0].evidence
+    assert _dump(store) == before and len(store) == n_keys  # no mutation, no new (cold) keys
+
+
+def test_tail_response_item_count_scored_on_next_call() -> None:
+    t, _ = _train_session(TAIL)
+
+    def next_call(item_count: int) -> DetectorScore:
+        tr = SessionTracker()
+        tr.observe(
+            make_env(
+                session_id="s2",
+                agent_id=AGENT,
+                tool_id=SF,
+                args={"soql": "select id"},
+                response_meta={"item_count": item_count},
+            )
+        )
+        e = make_env(session_id="s2", tracker=tr, agent_id=AGENT, tool_id="gmail.send_email")
+        return _resp_score(t.det.score(e, t.view("gmail.send_email")))
+
+    assert next_call(20).score < 0.05
+    spike = next_call(20 * 50)
+    assert spike.score > 0.999 and spike.evidence["tool"] == SF and "p_tail" in spike.evidence
+
+
+def test_pre_a1_mag_state_scores_immediately(tmp_path: Path, trained_tail: Trained) -> None:
+    old = build(_lognormal(), cfg=Z)  # the §6.3 rule: the engine before the amendment
+    path, again = tmp_path / "pre-a1.jsonl", tmp_path / "reloaded.jsonl"
+    old.store.dump(path)
+    rows = {r["key"]: r["data"] for r in map(orjson.loads, path.read_bytes().splitlines())}
+    assert set(rows[key_mag(AGENT, TOOL, "amount")]) == PRE_A1_MAG_KEYS  # no new record field
+    store = DictStore()
+    store.load(path)
+    new = Trained(MagnitudeDetector(store, TAIL), TypeInference(store, TAIL), store)
+    (first,) = scores_for(new, {"amount": 740.0})  # the first call after loading is scored warm
+    assert "cold" not in first.evidence and first.evidence["n"] == 491
+    assert first.evidence["prior_used"] is False and "p_tail" in first.evidence
+    # scored by the new rule from the old state: the same as a record trained under "tail"
+    (same,) = scores_for(trained_tail, {"amount": 740.0})
+    assert first == same and first.score > 0.98
+    (z_rule,) = scores_for(old, {"amount": 740.0})
+    assert z_rule.score < first.score  # 0.82 under the §6.3 rule
+    store.dump(again)
+    assert again.read_bytes() == path.read_bytes()  # scoring under "tail" changed no state

@@ -9,6 +9,8 @@ from agentfw.core.detectors import base, magnitude, velocity
 from agentfw.core.detectors.base import (
     IQR_TO_SIGMA,
     clamp_finite,
+    normal_sf,
+    posterior,
     signed_expm1,
     signed_log1p,
     value_key,
@@ -58,3 +60,31 @@ def test_value_key_hashes_long_and_unstringifiable_values() -> None:
     big = 10**5000  # str() refuses: beyond the interpreter's str-digit limit
     assert value_key(big, 40) == value_key(10**5000, 40) != value_key(big + 1, 40)
     assert value_key(10**400, 40).startswith("#")
+
+
+# --- Amendment A1.2: tail probability and its posterior ---------------------------------------
+
+
+def test_posterior_anchor_points() -> None:
+    assert posterior(1.0, 0.005) == pytest.approx(0.005)
+    assert posterior(0.005 / 0.995, 0.005) == pytest.approx(0.5)
+    assert posterior(2.0, 0.005) == pytest.approx(0.005)  # p clipped at 1
+    assert posterior(0.0, 0.005) == 1.0 and posterior(-1e-18, 0.005) == 1.0
+    assert posterior(float("nan"), 0.005) == 1.0
+    assert posterior(1e-3, 0.005) == pytest.approx(0.834028, abs=1e-6)
+
+
+def test_posterior_each_factor_ten_in_p_multiplies_the_odds_by_ten() -> None:
+    def odds(p: float) -> float:
+        s = posterior(p, 0.005)
+        return s / (1.0 - s)
+
+    assert odds(1e-3) / odds(1e-2) == pytest.approx(10.0)
+    assert odds(1e-6) / odds(1e-5) == pytest.approx(10.0)
+
+
+def test_normal_sf_reference_values() -> None:
+    assert normal_sf(0.0) == 0.5
+    assert normal_sf(0.6744897501960817) == pytest.approx(0.25, abs=1e-12)
+    assert normal_sf(1.6448536269514722) == pytest.approx(0.05, abs=1e-12)
+    assert normal_sf(40.0) == 0.0 and normal_sf(-40.0) == 1.0

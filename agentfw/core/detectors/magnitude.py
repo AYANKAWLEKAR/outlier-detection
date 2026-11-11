@@ -1,13 +1,27 @@
-"""Magnitude detector: robust z of ``sign(x)*log1p(|x|)`` per (agent, tool, path) (spec §6.3).
+"""Magnitude detector: robust z of ``sign(x)*log1p(|x|)`` per (agent, tool, path) (spec §6.3,
+amended by A1.2).
 
 Scoring, per NUMERIC path (flat then derived): every value is parsed with ``try_number``;
 NaN and non-numbers are skipped; any ``±inf`` scores 1.0 with ``evidence["non_finite"]``.
-Otherwise each finite value ``x`` gets ``y = signed_log1p(x)``,
-``z = (y - q50) / max((q75 - q25) / 1.349, mag_eps)``, one-sided (``max(z, 0)``) for
-``direction == "up"`` and ``|z|`` for ``"both"``, and ``s = squash(z, z0, tau)``; the path's
-score is the maximum over its values (for ``up`` that is the score of the largest value).
+Otherwise each finite value ``x`` gets ``y = signed_log1p(x)`` and is scored by the rule
+``mag_score`` selects; the path's score is the maximum over its values (for ``up`` that is the
+score of the largest value).
 
-Cold keys (``n < mag_cold_n``) score against the pooled prior (§6.10) with its IQR inflated by
+- ``"z"`` (spec §6.3): ``z = (y - q50) / max((q75 - q25) / 1.349, mag_eps)``, one-sided
+  (``max(z, 0)``) for ``direction == "up"`` and ``|z|`` for ``"both"``, and
+  ``s = squash(z, z0, tau)``.
+- ``"tail"`` (spec A1.2): ``d = y - q50`` over a robust scale taken on the side ``d`` falls on,
+  ``sigma = max((q75 - q50) / 0.6745, (q95 - q50) / 1.6449)`` for ``d >= 0`` and
+  ``max((q50 - q25) / 0.6745, (q50 - q05) / 1.6449)`` below, ``scale = max(sigma, mag_eps)``;
+  ``up``: ``z = max(d / scale, 0)``, ``p = Q(z)``; ``both``: ``z = |d| / scale``,
+  ``p = min(1, 2 Q(z))`` with ``Q`` the standard normal upper tail; and
+  ``s = posterior(p, tail_prior)`` (exactly 1.0 when ``p`` is 0). Evidence gains ``p_tail``.
+
+Both rules read the same ``MagRecord`` markers: no state differs between them, so a record
+trained under either scores under the other. Any other ``mag_score`` is rejected when the
+detector is built (``ValueError``), so a mistyped value never silently selects the other rule.
+
+Cold keys (``n < mag_cold_n``) score against the pooled prior (§6.10) with its scale inflated by
 ``prior_iqr_inflate`` and ``prior_used=True``; with no usable prior they score 0.0 with
 ``evidence["cold"] = True``.
 
@@ -33,14 +47,16 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Self, get_args
 
-from agentfw.core.config import Direction, EngineConfig
+from agentfw.core.config import Direction, EngineConfig, ScoreModel
 from agentfw.core.detectors.base import (
     IQR_TO_SIGMA,
     PriorSource,
     clamp_finite,
     iter_fields,
+    normal_sf,
+    posterior,
     signed_expm1,
     signed_log1p,
     squash,
@@ -60,6 +76,11 @@ NAME = "magnitude"
 
 _UP_NAME = re.compile(r"(?i)(^|_)(amount|count|qty|total|len|strlen)")
 _UP_HINTS = frozenset({"money", "count"})
+_SCORE_MODELS: tuple[ScoreModel, ...] = get_args(ScoreModel)
+# Standard normal quantiles: the half-normal sigma implied by the distance from the median to
+# the quartile (0.75) and to the 5 % / 95 % marker (spec A1.2).
+_Z75 = 0.6744897501960817
+_Z95 = 1.6448536269514722
 
 
 def direction_for(path: str, hints: Mapping[str, str], default: Direction = "both") -> Direction:
@@ -150,6 +171,8 @@ class MagnitudeDetector:
         priors: PriorSource | None = None,
         hints: Mapping[str, ToolHint] = MappingProxyType({}),
     ) -> None:
+        if cfg.mag_score not in _SCORE_MODELS:
+            raise ValueError(f"unknown mag_score {cfg.mag_score!r}; known: {_SCORE_MODELS}")
         self._store = store
         self._cfg = cfg
         self._priors = priors
@@ -193,15 +216,35 @@ class MagnitudeDetector:
         if rec is None:
             return 0.0, {"cold": True, **self._base_evidence(ref)}
         cfg = self._cfg
+        q = rec.q
         y = signed_log1p(x)
-        q25, q50, q75 = rec.q.quantile(0.25), rec.q.quantile(0.5), rec.q.quantile(0.75)
-        scale = max((q75 - q25) / IQR_TO_SIGMA * ref.inflate, cfg.mag_eps)
-        z = (y - q50) / scale
-        z = max(z, 0.0) if ref.direction == "up" else abs(z)
-        return squash(z, cfg.z0, cfg.tau), {
+        q25, q50, q75 = q.quantile(0.25), q.quantile(0.5), q.quantile(0.75)
+        tail: dict[str, object] = {}
+        if cfg.mag_score == "tail":  # spec A1.2
+            d = y - q50
+            if d >= 0.0:
+                sigma = max((q75 - q50) / _Z75, (q.quantile(0.95) - q50) / _Z95)
+            else:
+                sigma = max((q50 - q25) / _Z75, (q50 - q.quantile(0.05)) / _Z95)
+            scale = max(sigma * ref.inflate, cfg.mag_eps)
+            if ref.direction == "up":
+                z = max(d / scale, 0.0)
+                p = normal_sf(z)
+            else:
+                z = abs(d) / scale
+                p = min(1.0, 2.0 * normal_sf(z))
+            s = posterior(p, cfg.tail_prior)
+            tail["p_tail"] = p
+        else:  # spec §6.3
+            scale = max((q75 - q25) / IQR_TO_SIGMA * ref.inflate, cfg.mag_eps)
+            z = (y - q50) / scale
+            z = max(z, 0.0) if ref.direction == "up" else abs(z)
+            s = squash(z, cfg.z0, cfg.tau)
+        return s, {
             "observed": x,
             "z": z,
-            "percentile": rec.q.percentile_of(y),
+            **tail,
+            "percentile": q.percentile_of(y),
             "median_raw": signed_expm1(q50),
             "iqr_raw": clamp_finite(signed_expm1(q75) - signed_expm1(q25)),
             **self._base_evidence(ref),

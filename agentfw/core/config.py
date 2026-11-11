@@ -11,6 +11,7 @@ __all__ = [
     "Direction",
     "EngineConfig",
     "PriorsMode",
+    "ScoreModel",
     "VelCountStat",
 ]
 
@@ -18,6 +19,7 @@ PriorsMode = Literal["all", "money_count_only", "off"]
 Direction = Literal["up", "both"]
 CalCensor = Literal["none", "drop", "winsorize"]
 VelCountStat = Literal["logz", "poisson"]
+ScoreModel = Literal["z", "tail"]
 CAL_CENSOR_MODES: tuple[CalCensor, ...] = ("none", "drop", "winsorize")
 
 
@@ -43,6 +45,15 @@ class EngineConfig:
     # ``mag_resp_signal``: score/learn the previous response's ``item_count`` (§2.3).
     mag_direction_default: Direction = "both"
     mag_resp_signal: bool = True
+    # Amendment A1.2: how a value's distance from the median becomes a score. "z" (spec §6.3): the
+    # IQR-scaled robust z through ``squash(z, z0, tau)``; "tail": a two-piece robust scale on the
+    # side the value falls on, the normal upper-tail probability p of its z, and the posterior
+    # ``tail_prior / (tail_prior + (1 - tail_prior) * p)``. No state differs between the two.
+    mag_score: ScoreModel = "z"
+    # Prior anomaly rate of the tail score. Equals ``cal_alpha`` by definition (D-023); a field of
+    # its own so that a ``cal_alpha`` sweep moves thresholds and not scores. Fixed by the spec:
+    # never swept, never tuned against benchmark recall.
+    tail_prior: float = 0.005
     # Pooled priors (§6.10)
     prior_iqr_inflate: float = 1.5
     prior_novelty_discount: float = 0.67

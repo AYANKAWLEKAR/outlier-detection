@@ -5,7 +5,7 @@ from typing import Literal, get_args
 
 import pytest
 
-from agentfw.core.config import EngineConfig, VelCountStat
+from agentfw.core.config import EngineConfig, ScoreModel, VelCountStat
 from agentfw.core.hints import ToolHint
 
 # Verbatim from global-constraints.md ("All tuned constants live in ... EngineConfig").
@@ -78,8 +78,9 @@ DECISION_OVERRIDES: dict[str, object] = {
     "prereq_rate": 0.90,  # docs/decisions/003-prereq-threshold.md
 }
 
-# Amendment A1 (spec A1.9). ``vel_count_stat`` stays at the §6.4 rule until Task 1.21 flips it.
-A1_DEFAULTS: dict[str, object] = {"vel_count_stat": "logz"}
+# Amendment A1 (spec A1.9). ``vel_count_stat`` and ``mag_score`` stay at the §6.4 / §6.3 rules
+# until Task 1.21 flips them. ``tail_prior`` equals ``cal_alpha`` by definition (D-023).
+A1_DEFAULTS: dict[str, object] = {"vel_count_stat": "logz", "mag_score": "z", "tail_prior": 0.005}
 
 
 def test_engine_config_defaults_match_global_constraints() -> None:
@@ -97,6 +98,13 @@ def test_engine_config_defaults_match_global_constraints() -> None:
 def test_vel_count_stat_values() -> None:
     assert get_args(VelCountStat) == ("logz", "poisson")
     assert EngineConfig().replace(vel_count_stat="poisson").vel_count_stat == "poisson"
+
+
+def test_score_model_values() -> None:
+    assert get_args(ScoreModel) == ("z", "tail")
+    cfg = EngineConfig()
+    assert cfg.replace(mag_score="tail").mag_score == "tail"
+    assert cfg.tail_prior == cfg.cal_alpha  # equal by definition (A1.2), a field of its own
 
 
 def test_user_decision_engine_defaults() -> None:

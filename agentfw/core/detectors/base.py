@@ -22,6 +22,8 @@ __all__ = [
     "SubDetector",
     "clamp_finite",
     "iter_fields",
+    "normal_sf",
+    "posterior",
     "signed_expm1",
     "signed_log1p",
     "squash",
@@ -30,6 +32,7 @@ __all__ = [
 
 IQR_TO_SIGMA = 1.349  # IQR of a standard normal: robust scale = IQR / 1.349
 _MAX = sys.float_info.max
+_SQRT2 = math.sqrt(2.0)
 
 
 class SubDetector(Protocol):
@@ -59,6 +62,20 @@ def squash(z: float, z0: float, tau: float) -> float:
         return 1.0 / (1.0 + math.exp(-t))  # exp(-t) <= 1: never overflows
     ex = math.exp(t)  # t < 0: underflows harmlessly to 0.0
     return ex / (1.0 + ex)
+
+
+def normal_sf(z: float) -> float:
+    """Standard normal upper tail ``Q(z) = erfc(z / sqrt(2)) / 2`` (spec A1.2)."""
+    return 0.5 * math.erfc(z / _SQRT2)
+
+
+def posterior(p: float, prior: float) -> float:
+    """``prior / (prior + (1 - prior) * min(p, 1))``: the probability that a value with tail
+    probability ``p`` is anomalous, when anomalies have rate ``prior`` and make a value this
+    extreme certain (spec A1.2). Exactly 1.0 when ``p`` is 0, negative or NaN."""
+    if not p > 0.0:
+        return 1.0
+    return prior / (prior + (1.0 - prior) * min(p, 1.0))
 
 
 def signed_log1p(x: float) -> float:
