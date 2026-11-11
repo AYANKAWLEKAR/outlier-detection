@@ -21,7 +21,7 @@ import orjson
 
 from agentfw.bench.ablation import run_ablation
 from agentfw.bench.dataset import load_dir
-from agentfw.bench.metrics import BOOTSTRAP_N, compute_all, gate_preview
+from agentfw.bench.metrics import BOOTSTRAP_N, calibration_rows, compute_all, gate_preview
 from agentfw.bench.protocol import BatchFit
 from agentfw.bench.registry import make_detector
 from agentfw.bench.replay import (
@@ -89,6 +89,12 @@ def run(
     if notes:
         extras["notes"] = notes
     rows = replay(raws, labels, det, split, sample_ids=sample_ids, outcomes=outcomes)
+    cal = calibration_rows(rows)
+    if cal:
+        extras["calibration"] = {
+            "n_calibration_rows": len(cal),
+            "calibration_agents": sorted({r.agent_id for r in cal}),
+        }
     out_dir.mkdir(parents=True, exist_ok=True)
     write_score_table(rows, out_dir / "scores.parquet")
     all_ = compute_all(rows, warm_only=False, n_boot=n_boot, seed=seed)

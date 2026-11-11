@@ -60,7 +60,7 @@ __all__ = [
     "write_score_table",
 ]
 
-Split = Literal["train", "test"]
+Split = Literal["train", "test", "calibration"]
 OutcomeMode = Literal["allow", "enforce", "review", "oracle"]
 OUTCOME_MODES: tuple[OutcomeMode, ...] = ("allow", "enforce", "review", "oracle")
 #: The benchmark protocol (user decision 2026-11-10, decision 008): the oracle-reviewer loop.
@@ -96,6 +96,8 @@ class SplitSpec:
     kind: Literal["time", "agent"] = "time"
     train_frac: float = 0.7
     seed: int = 0
+    #: Fraction of agents held out whole as a calibration partition (F10); 0.0 = today's split.
+    calibration_frac: float = 0.0
 
 
 @dataclass(slots=True)
@@ -125,19 +127,40 @@ def _order(r: RawCall) -> tuple[int, str, int]:
     return (r.ts_unix_ms, r.session_id, r.seq_no)
 
 
+def _calibration_agents(agents: Sequence[str], spec: SplitSpec) -> set[str]:
+    """Agents held out as the calibration partition: drawn first, over the sorted agent list."""
+    if not 0.0 <= spec.calibration_frac < 1.0:
+        raise ValueError(f"calibration_frac must be in [0, 1), got {spec.calibration_frac}")
+    n_cal = round(spec.calibration_frac * len(agents))
+    if n_cal == 0:
+        return set()
+    perm = np.random.default_rng(spec.seed).permutation(len(agents))
+    return {agents[int(i)] for i in perm[:n_cal]}
+
+
 def assign_split(raws: Sequence[RawCall], spec: SplitSpec) -> dict[str, Split]:
+    """``envelope_id -> split``. Calibration agents (``spec.calibration_frac``) are removed first
+    and every one of their envelopes is ``"calibration"``; the time / agent split then runs on the
+    remaining envelopes only (the time cut is computed over them)."""
     if not raws:
         return {}
+    cal = _calibration_agents(sorted({r.agent_id for r in raws}), spec)
+    out: dict[str, Split] = {r.envelope_id: "calibration" for r in raws if r.agent_id in cal}
+    rest = [r for r in raws if r.agent_id not in cal] if cal else raws
+    if not rest:
+        return out
     if spec.kind == "time":
-        t_min = min(r.ts_unix_ms for r in raws)
-        t_max = max(r.ts_unix_ms for r in raws)
+        t_min = min(r.ts_unix_ms for r in rest)
+        t_max = max(r.ts_unix_ms for r in rest)
         cut = t_min + spec.train_frac * (t_max - t_min)
-        return {r.envelope_id: ("train" if r.ts_unix_ms <= cut else "test") for r in raws}
-    agents = sorted({r.agent_id for r in raws})
+        out.update({r.envelope_id: ("train" if r.ts_unix_ms <= cut else "test") for r in rest})
+        return out
+    agents = sorted({r.agent_id for r in rest})
     perm = np.random.default_rng(spec.seed).permutation(len(agents))
     n_train = round(spec.train_frac * len(agents))
     train = {agents[int(i)] for i in perm[:n_train]}
-    return {r.envelope_id: ("train" if r.agent_id in train else "test") for r in raws}
+    out.update({r.envelope_id: ("train" if r.agent_id in train else "test") for r in rest})
+    return out
 
 
 def _per_detector_json(res_per: Sequence[Any]) -> str:

@@ -23,6 +23,7 @@ from agentfw.bench.metrics import (
     auprc,
     benign_fpr,
     bootstrap_ci,
+    calibration_rows,
     cold_start_curve,
     compute_all,
     control_fpr,
@@ -764,3 +765,32 @@ def test_metrics_and_report_carry_the_dropped_counts() -> None:
     h = _headline(m, warm_only=False)
     assert h["auprc_ci_n_dropped"] == m.auprc_ci_n_dropped
     assert h["fpr95_per_agent_ci_n_dropped"] == m.fpr95_per_agent_ci_n_dropped
+
+
+def _cal_fixture() -> tuple[list[ScoreRow], list[ScoreRow]]:
+    rows = [
+        *[_row(split="train", fused_score=v) for v in np.linspace(0.0, 0.5, 50)],
+        *[_row(fused_score=v) for v in np.linspace(0.0, 0.5, 30)],
+        _atk(0.9),
+        _atk(0.8),
+    ]
+    cal = [
+        _row(split="calibration", agent_id="C", fused_score=0.99),
+        _atk(1.0, split="calibration", agent_id="C"),
+        _row(split="calibration", agent_id="C", fused_score=0.0, is_warm=False),
+    ]
+    return rows, cal
+
+
+def test_compute_all_ignores_calibration_rows() -> None:
+    rows, cal = _cal_fixture()
+    for warm_only in (False, True):
+        assert compute_all(rows + cal, warm_only=warm_only, n_boot=0) == compute_all(
+            rows, warm_only=warm_only, n_boot=0
+        )
+
+
+def test_calibration_rows_helper_selects_only_calibration() -> None:
+    rows, cal = _cal_fixture()
+    assert calibration_rows(rows + cal) == cal
+    assert calibration_rows(rows) == []

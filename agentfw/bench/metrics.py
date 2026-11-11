@@ -56,6 +56,7 @@ __all__ = [
     "benign_fpr",
     "bootstrap_ci",
     "bootstrap_ci_counted",
+    "calibration_rows",
     "cold_start_curve",
     "compute_all",
     "control_fpr",
@@ -215,6 +216,11 @@ def _rate(num: int, den: int) -> float:
 
 def _valid(rows: Sequence[ScoreRow]) -> list[ScoreRow]:
     return [r for r in rows if not math.isnan(r.fused_score)]
+
+
+def calibration_rows(rows: Sequence[ScoreRow]) -> list[ScoreRow]:
+    """Rows of the held-out calibration partition (never train or test)."""
+    return [r for r in rows if r.split == "calibration"]
 
 
 def _is_attack(r: ScoreRow) -> bool:
@@ -725,6 +731,8 @@ def compute_all(
 ) -> Metrics:
     """All headline metrics on the **test** split (NaN-score rows excluded).
 
+    Calibration-partition rows are dropped before anything else (F10).
+
     ``warm_only`` keeps only ``is_warm`` rows -- for evaluation *and* for the train-split per-agent
     calibration, so thresholds are fit on the population they are judged on. The per-agent CI
     resamples sessions over train and test rows together, so it includes calibration variance.
@@ -735,7 +743,7 @@ def compute_all(
     automatically. When the per-agent target is unreachable, ``fpr95_per_agent`` and its CI are
     NaN and ``per_agent_recall`` reports the best achievable recall.
     """
-    pool = [r for r in _valid(rows) if r.is_warm or not warm_only]
+    pool = [r for r in _valid(rows) if r.split != "calibration" and (r.is_warm or not warm_only)]
     test = [r for r in pool if r.split == "test"]
     s, y = _xy(test)
 

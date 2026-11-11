@@ -32,6 +32,7 @@ Branch `feat/trajectory-monitoring`, cut from `feat/tiers-0-2` at `2aafb11`. Tie
 | T-16 | The orphan-candidate marker (F1) is not stored by the tracker. A provisional call whose artifact nobody consumes within the TTL (F6) is the same fact, and the engine already sees consumption through `ledger_refs`. |
 | T-17 | Blast-radius numbers the v3 spec leaves open: lexical = 0.6 for an irreversible verb in the tool name, +0.2 for a scope noun, +0.2 when a `money`/`count` field hint is present (clip to [0, 1]); structural starts at 0.3, +0.4 write, + min(0.3, log10(len)/4) for the longest id list, −0.3 read (clip); `b = 0.5·lexical + 0.5·structural`, then the F3 annotation terms, floor 0.05. |
 | T-18 | Response fingerprints in synth are computed with the same `resp_fingerprint` the proxy uses, over the generated payload's sorted-key JSON. |
+| T-19 | Calibration partition (Task 0.2, F10): calibration agents are drawn first (`default_rng(seed).permutation` over the sorted agent list, `n = round(calibration_frac · n_agents)`) and every envelope of those agents is `"calibration"`; the time or agent split then runs on the remaining envelopes only, so the time cut is computed over them. `calibration_frac` must be in [0, 1). `compute_all` drops calibration rows first; the report gains `extras.calibration` (row count, agents) only when a run has calibration rows, so default reports are unchanged. Replay still scores calibration rows (detectors update on them as on any call); only `BatchFit` fit and every metric exclude them. |
 
 ## Interaction with Amendment A1
 

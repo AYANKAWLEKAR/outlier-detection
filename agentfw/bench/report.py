@@ -204,6 +204,14 @@ def render_markdown(report: Mapping[str, object]) -> str:
         "",
         "Per-agent FPR is only meaningful at its achieved recall (shown above).",
     ]
+    cal = _dict(report["extras"]).get("calibration")
+    if cal is not None:
+        c = _dict(cal)
+        lines += [
+            "",
+            f"Calibration partition (held out of train and test): {c['n_calibration_rows']} rows, "
+            f"agents {', '.join(f'`{a}`' for a in c['calibration_agents'])}.",
+        ]
     for n in _dict(report["extras"]).get("notes", []) or []:
         lines += ["", f"Note: {n}"]
 

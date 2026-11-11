@@ -318,3 +318,75 @@ def test_review_approves_flagged_benign_and_denies_flagged_attacks() -> None:
         Outcome.ALLOWED,  # allow, attack: nobody looks
         Outcome.APPROVED,  # blocked, benign
     ]
+
+
+def _cal_raws() -> list[RawCall]:
+    return [
+        make_raw(agent_id=f"a{i % 20}", session_id=f"s{i}", ts_unix_ms=1_700_000_000_000 + i)
+        for i in range(400)
+    ]
+
+
+def test_calibration_partition_is_by_agent_and_disjoint() -> None:
+    raws = _cal_raws()
+    a = assign_split(raws, SplitSpec(kind="time", calibration_frac=0.15, seed=3))
+    cal_agents = {r.agent_id for r in raws if a[r.envelope_id] == "calibration"}
+    assert len(cal_agents) == 3  # round(0.15 * 20)
+    assert all(a[r.envelope_id] == "calibration" for r in raws if r.agent_id in cal_agents)
+    assert {a[r.envelope_id] for r in raws if r.agent_id not in cal_agents} == {"train", "test"}
+
+
+def test_calibration_partition_agent_kind_and_deterministic() -> None:
+    raws = _cal_raws()
+    spec = SplitSpec(kind="agent", calibration_frac=0.2, seed=5)
+    a = assign_split(raws, spec)
+    assert a == assign_split(raws, spec)
+    by_agent: dict[str, set[str]] = {}
+    for r in raws:
+        by_agent.setdefault(r.agent_id, set()).add(a[r.envelope_id])
+    assert all(len(v) == 1 for v in by_agent.values())
+    kinds = [next(iter(v)) for v in by_agent.values()]
+    assert kinds.count("calibration") == 4
+    assert kinds.count("train") == round(0.7 * 16)
+
+
+def test_time_cut_is_computed_over_non_calibration_envelopes() -> None:
+    # The calibration agent owns the latest timestamps; the cut must ignore them.
+    raws = [make_raw(agent_id="a0", seq_no=i, ts_unix_ms=i * 10) for i in range(11)] + [
+        make_raw(agent_id="z", session_id="sz", seq_no=i, ts_unix_ms=10_000 + i) for i in range(3)
+    ]
+    a = assign_split(raws, SplitSpec(kind="time", train_frac=0.7, calibration_frac=0.5, seed=0))
+    cal = {r.agent_id for r in raws if a[r.envelope_id] == "calibration"}
+    assert len(cal) == 1
+    keep = next(iter({"a0", "z"} - cal))
+    train = [r for r in raws if a[r.envelope_id] == "train"]
+    own = [r.ts_unix_ms for r in raws if r.agent_id == keep]
+    cut = min(own) + 0.7 * (max(own) - min(own))
+    assert train and max(r.ts_unix_ms for r in train) <= cut
+
+
+def test_zero_calibration_frac_is_the_old_split() -> None:
+    raws = _cal_raws()
+    for kind in ("time", "agent"):
+        assert assign_split(raws, SplitSpec(kind=kind)) == assign_split(
+            raws,
+            SplitSpec(kind=kind, calibration_frac=0.0),
+        )
+        assert "calibration" not in set(assign_split(raws, SplitSpec(kind=kind)).values())
+
+
+def test_replay_does_not_fit_on_calibration_rows() -> None:
+    raws = _cal_raws()
+    spec = SplitSpec(kind="time", calibration_frac=0.15, seed=3)
+    split = assign_split(raws, spec)
+    f = Fitter()
+    rows = replay(raws, {}, f, spec)
+    assert set(f.fit_ids) == {i for i, s in split.items() if s == "train"}
+    assert {r.split for r in rows} == {"train", "test", "calibration"}
+
+
+def test_calibration_frac_out_of_range_rejected() -> None:
+    with pytest.raises(ValueError):
+        assign_split(_cal_raws(), SplitSpec(calibration_frac=1.0))
+    with pytest.raises(ValueError):
+        assign_split(_cal_raws(), SplitSpec(calibration_frac=-0.1))
