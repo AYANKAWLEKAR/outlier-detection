@@ -16,6 +16,7 @@ from hypothesis import strategies as st
 from agentfw.core.config import EngineConfig
 from agentfw.core.detectors.base import squash
 from agentfw.core.detectors.velocity import VelocityDetector, VelocityRecord, _count_z, _roll
+from agentfw.core.engine import Engine
 from agentfw.core.envelope import ActionEnvelope, DetectorScore
 from agentfw.core.hints import ToolHint
 from agentfw.core.schema_infer import TypeInference, TypeView
@@ -589,6 +590,14 @@ def hist_state(det: VelocityDetector) -> dict[str, Any]:
     return h.to_dict()
 
 
+def count_quartiles(det: VelocityDetector) -> tuple[float, float, float]:
+    """Quartiles of the committed window-count history, in calls."""
+    h = record(det).hist_count
+    assert h is not None
+    k25, k50, k75 = (math.expm1(h.quantile(p)) for p in (0.25, 0.5, 0.75))
+    return k25, k50, k75
+
+
 def test_count_z_reference_values() -> None:
     assert _count_z(11, 1.0, 1.0, 1.0) == pytest.approx(5.375466, abs=1e-6)  # exact Poisson: 5.61
     assert _count_z(21, 3.0, 3.0, 3.0) == pytest.approx(6.488254, abs=1e-6)  # exact 6.68
@@ -603,8 +612,17 @@ def test_count_z_edges() -> None:
     assert _count_z(1, 1.0, 1.0, 1.0) == 0.0
     # rate floor: a median window of 0 calls never divides by zero
     assert math.isfinite(_count_z(5, 0.0, 0.0, 0.0)) and _count_z(5, 0.0, 0.0, 0.0) > 0.0
+    # ... the floor is 1e-9 (A1.1), and a negative median is floored like a zero one
+    floored = 3 * math.sqrt(5) * (1 - 1 / 45 - (1e-9 / 5) ** (1 / 3))
+    assert _count_z(5, 0.0, 0.0, 0.0) == pytest.approx(floored, abs=1e-9)
+    assert _count_z(5, 1.0, -1.0, 1.0) == _count_z(5, 1.0, 0.0, 1.0)
     # inverted quartiles: disp floors at 1
     assert _count_z(10, 5.0, 3.0, 1.0) == _count_z(10, 3.0, 3.0, 3.0)
+    # Anscombe clamp A(k) = 2 sqrt(max(k, 0) + 3/8): a negative quartile counts as 0 calls
+    assert _count_z(5, -1.0, 1.0, 1.0) == _count_z(5, 0.0, 1.0, 1.0)
+    disp = (2 * math.sqrt(8 + 0.375) - 2 * math.sqrt(0.375)) / 1.349  # 3.383: the clamp matters
+    assert _count_z(20, -1.0, 3.0, 8.0) == _count_z(20, 0.0, 3.0, 8.0)
+    assert _count_z(20, -1.0, 3.0, 8.0) == pytest.approx(_count_z(20, 3.0, 3.0, 3.0) / disp)
 
 
 @given(st.integers(1, 500), st.integers(1, 500), st.floats(0.0, 50.0))
@@ -662,6 +680,59 @@ def test_poisson_history_heights_beyond_expm1_range_do_not_raise() -> None:
     assert s.evidence["z"] == 0.0 and s.evidence["cold"] is False  # 1 call, far below that rate
     assert s.score == squash(0.0, 3.0, 0.75)
     assert s.evidence["baseline_median"] == sys.float_info.max
+
+
+def test_poisson_negative_history_heights_do_not_raise() -> None:
+    # A count history never holds a negative height, but a state file may (P2Quantiles.from_dict
+    # accepts any finite one). expm1 of it is a negative count: the rate floors at 1e-9 and the
+    # Anscombe transform clamps at 0, so the call is scored, not refused with an exception.
+    det = key_with_history(POISSON, [-3.0, -2.0, -1.0, 0.5, 1.0])
+    [s] = det.score(env(T0 + 30 * MIN, NO_MONEY), TYPES)
+    assert s.evidence["cold"] is False and s.evidence["window_count"] == 1
+    # c = 1 at rate 1e-9 (cube root 1e-3); disp = 1 (the Anscombe IQR of 0 .. 0.65 calls is 0.59)
+    assert s.evidence["z"] == pytest.approx(3 * (1 - 1 / 9 - 1e-3), abs=1e-9)
+    assert s.evidence["z"] == _count_z(1, 0.0, 0.0, math.expm1(0.5))
+    assert s.score == pytest.approx(squash(2.663667, 3.0, 0.75), abs=1e-6)  # 0.390
+
+
+def test_poisson_folds_pending_minute_samples_into_the_quartiles() -> None:
+    # A1.1: "pending minute-samples folded in on a copy, as today". A short history (41 samples
+    # of about 2 calls), an 8-call burst in one minute, then one call 8 minutes later: the 8
+    # minute-samples the burst left pending move every quartile, and z must read the moved ones.
+    det = VelocityDetector(DictStore(), POISSON)
+    e = env(T0, NO_MONEY)
+    last = 0
+    for last in cadence(T0, 45, 5):
+        det.update(at(e, last), TYPES)
+    for i in range(8):
+        det.update(at(e, last + MIN + i * 1_000), TYPES)
+    committed, n_committed = count_quartiles(det), hist_n(record(det))
+    late = at(e, last + 9 * MIN)
+    before = snapshot(det)
+    [s] = det.score(late, TYPES)
+    assert snapshot(det) == before  # folded in on a copy
+    det.update(late, TYPES)  # commits exactly the samples score() folded in
+    folded = count_quartiles(det)
+    assert ev_int(s, "window_count") == 10  # the call 5 min before the burst, the burst, this one
+    assert ev_int(s, "n_hist") == hist_n(record(det)) == n_committed + 8
+    assert all(f > c + 0.04 for f, c in zip(folded, committed, strict=True))  # every quartile moved
+    assert s.evidence["cold"] is False
+    assert s.evidence["z"] == pytest.approx(_count_z(10, *folded), abs=1e-12)
+    assert s.evidence["baseline_median"] == pytest.approx(folded[1], abs=1e-12)
+    # the history without the pending samples gives a visibly different deviate
+    assert _count_z(10, *committed) > _count_z(10, *folded) + 0.1
+
+
+@pytest.mark.parametrize("value", ["Poisson", "poison", "", None, 1])
+def test_unknown_vel_count_stat_rejected(value: object) -> None:
+    # A mistyped switch must not silently run the other rule (like cal_censor in Engine).
+    cfg = EngineConfig().replace(vel_count_stat=value)
+    with pytest.raises(ValueError, match=r"unknown vel_count_stat .*known: \('logz', 'poisson'\)"):
+        VelocityDetector(DictStore(), cfg)
+    with pytest.raises(ValueError, match="vel_count_stat"):
+        Engine(cfg)  # also with the detector disabled: the engine always builds it
+    with pytest.raises(ValueError, match="vel_count_stat"):
+        Engine(cfg, enabled=frozenset({"magnitude"}))
 
 
 def test_poisson_sum_signal_is_unchanged() -> None:

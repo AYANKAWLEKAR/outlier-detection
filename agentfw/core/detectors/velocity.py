@@ -35,6 +35,12 @@ pending); it never mutates state. Two rules give ``z``:
   key's normal rate (its median window count), as a normal deviate divided by the key's
   over-dispersion relative to Poisson. It reads the same ``hist_count`` quartiles: no state
   differs between the two rules, so a record trained under either scores under the other.
+  The ``expm1`` is ``signed_expm1``: the same value on every height a count history can hold
+  (``>= 0``); on a height only a state file can carry it saturates (above about 709) or goes
+  negative (below 0, then floored by ``_count_z``) instead of raising.
+
+Any other ``vel_count_stat`` is rejected when the detector is built (``ValueError``), so a
+mistyped value never silently selects the log z rule.
 
 Evidence: ``signal`` (``count``/``sum``), ``window_count`` (calls in the window, this one
 included), ``baseline_median`` (raw units, ``None`` without history), ``n_hist``, ``z`` (``None``
@@ -60,9 +66,9 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar, Self, get_args
 
-from agentfw.core.config import EngineConfig
+from agentfw.core.config import EngineConfig, VelCountStat
 from agentfw.core.detectors.base import (
     IQR_TO_SIGMA,
     clamp_finite,
@@ -87,6 +93,7 @@ Bucket = tuple[int, float]  # (count, sum)
 _EMPTY: Bucket = (0, 0.0)
 _HIST_PROBS = (0.25, 0.5, 0.75)
 _MONEY_NAME = re.compile(r"(?i)(^|_)(amount|total)")
+_COUNT_STATS: tuple[VelCountStat, ...] = get_args(VelCountStat)
 
 
 def _roll(ring: list[Bucket], last: int, to: int, with_sum: bool) -> tuple[list[Bucket], Bucket]:
@@ -235,6 +242,10 @@ class VelocityDetector:
         cfg: EngineConfig,
         hints: Mapping[str, ToolHint] = MappingProxyType({}),
     ) -> None:
+        if cfg.vel_count_stat not in _COUNT_STATS:
+            raise ValueError(
+                f"unknown vel_count_stat {cfg.vel_count_stat!r}; known: {_COUNT_STATS}"
+            )
         self._store = store
         self._cfg = cfg
         self._hints = hints
