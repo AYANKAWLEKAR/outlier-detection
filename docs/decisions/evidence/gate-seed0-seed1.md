@@ -16,8 +16,12 @@ uv run python docs/decisions/evidence/008-root-causes/replay_variants.py traces/
 uv run python docs/decisions/evidence/008-root-causes/classify.py traces/T results/root-causes/NAME/{primary,oraclecal,oracle}.parquet
 ```
 
-- `sweep-seed0-oldlabels`, `sweep-seed1-oldlabels`: default engine, spec allow-all protocol, Task 1.14 labels.
-- `sweep-seed0`, `sweep-seed1`: default engine, spec allow-all protocol, carrier labels.
+<!-- Task U1 fix round 1: the engine defaults changed by user decision (2026-11-10), so the scripts
+     now apply PARAMS on top of SPEC_SWITCHES (agentfw.bench.sweeps): EngineConfig().replace(
+     **{**SPEC_SWITCHES, **params}). No PARAMS = the spec engine, as when this file was generated. -->
+
+- `sweep-seed0-oldlabels`, `sweep-seed1-oldlabels`: spec engine (no PARAMS; the default engine at Task 1.15), spec allow-all protocol, Task 1.14 labels.
+- `sweep-seed0`, `sweep-seed1`: spec engine (no PARAMS; the default engine at Task 1.15), spec allow-all protocol, carrier labels.
 - `rec-seed0`, `rec-seed1`: phase-A candidate = OUTCOMES `review` (oracle-reviewer approval loop: labels act as a perfect human reviewer → optimistic), PARAMS `{"vel_count_attempts": true, "seq_prereq_graded": true, "novelty_full_n": 50}`; its oraclecal/oracle tables use the same config.
 
 Rules and their order: `classify.py` docstring (first match wins). "hit" = detected at the live threshold of the primary table. "(carrier is not the outbound write)" counts exfil gate attacks with a call between the read and the outbound write (all of them, hit or not). The oracle variants read the labels: they attribute misses, they are never reported numbers.
@@ -441,8 +445,8 @@ Live per-agent thresholds (agents ratcheting = threshold fell by > 0.05 from the
 
 ## 3. Attribution and review load
 
-Command: `uv run python docs/decisions/evidence/008-root-causes/shares.py traces/sweep-seedS OUTCOMES PARAMS`.
-"candidate" = OUTCOMES review (oracle-reviewer approval loop: labels act as a perfect human reviewer → optimistic), PARAMS {"vel_count_attempts": true, "seq_prereq_graded": true, "novelty_full_n": 50}; "default" = allow, {} (the benchmark protocol).
+Command: `uv run python docs/decisions/evidence/008-root-causes/shares.py traces/sweep-seedS OUTCOMES PARAMS` (PARAMS apply on top of `SPEC_SWITCHES`; see §1).
+"candidate" = OUTCOMES review (oracle-reviewer approval loop: labels act as a perfect human reviewer → optimistic), PARAMS {"vel_count_attempts": true, "seq_prereq_graded": true, "novelty_full_n": 50}; "default" = allow, {} (the spec engine under spec §5.2 allow-all, the benchmark protocol at Task 1.15; since the user decision of 2026-11-10 the candidate is the default).
 
 ### default, seed 0
 

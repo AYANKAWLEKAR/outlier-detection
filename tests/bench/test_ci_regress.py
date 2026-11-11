@@ -10,13 +10,16 @@ import pytest
 from agentfw.bench.ci_regress import (
     BASELINE_PATH,
     CI_OUTCOMES,
+    GOLDENS,
     ci_dataset,
     compare,
+    golden_rows,
     main,
     measure,
 )
-from agentfw.bench.registry import make_detector
-from agentfw.bench.replay import SplitSpec, canonical_hash, replay
+from agentfw.bench.replay import canonical_hash, replay
+from agentfw.bench.sweeps import SPEC_SWITCHES
+from agentfw.core.config import EngineConfig
 
 NAN = math.nan
 _ROOT = Path(__file__).resolve().parents[2]
@@ -60,11 +63,16 @@ def test_ci_protocol_is_the_benchmark_default(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_golden_static_threshold() -> None:
-    rows = replay(
-        *ci_dataset(), make_detector("static_threshold"), SplitSpec(), outcomes=CI_OUTCOMES
-    )
     golden = (_ROOT / "tests/golden/static_threshold.sha256").read_text().strip()
-    assert canonical_hash(rows) == golden
+    assert canonical_hash(golden_rows("static_threshold")) == golden
+
+
+def test_every_golden_has_a_file_and_a_definition() -> None:
+    files = {p.name.removesuffix(".sha256") for p in (_ROOT / "tests/golden").glob("*.sha256")}
+    assert files == set(GOLDENS) == {"engine", "static_threshold", "engine-spec-allow"}
+    det, cfg, mode = GOLDENS["engine-spec-allow"]
+    assert (det, cfg, mode) == ("engine", EngineConfig().replace(**SPEC_SWITCHES), "allow")
+    assert GOLDENS["engine"] == ("engine", None, CI_OUTCOMES)
 
 
 def test_baseline_file_shape() -> None:

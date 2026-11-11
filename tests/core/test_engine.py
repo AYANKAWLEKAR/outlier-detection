@@ -6,9 +6,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import orjson
 import pytest
 
-from agentfw.bench.ci_regress import CI_OUTCOMES, ci_dataset
+from agentfw.bench.ci_regress import ci_dataset, golden_rows
 from agentfw.bench.metrics import compute_all
 from agentfw.bench.protocol import Detector
 from agentfw.bench.registry import DETECTORS, make_detector
@@ -192,6 +193,36 @@ def test_blocked_action_does_not_move_baseline(tmp_path: Path) -> None:
     eng.update(spike, Outcome.DENIED)
     assert dump(eng, tmp_path / "after.jsonl") == before
     assert eng.score(spike).fused_score == r1.fused_score
+
+
+def _records(eng: Engine, path: Path) -> dict[str, dict[str, Any]]:
+    return {(r := orjson.loads(ln))["key"]: r for ln in dump(eng, path).splitlines()}
+
+
+@pytest.mark.parametrize("outcome", [Outcome.BLOCKED, Outcome.DENIED])
+def test_default_refused_call_moves_only_the_velocity_refused_window(
+    outcome: Outcome, tmp_path: Path
+) -> None:
+    """Default config (vel_count_attempts on, user decision): a refused call adds its minute to
+    velocity's ``refused`` list and changes nothing else, in any record."""
+    eng = Engine()
+    assert eng.cfg.vel_count_attempts
+    feed(eng, amounts(120))
+    before = _records(eng, tmp_path / "before.jsonl")
+    spike = env({"amount": 1e6, "currency": "xxx", "new": "cus_ABCDEFGH12"}, 120)
+    r1 = eng.score(spike)
+    eng.update(spike, outcome)
+    after = _records(eng, tmp_path / "after.jsonl")
+    assert set(after) == set(before)
+    changed = sorted(k for k in after if after[k] != before[k])
+    assert changed, "the refused attempt was not counted"
+    for k in changed:
+        new, old = after[k], before[k]
+        assert new["kind"] == "vel"
+        added = new["data"].pop("refused")
+        assert len(added) == len(old["data"].pop("refused", [])) + 1
+        assert new == old  # nothing but the refused-window list moved
+    assert eng.score(spike).fused_score >= r1.fused_score
 
 
 def test_approved_moves_baseline_like_allowed(tmp_path: Path) -> None:
@@ -400,7 +431,7 @@ def test_registry_engine_accepts_kwargs() -> None:
 
 @cache
 def _ci_rows(name: str) -> list[ScoreRow]:
-    return replay(*ci_dataset(), make_detector(name), SplitSpec(), outcomes=CI_OUTCOMES)
+    return golden_rows(name)
 
 
 def test_engine_beats_static_threshold_on_ci_dataset() -> None:
@@ -412,6 +443,13 @@ def test_engine_beats_static_threshold_on_ci_dataset() -> None:
 def test_golden_engine() -> None:
     golden = (ROOT / "tests/golden/engine.sha256").read_text().strip()
     assert canonical_hash(_ci_rows("engine")) == golden
+
+
+def test_golden_engine_spec_allow() -> None:
+    """The spec engine (``SPEC_SWITCHES``) under spec §5.2 allow-all: the pre-U1 engine golden."""
+    golden = (ROOT / "tests/golden/engine-spec-allow.sha256").read_text().strip()
+    assert golden == "c4042bc466f20af46d092a86e77f58d38d2ebf0caa976338f0b8da54ef3a0abd"
+    assert canonical_hash(_ci_rows("engine-spec-allow")) == golden
 
 
 def test_engine_replay_strict_mode_no_leak() -> None:

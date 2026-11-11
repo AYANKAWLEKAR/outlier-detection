@@ -3,8 +3,9 @@
     uv run python docs/decisions/evidence/008-root-causes/classify.py TRACES_DIR \
         OUT_DIR/primary.parquet OUT_DIR/oraclecal.parquet OUT_DIR/oracle.parquet
 
-The three tables come from replay_variants.py for ONE configuration (the spec default, or a
-candidate such as the oracle-reviewer loop with its switches). The misses classified are those of
+The three tables come from replay_variants.py for ONE configuration (the spec engine -- no PARAMS,
+since replay_variants.py applies PARAMS on top of SPEC_SWITCHES -- or a candidate such as the
+oracle-reviewer loop with its switches). The misses classified are those of
 ``primary`` (warm test, gate bucket, live thresholds). Rules, applied in this order (first match):
 
   1. i:label-misaligned       exfil_volume whose call right after the read (the §2.3 signal

@@ -5,7 +5,10 @@ Fails (exit 1) if AUPRC drops by more than 0.01 or per-agent FPR@95 rises by mor
 the target recall was unreachable). Rewrite it with ``--write-baseline``.
 
 Replays use :data:`CI_OUTCOMES`, the benchmark protocol (the oracle-reviewer approval loop, user
-decision 2026-11-10, decision 008); ``scripts/update_golden.py`` and the golden tests use it too.
+decision 2026-11-10, decision 008). :data:`GOLDENS` defines the golden score hashes
+(``tests/golden/<name>.sha256``, D-019) that ``scripts/update_golden.py`` writes and the tests
+check: the engine and static_threshold under ``CI_OUTCOMES``, plus ``engine-spec-allow``, the
+spec engine (``SPEC_SWITCHES``) under spec §5.2 allow-all (the pre-decision engine golden).
 """
 
 from __future__ import annotations
@@ -21,7 +24,9 @@ import orjson
 from agentfw.bench.dataset import load_dir
 from agentfw.bench.metrics import compute_all
 from agentfw.bench.registry import make_detector
-from agentfw.bench.replay import BENCH_OUTCOMES, OutcomeMode, SplitSpec, replay
+from agentfw.bench.replay import BENCH_OUTCOMES, OutcomeMode, ScoreRow, SplitSpec, replay
+from agentfw.bench.sweeps import SPEC_SWITCHES
+from agentfw.core.config import EngineConfig
 from agentfw.core.envelope import Label, RawCall
 from agentfw.synth.generate import GenerateConfig, generate
 from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR, TIER0_PERSONA_IDS
@@ -30,8 +35,10 @@ __all__ = [
     "BASELINE_PATH",
     "CI_DATASET",
     "CI_OUTCOMES",
+    "GOLDENS",
     "ci_dataset",
     "compare",
+    "golden_rows",
     "main",
     "measure",
 ]
@@ -42,6 +49,12 @@ FPR95_MAX_RISE = 0.002
 _TOL = 1e-9  # float slack so a change of exactly the limit passes
 _N_BOOT = 0  # the regression compares point estimates only
 CI_OUTCOMES: OutcomeMode = BENCH_OUTCOMES  # the benchmark protocol (decision 008, user decision)
+#: Golden name -> (registry detector, engine config or None for its default, replay protocol).
+GOLDENS: dict[str, tuple[str, EngineConfig | None, OutcomeMode]] = {
+    "engine": ("engine", None, CI_OUTCOMES),
+    "static_threshold": ("static_threshold", None, CI_OUTCOMES),
+    "engine-spec-allow": ("engine", EngineConfig().replace(**SPEC_SWITCHES), "allow"),
+}
 
 # Ruling R2: attack_rate=0.15 leaves enough attacks in 200 sessions (1.5% would leave ~2).
 CI_DATASET = GenerateConfig(
@@ -63,6 +76,13 @@ def ci_dataset() -> tuple[list[RawCall], dict[str, Label]]:
         generate(CI_DATASET, Path(d))
         raws, labels, _ = load_dir(d)
     return raws, labels
+
+
+def golden_rows(name: str) -> list[ScoreRow]:
+    """Replay golden ``name`` (a :data:`GOLDENS` key) over the CI dataset."""
+    detector, cfg, outcomes = GOLDENS[name]
+    det = make_detector(detector) if cfg is None else make_detector(detector, cfg=cfg)
+    return replay(*ci_dataset(), det, SplitSpec(), outcomes=outcomes)
 
 
 def _num(v: float | None) -> float:

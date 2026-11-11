@@ -3,8 +3,9 @@
 Status: **decided (Task 1.15); defaults changed by user decision (2026-11-10).** The controller's
 rulings are in the Decision section. At Task 1.15 no engine default and no benchmark-protocol
 default changed; the user later turned on the oracle-reviewer protocol and three engine switches
-(see "User decision (2026-11-10)" at the end). The Tier-1 gate is still not met. One label-semantics change was made to
-the generator: `exfil_volume` now labels the call that carries the response signal.
+(see "User decision (2026-11-10)" at the end). The Tier-1 gate is still not met. One
+label-semantics change was made to the generator: `exfil_volume` now labels the call that
+carries the response signal.
 
 Evidence: `evidence/gate-seed0-seed1.md`, produced by the scripts in `evidence/008-root-causes/`
 and the `gate` suite of `agentfw.bench.sweeps`. Numbers marked *(manual inspection)* were read off
@@ -109,7 +110,7 @@ carries the only scoreable evidence, yet it was labelled benign.
 - novel_target (iv): the ramp `min(1, n / 200)` discounts stable vocabularies with 81–178
   observations and a benign new-value rate of 0. They score 0.36–0.84.
 
-## 2. The candidates (all opt-in; defaults unchanged)
+## 2. The candidates (all opt-in; defaults unchanged) (superseded: see User decision)
 
 | id | what | code |
 |---|---|---|
@@ -271,7 +272,8 @@ The targeted detector is among a flagged row's reasons in 0.89–1.00 of detecte
 - **What changed and what did not:**
   - Kept: the exfil carrier label, and every opt-in switch and replay mode, all still opt-in.
   - Unchanged: the spec protocol and the engine defaults, so the engine golden and the CI
-    baseline are unchanged.
+    baseline are unchanged. (Superseded: see User decision. The pre-decision engine golden lives
+    on as `tests/golden/engine-spec-allow.sha256`.)
 
 ## Spec deviations
 
@@ -301,8 +303,13 @@ above stay as they were made.
     its ablation table and the baselines use the run's mode; `ci_regress`, the goldens and
     `scripts/update_golden.py` use `CI_OUTCOMES = "review"`; `replay_detector`, `run_ablation` and
     `sweep` take the mode as a required argument; the sweeps CLI has `--outcomes` (default
-    `"review"`). The `gate` sweep suite pins the spec values of the three switches, so it still
-    reproduces this record's evidence; the evidence scripts are unchanged.
+    `"review"`).
+  - The evidence keeps its meaning. The `gate` sweep suite and both evidence scripts
+    (`replay_variants.py`, `shares.py`) build their config as
+    `EngineConfig().replace(**{**SPEC_SWITCHES, **params})` (`SPEC_SWITCHES` in
+    `agentfw.bench.sweeps`), so "default" / `{}` is still the spec engine and the commands in
+    `evidence/gate-seed0-seed1.md` reproduce it. Golden `engine-spec-allow` (the spec engine under
+    allow-all on the CI dataset) still equals the pre-decision engine hash `c4042bc4…`.
 - **Engine defaults** (`EngineConfig`): `vel_count_attempts=True`, `seq_prereq_graded=True`,
   `novelty_full_n=50`. The tests of spec behaviour pin the spec values (`False`, `False`, `200`).
 - **The sandbox proxy is unaffected.** Its shadow detector is always updated with
@@ -313,7 +320,7 @@ above stay as they were made.
 bucket; `tests/acceptance/test_tier1_exit.py`). The review column matches the §2 row
 "oracle-reviewer + vel attempts + graded prereq + nov50" to the third decimal.
 
-| family | default protocol: oracle-reviewer loop (optimistic) | top-1 share | comparison: spec §5.2 allow-all, same engine defaults | spec engine, allow-all (§2 "default") |
+| family | default protocol: oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | top-1 share | comparison: spec §5.2 allow-all, same engine defaults | spec engine, allow-all (§2 "default") |
 |---|---|---|---|---|
 | magnitude_spike 10-100 | **0.692** (9/13) | 0.889 | 0.538 (7/13) | 0.538 |
 | scope_blowup | 1.000 (13/13) | 0.846 | 1.000 (13/13) | 1.000 |
@@ -328,9 +335,10 @@ bucket; `tests/acceptance/test_tier1_exit.py`). The review column matches the §
 
 **The Tier-1 gate is still not met.** Under the default protocol, magnitude_spike (0.692) and
 velocity_burst (0.880) are below 0.90, and the top-1 share is below 0.90 for velocity_burst
-(0.30), exfil_volume (0.58), scope_blowup (0.85) and magnitude_spike (0.89). `test_tier1_exit` stays a strict xfail. The
-regression floor (`test_tier1_no_regression`) now pins the review-protocol numbers above,
-with the same −0.1 tolerance. The benign-FPR guard (≤ 2 %) passes at 0.93 %.
+(0.30), exfil_volume (0.58), scope_blowup (0.85) and magnitude_spike (0.89). `test_tier1_exit`
+stays a strict xfail. The regression floor (`test_tier1_no_regression`) now pins the
+review-protocol numbers above, with the same −0.1 tolerance. The benign-FPR guard (≤ 2 %) passes
+at 0.93 %.
 
 Two side effects to know about:
 
@@ -338,11 +346,13 @@ Two side effects to know about:
   (0.579 → 0.474).** The graded prereq score (≈ 0.90–0.98 instead of 1) no longer clears the
   saturated allow-all thresholds (≥ 0.999, §1). The comparison row is therefore worse than the
   spec engine on those two families; under the review protocol it is not.
-- **CI baseline.** The CI dataset's test split holds a single attack row. Under the review
-  protocol one benign `mail.send_email` row of outreach-a ties it at the top (0.9978), so the
-  engine's CI AUPRC is 0.5 instead of 1.0. The cause is the protocol, not the switches: the spec
-  engine under review gives 0.5 too, and the new engine under allow-all gives 1.0. FPR@95 is
-  unchanged (0.0084). The baseline was rewritten with `ci_regress --write-baseline`.
+- **CI baseline.** The CI dataset's test split holds a single attack row (a `novel_target` on
+  outreach-a `mail.send_email`, fused 0.997788). With one attack, AUPRC = 1 / its rank. Under the
+  review protocol a benign outreach-a `mail.send_email` row scores 0.997797, just above it (under
+  allow-all the same row scored 0.995614: the review loop raised it), so the attack ranks second
+  and the engine's CI AUPRC is 0.5 instead of 1.0. The cause is the protocol, not the switches:
+  the spec engine under review gives 0.5 too, and the new engine under allow-all gives 1.0.
+  FPR@95 is unchanged (0.0084). The baseline was rewritten with `ci_regress --write-baseline`.
 
 The SW1 leaderboard, README and writeup are not rebuilt yet. They will be rebuilt once, after the
 pending engine fix in `schema_infer`, which also changes engine output.

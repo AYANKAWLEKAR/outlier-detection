@@ -324,6 +324,10 @@ def test_gate_suite_runs_every_candidate_with_its_outcome_mode(
     md = (tmp_path / "sweeps.md").read_text()
     assert "## gate" in md and "| setting | outcomes |" in md and "ratcheting" in md
     assert "labels act as a perfect human reviewer" in md
+    from agentfw.bench.replay import PROTOCOL_LABELS
+    from agentfw.bench.sweeps import REVIEW_NOTE
+
+    assert PROTOCOL_LABELS["review"] in REVIEW_NOTE and "->" not in REVIEW_NOTE
 
 
 # --- user decision 2026-11-10 (decision 008): every bench tool states its protocol ---------------

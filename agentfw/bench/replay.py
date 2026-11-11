@@ -32,7 +32,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, fields
 from pathlib import Path
 from time import perf_counter_ns
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 
 import numpy as np
 import orjson
@@ -55,6 +55,8 @@ __all__ = [
     "canonical_hash",
     "read_score_table",
     "replay",
+    "is_outcome_mode",
+    "protocol_label",
     "write_score_table",
 ]
 
@@ -64,13 +66,25 @@ OUTCOME_MODES: tuple[OutcomeMode, ...] = ("allow", "enforce", "review", "oracle"
 #: The benchmark protocol (user decision 2026-11-10, decision 008): the oracle-reviewer loop.
 BENCH_OUTCOMES: OutcomeMode = "review"
 #: The label every report header, leaderboard row or table using a mode must carry (verbatim).
-PROTOCOL_LABELS: dict[str, str] = {
+PROTOCOL_LABELS: dict[OutcomeMode, str] = {
     "allow": "spec §5.2 allow-all",
     "enforce": "outcomes=enforce: not the spec 5.2 allow-all protocol",
     "review": "oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)",
     "oracle": "diagnostic upper bound (reads every label) → optimistic",
 }
 _FLAGGED = frozenset({Decision.BLOCK, Decision.REQUIRE_APPROVAL})
+
+
+def is_outcome_mode(x: object) -> TypeGuard[OutcomeMode]:
+    """``x`` is one of :data:`OUTCOME_MODES` (e.g. a report's ``extras.outcomes``)."""
+    return isinstance(x, str) and x in OUTCOME_MODES
+
+
+def protocol_label(outcomes: object) -> str:
+    """The label of a replay mode (``extras.outcomes``); unknown values say so explicitly."""
+    if is_outcome_mode(outcomes):
+        return PROTOCOL_LABELS[outcomes]
+    return f"outcomes={outcomes}: unknown replay protocol"
 
 
 class LeakError(RuntimeError):

@@ -90,3 +90,13 @@ def test_cli_outcomes_flag(
     with pytest.raises(SystemExit):
         main([*args, "--out", str(tmp_path / "x"), "--outcomes", "deny"])
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_report_unknown_protocol_label_matches_the_leaderboard() -> None:
+    from agentfw.bench.replay import is_outcome_mode
+    from agentfw.bench.report import _protocol_md
+
+    assert _protocol_md("deny") == ["Protocol: outcomes=deny: unknown replay protocol.", ""]
+    assert _protocol_md("review") == [f"Protocol: {REVIEW_LABEL}.", ""]
+    assert _protocol_md(None) == []
+    assert is_outcome_mode("allow") and not is_outcome_mode("deny") and not is_outcome_mode(1)

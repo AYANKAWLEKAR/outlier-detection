@@ -18,7 +18,7 @@ from pydantic import BaseModel
 
 from agentfw.bench.ablation import AblationRow
 from agentfw.bench.metrics import GATE_RECALL, GatePreview, Metrics
-from agentfw.bench.replay import PROTOCOL_LABELS, SplitSpec
+from agentfw.bench.replay import SplitSpec, protocol_label
 
 __all__ = [
     "README_END",
@@ -275,8 +275,7 @@ def _protocol_md(outcomes: object) -> list[str]:
     """The replay protocol's label (``extras.outcomes``); nothing for reports that lack it."""
     if outcomes is None:
         return []
-    label = PROTOCOL_LABELS.get(str(outcomes), f"outcomes={outcomes}")
-    return [f"Protocol: {label}.", ""]
+    return [f"Protocol: {protocol_label(outcomes)}.", ""]
 
 
 def _gate_md(gate: object) -> list[str]:

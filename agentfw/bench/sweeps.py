@@ -407,15 +407,14 @@ SPEC_SWITCHES: dict[str, object] = {
 #: Task 1.15 gate candidates (docs/decisions/008-tier1-gate.md): ``(setting, params, outcomes)``,
 #: params on top of :data:`SPEC_SWITCHES`. "default" is the spec engine under the spec's
 #: allow-all replay. "oracle-reviewer" rows use replay outcomes "review": the oracle-reviewer
-#: approval loop (labels act as a perfect human reviewer -> optimistic). ``oracle`` reads every
+#: approval loop (labels act as a perfect human reviewer → optimistic). ``oracle`` reads every
 #: label (attacks never learned): a diagnostic upper bound only. The last oracle-reviewer row
 #: (all three switches) is today's benchmark protocol and engine defaults (user decision).
 REVIEW_NOTE = (
-    "oracle-reviewer = oracle-reviewer approval loop (labels act as a perfect human reviewer -> "
-    'optimistic); oracle = no call labelled attack is ever learned (diagnostic). "default" is the '
-    "spec engine under spec §5.2 allow-all. The benchmark protocol and engine defaults (user "
-    'decision 2026-11-10) are the row "oracle-reviewer, vel attempts, graded prereq, '
-    'novelty_full_n=50".'
+    f"oracle-reviewer = {PROTOCOL_LABELS['review']}; oracle = no call labelled attack is ever "
+    f'learned (diagnostic). "default" is the spec engine under {PROTOCOL_LABELS["allow"]}. The '
+    "benchmark protocol and engine defaults (user decision 2026-11-10) are the row "
+    '"oracle-reviewer, vel attempts, graded prereq, novelty_full_n=50".'
 )
 _W: dict[str, object] = {"cal_censor": "winsorize"}
 _W500: dict[str, object] = {**_W, "cal_censor_min_n": 500}

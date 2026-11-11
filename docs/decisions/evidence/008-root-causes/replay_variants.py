@@ -4,7 +4,9 @@
         [OUTCOMES ['JSON EngineConfig params']]
 
 Writes three score tables of one configuration (default: the spec engine, outcomes "allow"):
-  primary.parquet   -- replay(outcomes=OUTCOMES) with EngineConfig().replace(**params)
+  primary.parquet   -- replay(outcomes=OUTCOMES) with spec_config(params), i.e.
+                       EngineConfig().replace(**{**SPEC_SWITCHES, **params}): PARAMS apply on top
+                       of the spec values of the switches the user later made defaults (U1)
   oraclecal.parquet -- the same, but the calibrator never learns attack-labelled calls
   oracle.parquet    -- the same config with replay(outcomes="oracle"): nothing learns attacks
 The two oracle variants read every label: diagnostics only, never reported numbers.
@@ -16,9 +18,15 @@ from pathlib import Path
 
 from agentfw.bench.dataset import load_dir
 from agentfw.bench.replay import SplitSpec, replay, write_score_table
+from agentfw.bench.sweeps import SPEC_SWITCHES
 from agentfw.core.config import EngineConfig
 from agentfw.core.engine import Engine
 from agentfw.core.envelope import ActionEnvelope, DetectorResult, Outcome
+
+
+def spec_config(params: dict[str, object]) -> EngineConfig:
+    """The spec engine (``SPEC_SWITCHES``) with ``params`` on top."""
+    return EngineConfig().replace(**{**SPEC_SWITCHES, **params})
 
 
 class OracleCal:
@@ -50,7 +58,7 @@ class OracleCal:
 def main() -> None:
     traces, out = sys.argv[1], Path(sys.argv[2])
     outcomes = sys.argv[3] if len(sys.argv) > 3 else "allow"
-    cfg = EngineConfig().replace(**(json.loads(sys.argv[4]) if len(sys.argv) > 4 else {}))
+    cfg = spec_config(json.loads(sys.argv[4]) if len(sys.argv) > 4 else {})
     out.mkdir(parents=True, exist_ok=True)
     raws, labels, _ = load_dir(traces)
     attacks = {e for e, lab in labels.items() if lab.label == "attack"}

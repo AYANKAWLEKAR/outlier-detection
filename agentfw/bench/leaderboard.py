@@ -22,7 +22,7 @@ from typing import Any
 import orjson
 from pydantic import BaseModel
 
-from agentfw.bench.replay import PROTOCOL_LABELS
+from agentfw.bench.replay import PROTOCOL_LABELS, protocol_label
 
 __all__ = [
     "ALLOW_ALL_CAVEAT",
@@ -90,10 +90,8 @@ def _caveats(extras: Mapping[str, Any]) -> list[str]:
             "AUPRC not comparable with a full replay"
         )
     outcomes = extras.get("outcomes")
-    if isinstance(outcomes, str) and outcomes in PROTOCOL_LABELS:
-        out.append(PROTOCOL_LABELS[outcomes])
-    elif outcomes is not None:
-        out.append(f"outcomes={outcomes}: unknown replay protocol")
+    if outcomes is not None:
+        out.append(protocol_label(outcomes))
     return out
 
 
