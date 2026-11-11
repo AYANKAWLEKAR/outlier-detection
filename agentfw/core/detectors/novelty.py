@@ -35,7 +35,17 @@ pushed), magnitude is cold and the fallback scores the first number outside {0, 
 whatever its size (0.30 after ``[1]*25``, 1.0 after ``[True]*60``). (2) A constant history flags
 the next integer: after ``[1]*60`` the field never varied, so magnitude's scale is the
 ``mag_eps`` floor and a ``2`` scores about 1.0 (z = 8.1), as for any constant numeric field; it
-stays so on later ones while the first was BLOCKED, since a blocked call learns nothing. With the
+stays so on later ones while the first was BLOCKED, since a blocked call learns nothing. (3) A
+contradiction that is not above the learned range is no longer flagged: once magnitude has a
+reference it scores the value by its size alone, with the field's direction (§6.3), and novelty
+emits nothing. A negative number in an ``up`` field (``qty`` / ``amount`` / ``count`` / ``total``
+names, money / count hints) scores about 0.01 (one-sided, z = 0: after ``[0, 1]*40`` both ``-5``
+and ``-10000`` in ``qty``), and so does a fraction between 0 and 1 in any field; a ``both`` field
+still scores a large negative number by its size. Before the amendment novelty scored each of
+them 1.0. (4) Not changed by the amendment: a non-finite float (``inf``, ``-inf``, ``"1e999"``,
+NaN) contradicts nothing, because ``contradicts_bool`` wants a finite value, so in a BOOL-typed
+field neither detector scores it and it is never learned; an infinite value in a NUMERIC-typed
+field scores 1.0 by magnitude, as does an int too large for a float in the BOOL-typed one. With the
 switch off (pre-amendment) the first number outside {0, 1} scores by novelty alone, and after a
 learned BOOL -> NUMERIC switch magnitude starts cold (it never pushed the BOOL-typed history).
 

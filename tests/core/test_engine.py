@@ -776,22 +776,27 @@ def test_count_field_with_only_0_1_history_scores_a_huge_value(kind: str) -> Non
 def _qty_engine(
     history: list[Any],
     cfg: EngineConfig = EngineConfig(),  # noqa: B008 - frozen dataclass, safe as a default
+    field: str = "qty",
 ) -> tuple[Engine, SessionTracker]:
     eng = Engine(cfg)
-    return eng, _qty_feed(eng, history)
+    return eng, _qty_feed(eng, history, field=field)
 
 
-def _qty_feed(eng: Engine, history: list[Any], agent: str = "a", start: int = 0) -> SessionTracker:
+def _qty_feed(
+    eng: Engine, history: list[Any], agent: str = "a", start: int = 0, field: str = "qty"
+) -> SessionTracker:
     tr = SessionTracker()
     for i, v in enumerate(history, start):
-        e = _qty_env(tr, i, v, agent)
+        e = _qty_env(tr, i, v, agent, field)
         eng.score(e)
         eng.update(e, Outcome.ALLOWED)
         tr.observe(e)
     return tr
 
 
-def _qty_env(tr: SessionTracker, i: int, v: Any, agent: str = "a") -> ActionEnvelope:
+def _qty_env(
+    tr: SessionTracker, i: int, v: Any, agent: str = "a", field: str = "qty"
+) -> ActionEnvelope:
     return make_env(
         tracker=tr,
         envelope_id=f"e{i:06d}",
@@ -801,7 +806,7 @@ def _qty_env(tr: SessionTracker, i: int, v: Any, agent: str = "a") -> ActionEnve
         seq_no=0,
         ts_unix_ms=T0 + i * 10 * MIN,
         tool_id="shop.order",
-        args={"qty": v},
+        args={field: v},
     )
 
 
@@ -884,6 +889,96 @@ def test_contradicting_value_is_scored_by_its_size() -> None:
     assert eng.score(_qty_env(tr, 80, 2)).fused_score < 0.1  # a benign 1 -> 2 is no longer 1.0
     for ok in (0, 1, True):  # boolean-like values: no magnitude score, no novelty score
         assert not _qty_scores(eng.score(_qty_env(tr, 80, ok)))
+
+
+def test_bool_path_with_several_values_scores_only_the_contradicting_ones() -> None:
+    """A1.3: the BOOL filter is per value. In a multi-valued BOOL-typed path magnitude scores the
+    values that contradict BOOL and drops the boolean-like ones beside them: after ``[1, 1, 1]``
+    x40 the ``0`` of ``[0, 1.0001]`` is an ordinary boolean, although its size alone would score
+    1.0 against the constant-1 record of this both-direction field."""
+    eng, tr = _qty_engine([[1, 1, 1]] * 40, A1, field="flags")
+    res = eng.score(_qty_env(tr, 40, [0, 1.0001], field="flags"))
+    assert res.field_types["flags[]"] is FieldType.BOOL
+    mag = by(res, "magnitude", "flags[]")
+    assert mag.evidence["direction"] == "both" and mag.evidence["n"] == 108  # 3 * (40 - 4)
+    assert mag.evidence["observed"] == 1.0001 and mag.evidence["type_violation"] == "bool"
+    assert mag.score < 0.1  # 0.005: a hair above the constant 1
+    assert not [d for d in res.per_detector if d.detector == "novelty" and d.field == "flags[]"]
+    assert res.fused_score < 0.1
+    res = eng.score(_qty_env(tr, 40, [0, 1, 1], field="flags"))  # boolean-like values only
+    assert res.field_types["flags[]"] is FieldType.BOOL
+    assert not [d for d in res.per_detector if d.field == "flags[]"]
+
+
+def test_pinned_contradiction_not_above_the_learned_range_scores_low() -> None:
+    """PINS a remaining limit of A1.3 (``mag_bool_numeric=True``). Once magnitude has a reference
+    it scores a contradicting value by its size alone, with the field's direction (§6.3), and
+    novelty is silent. So a number outside {0, 1} that is not above the learned range scores about
+    0: a negative number in an ``up`` field (``qty``: one-sided, z = 0), and a fraction between 0
+    and 1 in any field. Before the amendment novelty scored each of them 1.0."""
+    eng, tr = _qty_engine([0, 1] * 40, A1)
+    for v in (-1, -5, -10000):
+        res = eng.score(_qty_env(tr, 80, v))
+        assert res.field_types["qty"] is FieldType.BOOL
+        mag = by(res, "magnitude", "qty")
+        assert mag.evidence["direction"] == "up" and mag.evidence["type_violation"] == "bool"
+        assert mag.evidence["observed"] == v and mag.evidence["z"] == 0.0
+        assert mag.score < 0.05  # 0.010: posterior(p = 0.5, tail_prior)
+        assert not [d for d in res.per_detector if d.detector == "novelty" and d.field == "qty"]
+        assert res.fused_score < 0.1
+    half = eng.score(_qty_env(tr, 80, 0.5))
+    assert by(half, "magnitude", "qty").score < 0.05  # 0.012
+    assert not [d for d in half.per_detector if d.detector == "novelty" and d.field == "qty"]
+    # a both-direction field (``flag``): size counts on either side, a fraction is still inside
+    eng, tr = _qty_engine([0, 1] * 40, A1, field="flag")
+    s: dict[float, float] = {}
+    for x in (-10000, -1, 0.5):
+        mag = by(eng.score(_qty_env(tr, 80, x, field="flag")), "magnitude", "flag")
+        assert mag.evidence["direction"] == "both" and mag.evidence["type_violation"] == "bool"
+        s[x] = mag.score
+    assert s[-10000] > 0.999 and 0.2 < s[-1] < 0.5 and s[0.5] < 0.05  # 1.0, 0.392, 0.006
+    # pre-amendment behaviour, ``mag_bool_numeric=False``: novelty scores each of them 1.0
+    pre, tr = _qty_engine([0, 1] * 40, PRE)
+    for x in (-1, -5, -10000, 0.5):
+        res = pre.score(_qty_env(tr, 80, x))
+        assert by(res, "novelty", "qty").score == pytest.approx(1.0)
+        assert res.fused_score == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize("cfg", [A1, PRE], ids=["a1", "pre_a1"])
+def test_pinned_non_finite_float_in_a_bool_field_is_scored_by_no_detector(
+    cfg: EngineConfig,
+) -> None:
+    """PINS a limit A1.3 leaves as it was (the same with ``mag_bool_numeric`` on and off).
+    ``contradicts_bool`` wants a finite value from a float or a string, so ``inf``, ``-inf``,
+    ``"1e999"`` (JSON 1e999) and NaN in a BOOL-typed field contradict nothing: magnitude's BOOL
+    branch and novelty both drop them, and an ALLOWED one neither retypes the field nor is pushed.
+    An infinite value in a NUMERIC-typed field scores 1.0 (``non_finite``), and so does an int
+    too large for a float in this field (the ``10**400`` test below)."""
+    eng, tr = _qty_engine([0, 1] * 40, cfg)
+    key = key_mag("a", "shop.order", "qty")
+    rec = eng.store.get(key)
+    before = None if rec is None else orjson.dumps(rec.to_dict())
+    assert (before is not None) is cfg.mag_bool_numeric
+    for i, v in enumerate((math.inf, -math.inf, "1e999", math.nan), 80):
+        e = _qty_env(tr, i, v)
+        res = eng.score(e)
+        assert res.field_types["qty"] is FieldType.BOOL
+        assert not _qty_scores(res) and res.fused_score < 0.1
+        eng.update(e, Outcome.ALLOWED)  # learned, yet nothing to learn from it
+        tr.observe(e)
+    rec = eng.store.get(key)
+    assert (None if rec is None else orjson.dumps(rec.to_dict())) == before
+    assert eng.score(_qty_env(tr, 84, 1)).field_types["qty"] is FieldType.BOOL
+    # in a list the non-finite value is dropped and the path is scored on its finite
+    # contradiction alone, never 1.0 through ``non_finite``
+    eng, tr = _qty_engine([[1, 1, 1]] * 40, cfg, field="flags")
+    res = eng.score(_qty_env(tr, 40, [math.inf, 2], field="flags"))
+    (ds,) = [d for d in res.per_detector if d.field == "flags[]"]
+    assert ds.detector == ("magnitude" if cfg.mag_bool_numeric else "novelty")
+    assert ds.evidence["type_violation"] == "bool" and "non_finite" not in ds.evidence
+    if cfg.mag_bool_numeric:
+        assert ds.evidence["observed"] == 2.0
 
 
 def test_bool_field_without_numeric_reference_falls_back_to_novelty() -> None:
