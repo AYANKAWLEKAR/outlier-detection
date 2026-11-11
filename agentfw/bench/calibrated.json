@@ -1,0 +1,13 @@
+{
+  "constants": {
+    "cal_alpha": 0.005,
+    "novelty_full_n": 50.0,
+    "prereq_rate": 0.9,
+    "tau": 0.75,
+    "z0": 3.0
+  },
+  "history": [
+    "2026-11-11 initial stamp: tiers 0-2 constants"
+  ],
+  "normalizer_hash": "318ff62eba26cdd0c35d279ed9ce67ced47641166318c57682694751bb59b8d7"
+}

@@ -17,6 +17,7 @@ from typing import Any
 from pydantic import BaseModel
 
 from agentfw.bench.ablation import AblationRow
+from agentfw.bench.calibrated import normalizer_hash
 from agentfw.bench.metrics import (
     GATE_BENIGN_FPR,
     GATE_RECALL,
@@ -95,6 +96,8 @@ def _headline(m: Metrics, warm_only: bool) -> dict[str, Any]:
         "warm_only": warm_only,
         "n_rows": m.n_rows,
         "n_attack_rows": m.n_attack_rows,
+        "attack_base_rate": m.attack_base_rate,
+        "precision_global": m.precision_global,
     }
 
 
@@ -122,6 +125,7 @@ def build_report(
     ex["notes"] = notes
     state_bytes = ex.pop("state_bytes", None)
     report: dict[str, object] = {
+        "normalizer_hash": normalizer_hash(),
         "headline": _headline(warm, True),
         "headline_all": _headline(all_, False),
         "per_family": {

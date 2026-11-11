@@ -53,6 +53,7 @@ __all__ = [
     "Thresholds",
     "among_reasons_share",
     "auprc",
+    "auroc",
     "benign_fpr",
     "bootstrap_ci",
     "bootstrap_ci_counted",
@@ -65,6 +66,7 @@ __all__ = [
     "gate_preview",
     "latency_summary",
     "per_agent_fpr_at_recall",
+    "precision_at",
     "recall_by_family",
     "top_reason_share",
 ]
@@ -200,6 +202,10 @@ class Metrics:
     n_attack_rows: int
     auprc_ci_n_dropped: int = 0  # bootstrap resamples skipped because the metric was NaN
     fpr95_per_agent_ci_n_dropped: int = 0
+    precision_global: float = (
+        math.nan
+    )  # precision at (recall_at_global_thr, fpr95_global, base rate)
+    attack_base_rate: float = math.nan  # test-set envelope prevalence n_attack_rows / n_rows
 
 
 # --- helpers ------------------------------------------------------------------------------------
@@ -270,6 +276,34 @@ def auprc(scores: FloatArray, y: NDArray[np.bool_]) -> float:
     precision = tp / (tp + fp)
     d_recall = np.diff(np.r_[0.0, tp]) / n_pos
     return float(np.sum(d_recall * precision))
+
+
+def auroc(scores: FloatArray, y: NDArray[np.bool_]) -> float:
+    """ROC AUC, trapezoids over tie groups (same grouping as :func:`auprc`, so ties average).
+
+    All-tied scores give 0.5. NaN without positives or without negatives.
+    """
+    s, yy = _clean(scores, y)
+    n_pos = int(yy.sum())
+    n_neg = int(yy.size - n_pos)
+    if n_pos == 0 or n_neg == 0:
+        return math.nan
+    _, tp, fp = _tie_groups(s, yy)
+    tpr = np.r_[0.0, tp / n_pos]
+    fpr = np.r_[0.0, fp / n_neg]
+    return float(np.sum(np.diff(fpr) * (tpr[1:] + tpr[:-1]) / 2.0))
+
+
+def precision_at(recall: float, fpr: float, base_rate: float) -> float:
+    """Precision implied by ``recall`` and ``fpr`` at attack prevalence ``base_rate``.
+
+    ``recall*b / (recall*b + fpr*(1-b))``; NaN if an input is NaN or nothing is flagged.
+    """
+    tp = recall * base_rate
+    flagged = tp + fpr * (1.0 - base_rate)
+    if math.isnan(flagged) or flagged <= 0.0:
+        return math.nan
+    return tp / flagged
 
 
 def fpr_at_recall(
@@ -761,6 +795,7 @@ def compute_all(
     auprc_ci = bootstrap_ci_counted(test, _auprc_rows, n=n_boot, seed=seed)
 
     p50, p99 = latency_summary(test)
+    base_rate = _rate(n_atk, len(test))
     return Metrics(
         auprc=auprc(s, y),
         auprc_ci=(auprc_ci.lo, auprc_ci.hi),
@@ -783,4 +818,6 @@ def compute_all(
         n_attack_rows=n_atk,
         auprc_ci_n_dropped=auprc_ci.n_dropped,
         fpr95_per_agent_ci_n_dropped=pa_ci.n_dropped,
+        precision_global=precision_at(recall_g, fpr_g, base_rate),
+        attack_base_rate=base_rate,
     )
