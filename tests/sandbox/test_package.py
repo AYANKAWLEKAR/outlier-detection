@@ -790,3 +790,24 @@ def test_cfg_and_env_values_for_the_same_field_are_both_scanned(tmp_path: Path) 
     with pytest.raises(ValueError, match="configured secret sf_password") as info:
         package([run], tmp_path / "out", cfg=cfg, secrets={"sf_password": "Rotated-0123456789"})
     assert "Hunter2" not in str(info.value)
+
+
+def test_unexpected_manifest_entry_is_reported_without_its_name(mini: Path) -> None:
+    # A schema-valid manifest can carry any string as a `files` key; the checksum message must not
+    # echo it, and an entry outside the dataset's own file set is never opened.
+    man = mini / "manifest.json"
+    raw = orjson.loads(man.read_bytes())
+    raw["files"]["not-a-dataset-file-Zq9Zq9Zq9"] = "0" * 64
+    raw["files"]["../outside.txt"] = "0" * 64
+    man.write_bytes(orjson.dumps(raw))
+    rep = validate_dataset(mini, **LOW)
+    assert not rep.ok
+    assert any("2 unexpected entries" in x for x in rep.problems)
+    assert not any("Zq9Zq9Zq9" in x or "outside.txt" in x for x in rep.problems)
+    # a real file with a wrong digest is still named
+    del raw["files"]["not-a-dataset-file-Zq9Zq9Zq9"]
+    del raw["files"]["../outside.txt"]
+    raw["files"]["labels.jsonl"] = "0" * 64
+    man.write_bytes(orjson.dumps(raw))
+    rep = validate_dataset(mini, **LOW)
+    assert any(x == "labels.jsonl: sha256 does not match manifest.json" for x in rep.problems)

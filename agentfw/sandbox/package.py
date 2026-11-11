@@ -579,7 +579,14 @@ def validate_dataset(
         for n in (*_FILES, "DATASET_CARD.md")
         if n not in manifest.files
     ]
-    for name, digest in sorted(manifest.files.items()):
+    known = (*_FILES, "DATASET_CARD.md")
+    unexpected = len(manifest.files.keys() - set(known))
+    if unexpected:  # a manifest key is input text: count it, never echo or open it
+        problems.append(f"manifest.json lists {unexpected} unexpected entries (names withheld)")
+    for name in known:
+        digest = manifest.files.get(name)
+        if digest is None:
+            continue  # reported above as not listed
         path = d / name
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
             problems.append(f"{name}: sha256 does not match manifest.json")
