@@ -4,9 +4,9 @@
 
 **Every table on this page is the synthetic benchmark (SW1)**: generator seed 0, 20 personas, 90 days, all 8 attack families, attack rate 0.015 (dataset `e7b3bc2a2f20`). It is *not* the live sandbox dataset v1 (2,000+ sessions of real LLM agents), which has not been built yet; see the README for how to build it. The Tier-2 exit numbers belong to that dataset.
 
-Protocol: spec §5.2 allow-all replay, default engine configuration, full test split. The by-time and by-agent splits are separate tables and are never averaged (§5.3). `llm_judge` is listed but was not run: it needs a live judge model and is evaluated on a stratified 2,000-envelope sample (§5.5), which only the sandbox dataset run will do.
+Protocol: oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic), default engine configuration, full test split. The engine is also shown under spec §5.2 allow-all (row `engine-allow-all`) for comparison; every row's caveat names its protocol. The baselines do not learn online, so the protocol does not change their scores. The by-time and by-agent splits are separate tables and are never averaged (§5.3). `llm_judge` is listed but was not run: it needs a live judge model and is evaluated on a stratified 2,000-envelope sample (§5.5), which only the sandbox dataset run will do.
 
-The leaderboard's per-agent FPR@95 is an operating point fixed after the fact on the test labels (spec §5.4). It is not the engine's live calibration. The Tier-1 gate (live thresholds, per-family recall ≥ 0.90) is not met under this protocol; see [docs/decisions/008-tier1-gate.md](decisions/008-tier1-gate.md) and [docs/writeup.md](writeup.md).
+The leaderboard's per-agent FPR@95 is an operating point fixed after the fact on the test labels (spec §5.4). It is not the engine's live calibration. The Tier-1 gate (live thresholds, per-family recall ≥ 0.90) is not met under either protocol; see [docs/decisions/008-tier1-gate.md](decisions/008-tier1-gate.md) and [docs/writeup.md](writeup.md).
 
 #### Leaderboard: synthetic benchmark (SW1), split `time`
 
@@ -14,10 +14,11 @@ Dataset `e7b3bc2a2f20` (sha256 of traces.jsonl), seed 0. Warm test rows. Ranked 
 
 | Rank | Run | Detector | AUPRC | AUPRC 95% CI | FPR@95 per-agent (recall) | FPR@95 per-agent 95% CI | FPR@95 global | Test rows (attacks) | Caveats |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | engine | engine | 0.576 | [0.480, 0.658] | 0.563 (recall 0.950) | [0.497, 0.583] | 0.536 | 53011 (2062) | – |
-| 2 | isolation_forest | isolation_forest | 0.055 | [0.042, 0.074] | 0.865 (recall 0.972) | [0.636, 0.925] | 1.000 | 53011 (2062) | batch: fit offline on the train split, not an online learner |
-| 3 | random | random | 0.040 | [0.031, 0.050] | 0.943 (recall 0.950) | [0.935, 0.958] | 0.944 | 53011 (2062) | – |
-| 4 | static_threshold | static_threshold | 0.048 | [0.035, 0.066] | 0.950 (recall 0.975) | [0.794, 0.990] | 1.000 | 53011 (2062) | batch: fit offline on the train split, not an online learner |
+| 1 | engine | engine | 0.661 | [0.571, 0.737] | 0.481 (recall 0.950) | [0.373, 0.549] | 0.423 | 53011 (2062) | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) |
+| 2 | engine-allow-all | engine | 0.612 | [0.514, 0.693] | 0.555 (recall 0.950) | [0.509, 0.585] | 0.537 | 53011 (2062) | spec §5.2 allow-all |
+| 3 | isolation_forest | isolation_forest | 0.055 | [0.042, 0.074] | 0.865 (recall 0.972) | [0.636, 0.925] | 1.000 | 53011 (2062) | batch: fit offline on the train split, not an online learner; oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) |
+| 4 | random | random | 0.040 | [0.031, 0.050] | 0.943 (recall 0.950) | [0.935, 0.958] | 0.944 | 53011 (2062) | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) |
+| 5 | static_threshold | static_threshold | 0.048 | [0.035, 0.066] | 0.950 (recall 0.975) | [0.794, 0.990] | 1.000 | 53011 (2062) | batch: fit offline on the train split, not an online learner; oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) |
 | – | llm_judge | llm_judge | – | – | – | – | – | – | not run (requires a live judge model) |
 
 #### Per-family attack recall: synthetic benchmark (SW1), split `time`
@@ -26,7 +27,8 @@ Warm test rows, attack level (an attack counts if any of its envelopes is flagge
 
 | Run | Thresholds | exfil_volume | magnitude_spike | novel_target | prereq_skip | scope_blowup | slow_drift | velocity_burst | Control FPR |
 |---|---|---|---|---|---|---|---|---|---|
-| engine | per_agent | 1.000 | 0.895 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.698 |
+| engine | per_agent | 1.000 | 0.842 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.684 |
+| engine-allow-all | per_agent | 1.000 | 0.895 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.712 |
 | isolation_forest | per_agent | 1.000 | 1.000 | 0.878 | 0.933 | 1.000 | 1.000 | 0.980 | 0.700 |
 | random | per_agent | 1.000 | 1.000 | 0.959 | 1.000 | 0.846 | 1.000 | 1.000 | 0.937 |
 | static_threshold | per_agent | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.960 | 1.000 |
@@ -37,10 +39,11 @@ Dataset `e7b3bc2a2f20` (sha256 of traces.jsonl), seed 0. Warm test rows. Ranked 
 
 | Rank | Run | Detector | AUPRC | AUPRC 95% CI | FPR@95 per-agent (recall) | FPR@95 per-agent 95% CI | FPR@95 global | Test rows (attacks) | Caveats |
 |---|---|---|---|---|---|---|---|---|---|
-| 1 | engine | engine | 0.615 | [0.504, 0.693] | 0.704 (recall 0.950) | [0.661, 0.735] | 0.704 | 43562 (1611) | – |
-| 2 | random | random | 0.036 | [0.027, 0.046] | 0.948 (recall 0.950) | [0.937, 0.960] | 0.948 | 43562 (1611) | – |
-| 3 | static_threshold | static_threshold | 0.057 | [0.037, 0.083] | 1.000 (recall 1.000) | [1.000, 1.000] | 1.000 | 43562 (1611) | batch: fit offline on the train split, not an online learner |
-| 4 | isolation_forest | isolation_forest | 0.048 | [0.037, 0.063] | 1.000 (recall 1.000) | [0.587, 1.000] | 1.000 | 43562 (1611) | batch: fit offline on the train split, not an online learner |
+| 1 | engine | engine | 0.698 | [0.600, 0.765] | 0.701 (recall 0.950) | [0.650, 0.840] | 0.701 | 43562 (1611) | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) |
+| 2 | engine-allow-all | engine | 0.645 | [0.539, 0.723] | 0.707 (recall 0.950) | [0.664, 0.737] | 0.707 | 43562 (1611) | spec §5.2 allow-all |
+| 3 | random | random | 0.036 | [0.027, 0.046] | 0.948 (recall 0.950) | [0.937, 0.960] | 0.948 | 43562 (1611) | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) |
+| 4 | static_threshold | static_threshold | 0.057 | [0.037, 0.083] | 1.000 (recall 1.000) | [1.000, 1.000] | 1.000 | 43562 (1611) | batch: fit offline on the train split, not an online learner; oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) |
+| 5 | isolation_forest | isolation_forest | 0.048 | [0.037, 0.063] | 1.000 (recall 1.000) | [0.587, 1.000] | 1.000 | 43562 (1611) | batch: fit offline on the train split, not an online learner; oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) |
 | – | llm_judge | llm_judge | – | – | – | – | – | – | not run (requires a live judge model) |
 
 #### Per-family attack recall: synthetic benchmark (SW1), split `agent`
@@ -49,7 +52,8 @@ Warm test rows, attack level (an attack counts if any of its envelopes is flagge
 
 | Run | Thresholds | exfil_volume | magnitude_spike | novel_target | prereq_skip | scope_blowup | slow_drift | velocity_burst | Control FPR |
 |---|---|---|---|---|---|---|---|---|---|
-| engine | per_agent | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.834 |
+| engine | per_agent | 1.000 | 0.966 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.896 |
+| engine-allow-all | per_agent | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 0.834 |
 | random | per_agent | 1.000 | 0.966 | 0.972 | 1.000 | 0.842 | 1.000 | 1.000 | 0.936 |
 | static_threshold | per_agent | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
 | isolation_forest | per_agent | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
