@@ -27,6 +27,15 @@ id-like). Int/float 0 and 1 are boolish, so a count that starts as 0/1 would oth
 BOOL and stay BOOL, and magnitude/novelty would skip it. Python ``bool`` and ``"true"``/``"false"``
 never trigger the switch, nor do NaN/inf.
 
+Known limitation (pinned by tests in ``tests/core/test_engine.py``; Amendment A1 is where it
+changes): (1) after a *learned* (ALLOWED / APPROVED) BOOL -> NUMERIC switch, magnitude has no
+baseline for the field (it never pushed the BOOL-typed history), so after ``[1]*500`` and an
+allowed ``2``, a ``10000`` scores low: the field is in magnitude cold start for ``mag_cold_n``
+observations unless a pooled prior exists. (2) The first number outside {0, 1} in a BOOL-typed
+field scores 1.0 by novelty (``type_violation="bool"``) whatever its magnitude (after ``[1]*60``,
+a ``2`` is 1.0), and stays 1.0 on later ones while the first was BLOCKED, since a blocked call never
+retypes the field.
+
 ``None`` values carry no information and are skipped. Strings of ``freetext_min_len`` or more
 characters are never stored: the distinct set, reservoir and window keep ``#<xxh64 hex>``
 instead (their true length still feeds ``sum_len``). The reservoir RNG is stateless (splitmix64

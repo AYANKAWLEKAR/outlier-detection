@@ -41,7 +41,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from pydantic import BaseModel, SecretStr, ValidationError
 
-from agentfw.core.envelope import Label, RawCall
+from agentfw.core.envelope import Label, RawCall, ResponseMeta
 from agentfw.core.normalize import SessionTracker, normalize
 from agentfw.sandbox.config import SandboxConfig
 from agentfw.sandbox.retime import retime
@@ -67,9 +67,10 @@ _OPTS = orjson.OPT_SORT_KEYS
 _FILES = ("traces.jsonl", "labels.jsonl", "traces.parquet", "labels.parquet")
 
 # A key starts at a non-alphanumeric, or right after a percent-encoded byte (``%3D``) or a JSON
-# escape still in raw text (``\n``, ``\t``, ``\r``): so ``risk_test_x`` / ``task_live_y`` are
-# identifiers, not keys, but ``%3Dsk_live_...`` and ``\nsk_live_...`` are keys.
-_KEY_START = r"(?:(?<![A-Za-z0-9])|(?<=%[0-9A-Fa-f]{2})|(?<=\\[ntr]))"
+# escape still in raw text (``\n``, ``\t``, ``\r``, ``\b``, ``\f``, ``\u201c``): so
+# ``risk_test_x`` / ``task_live_y`` are identifiers, not keys, but ``%3Dsk_live_...`` and
+# ``\u201csk_live_...`` are keys.
+_KEY_START = r"(?:(?<![A-Za-z0-9])|(?<=%[0-9A-Fa-f]{2})|(?<=\\[ntrbf])|(?<=\\u[0-9A-Fa-f]{4}))"
 MIN_LITERAL_SECRET = 8  # configured values shorter than this are not scanned for literally
 
 _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
@@ -158,13 +159,14 @@ def env_secrets(env: Mapping[str, str] | None = None) -> dict[str, str]:
 
 def _literal_secrets(
     cfg: SandboxConfig | None, secrets: Mapping[str, str] | None
-) -> dict[str, str]:
+) -> list[tuple[str, str]]:
     """The configured values to scan for literally. Values shorter than ``MIN_LITERAL_SECRET``
     (e.g. ``LLM_API_KEY=EMPTY``) would match ordinary data, so they are skipped with a note that
-    names the field, never the value."""
-    merged = {**config_secrets(cfg), **(secrets or {})}
-    out: dict[str, str] = {}
-    for name, value in sorted(merged.items()):
+    names the field, never the value. Distinct ``(field, value)`` pairs are all kept, so a config
+    value and a different environment value for one field are both scanned."""
+    pairs = sorted({*config_secrets(cfg).items(), *(secrets or {}).items()})
+    out: list[tuple[str, str]] = []
+    for name, value in pairs:
         if len(value) < MIN_LITERAL_SECRET:
             logger.warning(
                 "configured secret %s is shorter than %d characters; not scanned literally",
@@ -172,8 +174,21 @@ def _literal_secrets(
                 MIN_LITERAL_SECRET,
             )
         else:
-            out[name] = value
+            out.append((name, value))
     return out
+
+
+def _loc(loc: tuple[int | str, ...]) -> str:
+    """An error location with only ints and known model field names; anything else is the
+    input's own dict key (a manifest ``files`` entry, ...) and is masked."""
+    names = {
+        n
+        for m in (DatasetManifest, ManifestCounts, RawCall, ResponseMeta, Label)
+        for n in m.model_fields
+    }
+    return (
+        ".".join(str(p) if isinstance(p, int) or p in names else "[key]" for p in loc) or "(root)"
+    )
 
 
 def _error_summary(e: BaseException) -> str:
@@ -181,16 +196,16 @@ def _error_summary(e: BaseException) -> str:
     reduced to its error locations and types."""
     if isinstance(e, ValidationError):
         return "; ".join(
-            f"{'.'.join(str(p) for p in err['loc']) or '(root)'}: {err['type']}"
+            f"{_loc(err['loc'])}: {err['type']}"
             for err in e.errors(include_input=False, include_url=False)
         )
     return f"{type(e).__name__}: {e}"
 
 
-def _configured_hits(text: str, secrets: Mapping[str, str]) -> list[tuple[str, int, int]]:
+def _configured_hits(text: str, secrets: Sequence[tuple[str, str]]) -> list[tuple[str, int, int]]:
     """``(config field, offset, length)`` of every literal occurrence of a configured secret."""
     hits: list[tuple[str, int, int]] = []
-    for field, value in sorted(secrets.items()):
+    for field, value in sorted(secrets):
         i = text.find(value)
         while i != -1:
             hits.append((field, i, len(value)))
@@ -198,12 +213,14 @@ def _configured_hits(text: str, secrets: Mapping[str, str]) -> list[tuple[str, i
     return hits
 
 
-def _content_problems(name: str, text: str, secrets: Mapping[str, str] | None = None) -> list[str]:
+def _content_problems(
+    name: str, text: str, secrets: Sequence[tuple[str, str]] | None = None
+) -> list[str]:
     """Secret and email findings in ``text``: the raw text and, for JSON / JSON lines, every
     decoded string value (so escapes cannot hide a secret). Secret findings name the pattern (or
     the configured secret's field), the match length and where it is, never the matched text.
     ``secrets`` are literal configured values (``config_secrets``) to look for as well."""
-    secrets = secrets or {}
+    secrets = secrets or ()
 
     def hits(t: str) -> list[tuple[str, int, int]]:
         conf = [(f"configured secret {f}", i, n) for f, i, n in _configured_hits(t, secrets)]
@@ -356,7 +373,7 @@ def _read_rows[T](path: Path, parse: Callable[[bytes], T], sid: str, run: Path) 
     try:
         lines = path.read_bytes().splitlines()
     except OSError as e:
-        raise ValueError(f"{where}: cannot read {path.name}: {e}") from e
+        raise ValueError(f"{where}: cannot read {path.parent.name}/{path.name}: {e}") from e
     out: list[T] = []
     for i, line in enumerate(lines, 1):
         bad: str | None = None
@@ -365,7 +382,9 @@ def _read_rows[T](path: Path, parse: Callable[[bytes], T], sid: str, run: Path) 
         except ValidationError as e:
             bad = _error_summary(e)
         if bad is not None:  # raised outside the handler: not even ``__context__`` holds the
-            raise ValueError(f"{where}: invalid row in {path.name} line {i}: {bad}")  # input
+            raise ValueError(  # input
+                f"{where}: invalid row in {path.parent.name}/{path.name} line {i}: {bad}"
+            )
     return out
 
 
@@ -570,17 +589,20 @@ def validate_dataset(
                 problems += _content_problems(path.name, path.read_text(), literal)
             except UnicodeDecodeError:
                 problems.append(f"{path.name}: not UTF-8 text")
-    try:
-        raws = [
-            RawCall.model_validate_json(x) for x in (d / "traces.jsonl").read_bytes().splitlines()
-        ]
-        labs = [
-            Label.model_validate_json(x) for x in (d / "labels.jsonl").read_bytes().splitlines()
-        ]
-    except ValueError as e:
-        return ValidationReport(
-            ok=False, problems=[*problems, f"jsonl rows invalid: {_error_summary(e)}"]
-        )
+    raws: list[RawCall] = []
+    labs: list[Label] = []
+    for fname, model, rows in (("traces.jsonl", RawCall, raws), ("labels.jsonl", Label, labs)):
+        for lineno, line in enumerate((d / fname).read_bytes().splitlines(), 1):
+            bad: str | None = None
+            try:
+                rows.append(model.model_validate_json(line))  # type: ignore[arg-type]
+            except ValueError as e:
+                bad = _error_summary(e)
+            if bad is not None:
+                return ValidationReport(
+                    ok=False,
+                    problems=[*problems, f"jsonl rows invalid: {fname} line {lineno}: {bad}"],
+                )
     ids = [r.envelope_id for r in raws]
     if len(set(ids)) != len(ids):
         problems.append("traces.jsonl: duplicate envelope_id")
@@ -609,6 +631,20 @@ def validate_dataset(
 # --- CLI -----------------------------------------------------------------------------------------
 
 
+def _cli_secrets() -> dict[str, str]:
+    """The secret env vars that are set; a names-only stderr note lists those that are not (their
+    values cannot be scanned for)."""
+    found = env_secrets()
+    missing = sorted(
+        n.upper()
+        for n, f in SandboxConfig.model_fields.items()
+        if f.annotation is SecretStr and n not in found
+    )
+    if missing:
+        sys.stderr.write(f"note: {', '.join(missing)} not set; their values are not scanned for\n")
+    return found
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m agentfw.sandbox.package", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -625,7 +661,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     v.add_argument("--min-attacks", type=int, default=600)
     a = ap.parse_args(argv)
     if a.cmd == "build":
-        m = package(a.runs, a.out, version=a.version, seed=a.seed, secrets=env_secrets())
+        m = package(a.runs, a.out, version=a.version, seed=a.seed, secrets=_cli_secrets())
         sys.stdout.write(m.counts.model_dump_json(indent=2) + "\n")
         return 0
     rep = validate_dataset(
@@ -634,7 +670,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         min_sessions=a.min_sessions,
         min_actions=a.min_actions,
         min_attacks=a.min_attacks,
-        secrets=env_secrets(),
+        secrets=_cli_secrets(),
     )
     sys.stdout.write(rep.model_dump_json(indent=2) + "\n")
     return 0 if rep.ok else 1

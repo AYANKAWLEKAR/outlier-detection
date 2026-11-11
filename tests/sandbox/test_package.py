@@ -11,6 +11,7 @@ import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from pydantic import SecretStr
 
 from agentfw.bench.dataset import load_dir, load_labels, load_traces
 from agentfw.bench.registry import make_detector
@@ -597,7 +598,19 @@ def test_cli_uses_the_environment_config_for_secret_values(
 
 @pytest.mark.parametrize(
     "text",
-    ["%3Dsk_live_abcdef", "%20sk_live_abc", "\\nsk_live_abc", "\\tsk_test_abc", "\\rpk_live_x"],
+    [
+        "%3Dsk_live_abcdef",
+        "%20sk_live_abc",
+        "\\nsk_live_abc",
+        "\\tsk_test_abc",
+        "\\rpk_live_x",
+        "\\u201csk_live_abc",  # a raw \uXXXX escape ends in a hex digit
+        "\\u003dsk_live_abc",
+        "\u201csk_live_abc",
+        "=sk_live_abc",
+        "\\bsk_live_abc",
+        "\\fsk_test_abc",
+    ],
 )
 def test_stripe_key_after_percent_encoding_or_json_escape_is_found(text: str) -> None:
     assert len(scan_secrets(text)) == 1, text
@@ -626,6 +639,16 @@ def test_malformed_manifest_and_rows_in_validate_never_echo(mini: Path) -> None:
     rep = validate_dataset(mini, **LOW)
     assert any("manifest.json invalid" in x and "files" in x for x in rep.problems)
     assert not any("Zq9Zq9" in x for x in rep.problems)
+    for bad in (
+        {**raw, "files": {_TOKEN: 5}},
+        {**raw, "counts": {**raw["counts"], "by_family": {_TOKEN: "x"}}},
+        {**raw, "counts": {**raw["counts"], "by_injection_level": {_TOKEN: "x"}}},
+    ):
+        man.write_bytes(orjson.dumps(bad))
+        rep = validate_dataset(mini, **LOW)
+        assert any("manifest.json invalid" in x and "[key]" in x for x in rep.problems)
+        assert _TOKEN not in " ".join(rep.problems) and "Zq9Zq9" not in " ".join(rep.problems)
+        assert main(["validate", str(mini), *_low_args()]) == 1
     man.write_bytes(saved)
     traces = mini / "traces.jsonl"
     lines = traces.read_bytes().splitlines()
@@ -671,4 +694,99 @@ def test_partial_environment_still_scans_present_secret_vars(
     raw.write_bytes(raw.read_bytes().replace(b"T-1", _PASSWORD.encode(), 1))
     with pytest.raises(ValueError, match="configured secret sf_password") as info:
         main(["build", "--runs", str(run), "--out", str(tmp_path / "out")])
+    assert "Hunter2" not in str(info.value)
+
+
+def _low_args() -> list[str]:
+    return [f"--{k.replace('_', '-')}={v}" for k, v in LOW.items()]
+
+
+def _clear_secret_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in SandboxConfig.model_fields:
+        monkeypatch.delenv(name.upper(), raising=False)
+
+
+# -- FR3: validate CLI scans env secrets; names-only note for unset ones --------------------------
+
+
+def test_partial_environment_validate_cli_scans_present_secret_vars(
+    mini: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _clear_secret_env(monkeypatch)
+    monkeypatch.setenv("SF_PASSWORD", _PASSWORD)  # nothing else: no full config
+    p = mini / "traces.jsonl"
+    p.write_bytes(p.read_bytes().replace(b"T-1", _PASSWORD.encode(), 1))
+    assert main(["validate", str(mini), *_low_args()]) == 1
+    out = capsys.readouterr().out
+    assert "configured secret sf_password" in out and "Hunter2" not in out
+
+
+def _secret_vars() -> list[str]:
+    return sorted(
+        n.upper() for n, f in SandboxConfig.model_fields.items() if f.annotation is SecretStr
+    )
+
+
+@pytest.mark.parametrize("cmd", ["build", "validate"])
+def test_cli_notes_unscanned_secret_vars_on_stderr(
+    cmd: str,
+    tmp_path: Path,
+    mini: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _clear_secret_env(monkeypatch)
+    run = tmp_path / "run2"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])})
+    argv = (
+        ["build", "--runs", str(run), "--out", str(tmp_path / "out")]
+        if cmd == "build"
+        else ["validate", str(mini), *_low_args()]
+    )
+    main(argv)
+    err = capsys.readouterr().err
+    assert all(n in err for n in _secret_vars())  # none set: every var named
+    monkeypatch.setenv("SF_PASSWORD", _PASSWORD)
+    if cmd == "build":
+        argv[-1] = str(tmp_path / "out2")
+    main(argv)
+    err = capsys.readouterr().err
+    assert "SF_PASSWORD" not in err and "Hunter2" not in err
+    assert all(n in err for n in _secret_vars() if n != "SF_PASSWORD")
+
+
+# -- FR3: row errors name the file and line --------------------------------------------------------
+
+
+@pytest.mark.parametrize("sub", ["raw", "labels"])
+def test_row_error_in_package_names_the_file_and_line(tmp_path: Path, sub: str) -> None:
+    run = tmp_path / "run"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000, 1000])})
+    f = run / sub / "s0.jsonl"
+    lines = f.read_bytes().splitlines()
+    f.write_bytes(b"\n".join([lines[0], lines[1][:20], *lines[2:]]) + b"\n")
+    with pytest.raises(ValueError, match=rf"{sub}/s0\.jsonl line 2"):
+        package([run], tmp_path / "out")
+
+
+@pytest.mark.parametrize("name", ["traces.jsonl", "labels.jsonl"])
+def test_row_error_in_validate_names_the_file_and_line(mini: Path, name: str) -> None:
+    f = mini / name
+    lines = f.read_bytes().splitlines()
+    f.write_bytes(b"\n".join([lines[0], lines[1], lines[2][:20], *lines[3:]]) + b"\n")
+    rep = validate_dataset(mini, **LOW)
+    assert any("jsonl rows invalid" in x and f"{name} line 3" in x for x in rep.problems)
+
+
+# -- FR3: a cfg value and a different env value for one field are both scanned --------------------
+
+
+def test_cfg_and_env_values_for_the_same_field_are_both_scanned(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])})
+    raw = run / "raw" / "s0.jsonl"
+    raw.write_bytes(raw.read_bytes().replace(b"T-1", _PASSWORD.encode(), 1))
+    cfg = _sandbox_cfg(tmp_path, SF_PASSWORD=_PASSWORD)  # the value used during collection
+    with pytest.raises(ValueError, match="configured secret sf_password") as info:
+        package([run], tmp_path / "out", cfg=cfg, secrets={"sf_password": "Rotated-0123456789"})
     assert "Hunter2" not in str(info.value)

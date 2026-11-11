@@ -20,6 +20,15 @@ evidence ``type_violation="bool"``. Boolean-like values in a BOOL path produce n
 this, a count field with only 0/1 history is typed BOOL and its first large value (scored before
 the update that retypes the field) would be invisible to every detector.
 
+Known limitation (pinned by tests in ``tests/core/test_engine.py``; Amendment A1 is where it
+changes): (1) after a *learned* (ALLOWED / APPROVED) BOOL -> NUMERIC switch, magnitude has no
+baseline for the field (it never pushed the BOOL-typed history), so after ``[1]*500`` and an
+allowed ``2``, a ``10000`` scores low: the field is in magnitude cold start for ``mag_cold_n``
+observations unless a pooled prior exists. (2) The first number outside {0, 1} in a BOOL-typed
+field scores 1.0 by novelty (``type_violation="bool"``) whatever its magnitude (after ``[1]*60``,
+a ``2`` is 1.0), and stays 1.0 on later ones while the first was BLOCKED, since a blocked call never
+retypes the field.
+
 Cold keys (``n_total < mag_cold_n``, ruling NV1) may consult the pooled prior (§6.10) via
 ``PriorSource.novelty_ref``: a value is then seen if either record has it, and an unseen value is
 scored with the prior's counts times ``prior_novelty_discount`` (D-012). With no prior the

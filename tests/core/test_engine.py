@@ -761,3 +761,61 @@ def test_count_field_with_only_0_1_history_scores_a_huge_value(kind: str) -> Non
         args={"qty": True},
     )
     assert eng.score(ok).fused_score < 0.1
+
+
+# -- FR3: pinned BOOL-field limitations (no behaviour change; Amendment A1 is where they change) --
+
+
+def _qty_engine(history: list[Any]) -> tuple[Engine, SessionTracker]:
+    eng, tr = Engine(), SessionTracker()
+    for i, v in enumerate(history):
+        e = _qty_env(tr, i, v)
+        eng.score(e)
+        eng.update(e, Outcome.ALLOWED)
+        tr.observe(e)
+    return eng, tr
+
+
+def _qty_env(tr: SessionTracker, i: int, v: Any) -> ActionEnvelope:
+    return make_env(
+        tracker=tr,
+        envelope_id=f"e{i:06d}",
+        session_id=f"s{i}",
+        agent_id="a",
+        principal_id="p",
+        seq_no=0,
+        ts_unix_ms=T0 + i * 10 * MIN,
+        tool_id="shop.order",
+        args={"qty": v},
+    )
+
+
+def test_pinned_spike_right_after_a_learned_bool_to_numeric_switch_scores_low() -> None:
+    """PINS today's behaviour; Amendment A1 is where it changes. After ``[1]*500`` and a learned
+    (ALLOWED) ``2`` the field is NUMERIC with no magnitude baseline (magnitude never pushed the
+    BOOL-typed history), so ``10000`` is in magnitude cold start for ``mag_cold_n`` observations
+    and scores low."""
+    eng, tr = _qty_engine([1] * 500 + [2])
+    res = eng.score(_qty_env(tr, 501, 10000))
+    assert res.field_types["qty"] is FieldType.NUMERIC
+    mag = by(res, "magnitude", "qty")
+    assert mag.score == 0.0 and mag.evidence["cold"] is True
+    assert res.fused_score < 0.1
+
+
+def test_pinned_first_non_bool_number_scores_one_and_persists_while_blocked() -> None:
+    """PINS today's behaviour; Amendment A1 is where it changes. After ``[1]*60`` the first ``2``
+    scores 1.0 by novelty (``type_violation == "bool"``) whatever its magnitude, and stays 1.0 on
+    the next ``2`` when the first was BLOCKED (a blocked call never retypes the field)."""
+    eng, tr = _qty_engine([1] * 60)
+    first = _qty_env(tr, 60, 2)
+    res = eng.score(first)
+    assert res.field_types["qty"] is FieldType.BOOL
+    nov = by(res, "novelty", "qty")
+    assert nov.score == pytest.approx(1.0) and nov.evidence["type_violation"] == "bool"
+    assert res.fused_score == pytest.approx(1.0)
+    eng.update(first, Outcome.BLOCKED)
+    again = eng.score(_qty_env(tr, 61, 2))
+    assert again.field_types["qty"] is FieldType.BOOL
+    assert by(again, "novelty", "qty").score == pytest.approx(1.0)
+    assert again.fused_score == pytest.approx(1.0)
