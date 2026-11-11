@@ -400,3 +400,18 @@ def test_live_backend_accepts_developer_edition_or_sandbox(
     LiveSalesforceBackend(_cfg(tmp_path), client=sf, budget=budget)
     assert len(sf.queries) == 1
     assert budget.remaining() == 8  # the org check is an API request like any other
+
+
+def test_org_query_error_refuses_without_echoing_it(tmp_path: Path) -> None:
+    from agentfw.sandbox.config import UnsafeConfigError
+
+    class _Boom(_OrgSF):
+        def query(self, q: str) -> dict[str, Any]:
+            raise RuntimeError("INVALID_SESSION_ID: sid=00Dxx0000001gPL!AQ4AQSECRETSESSION")
+
+    with pytest.raises(UnsafeConfigError, match="Developer Edition") as info:
+        LiveSalesforceBackend(
+            _cfg(tmp_path), client=_Boom(None, None), budget=ApiBudget(tmp_path / "b.json", 9)
+        )
+    text = "".join(str(x) for x in (info.value, info.value.__cause__, info.value.__context__))
+    assert "SECRETSESSION" not in text and "RuntimeError" in text

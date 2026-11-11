@@ -41,8 +41,9 @@ Live-run notes (read before the collection):
 * The two points above only affect the ledger's `checks` health numbers, not traces or labels.
 * The Salesforce budget reservation over-counts while sessions are running (each running session
   holds its full estimate). It errs on the conservative side.
-* `package build` / `validate` also scan for the literal secret values of the sandbox config
-  when the full config is in the environment.
+* `package build` / `validate` also scan for the literal values of every sandbox secret env var
+  that is set (`LLM_API_KEY`, `SF_PASSWORD`, ...), even when the rest of the config is missing.
+  Values shorter than 8 characters (e.g. `LLM_API_KEY=EMPTY`) are skipped, with a note.
 
 ### Benchmark dataset/v1 (Tier-2 exit)
 

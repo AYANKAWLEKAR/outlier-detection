@@ -55,8 +55,18 @@ def require_developer_org(sf: Any) -> None:
     """Refuse (``UnsafeConfigError``) unless the logged-in org is a Developer Edition or a sandbox.
 
     ``sf`` is a ``simple_salesforce.Salesforce`` (or a stand-in with its ``query``). An org that
-    cannot be read, or a query error, refuses too (fail closed)."""
-    res = sf.query(ORG_QUERY)
+    cannot be read, or a query error, refuses too (fail closed; the error's text is not echoed, it
+    may carry a session id)."""
+    failed: str | None = None
+    try:
+        res = sf.query(ORG_QUERY)
+    except Exception as exc:  # boundary: any failure to read the org refuses
+        failed = type(exc).__name__
+    if failed is not None:  # raised outside the handler, so the original is not chained
+        raise UnsafeConfigError(
+            f"Salesforce org refused: the Organization query failed ({failed}); only a "
+            f"{DEVELOPER_EDITION} or sandbox org is allowed"
+        )
     records = res.get("records") if isinstance(res, Mapping) else None
     if not records or not isinstance(records[0], Mapping):
         raise UnsafeConfigError(

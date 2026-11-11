@@ -117,7 +117,7 @@ def test_run_llm_judge_offline_completes_and_records_safe_config(
     assert cfg == {
         "model_id": "stub-model",
         "window": 8,
-        "prompt_version": "v1",
+        "prompt_version": "v2",
         "cache_dir": str(tmp_path / "cache"),
     }
     assert "batch" not in rep["extras"]

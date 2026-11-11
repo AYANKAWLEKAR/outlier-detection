@@ -590,3 +590,85 @@ def test_cli_uses_the_environment_config_for_secret_values(
         )
     with pytest.raises(ValueError, match="configured secret sf_password"):
         main(["build", "--runs", str(run), "--out", str(tmp_path / "out")])
+
+
+# -- FR2 N2: prefixes, validation-error echo, short and partial-env secrets ----------------------
+
+
+@pytest.mark.parametrize(
+    "text",
+    ["%3Dsk_live_abcdef", "%20sk_live_abc", "\\nsk_live_abc", "\\tsk_test_abc", "\\rpk_live_x"],
+)
+def test_stripe_key_after_percent_encoding_or_json_escape_is_found(text: str) -> None:
+    assert len(scan_secrets(text)) == 1, text
+
+
+def test_malformed_row_in_package_never_echoes_its_value(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])})
+    raw = run / "raw" / "s0.jsonl"
+    row = orjson.loads(raw.read_bytes().splitlines()[0])
+    row["seq_no"] = _TOKEN  # not an int: a ValidationError carrying the value
+    raw.write_bytes(orjson.dumps(row) + b"\n")
+    with pytest.raises(ValueError) as info:
+        package([run], tmp_path / "out")
+    text = "".join(str(x) for x in (info.value, info.value.__cause__, info.value.__context__))
+    assert "seq_no" in text and "int_parsing" in text
+    assert _TOKEN[:12] not in text and "Zq9Zq9" not in text
+
+
+def test_malformed_manifest_and_rows_in_validate_never_echo(mini: Path) -> None:
+    man = mini / "manifest.json"
+    raw = orjson.loads(man.read_bytes())
+    saved = man.read_bytes()
+    raw["files"] = _TOKEN
+    man.write_bytes(orjson.dumps(raw))
+    rep = validate_dataset(mini, **LOW)
+    assert any("manifest.json invalid" in x and "files" in x for x in rep.problems)
+    assert not any("Zq9Zq9" in x for x in rep.problems)
+    man.write_bytes(saved)
+    traces = mini / "traces.jsonl"
+    lines = traces.read_bytes().splitlines()
+    first = orjson.loads(lines[0])
+    first["seq_no"] = _TOKEN
+    traces.write_bytes(b"\n".join([orjson.dumps(first), *lines[1:]]) + b"\n")
+    rep = validate_dataset(mini, **LOW)
+    rows = [x for x in rep.problems if "jsonl rows invalid" in x]
+    assert rows and "seq_no" in rows[0] and "int_parsing" in rows[0]
+    # the secret pattern itself is still reported, by name only
+    assert not any("Zq9Zq9" in x for x in rep.problems)
+
+
+def test_short_configured_secrets_are_skipped_with_a_note(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    run = tmp_path / "run"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])})  # "EMPTY" would match nothing anyway
+    cfg = _sandbox_cfg(tmp_path, LLM_API_KEY="EMPTY")
+    with caplog.at_level("WARNING", logger="agentfw.sandbox.package"):
+        package([run], tmp_path / "out", cfg=cfg)
+    notes = [r.getMessage() for r in caplog.records]
+    assert any("llm_api_key" in m and "shorter than 8" in m for m in notes)
+    assert not any("EMPTY" in m for m in notes)
+
+
+def test_short_secret_value_present_in_data_does_not_block(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])})
+    cfg = _sandbox_cfg(tmp_path, SF_PASSWORD="svc")  # "svc" is every principal_id
+    package([run], tmp_path / "out", cfg=cfg)
+
+
+def test_partial_environment_still_scans_present_secret_vars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in SandboxConfig.model_fields:
+        monkeypatch.delenv(name.upper(), raising=False)
+    monkeypatch.setenv("SF_PASSWORD", _PASSWORD)  # nothing else: no full config
+    run = tmp_path / "run"
+    _write_run(run, {"s0": (AGENT_IDS[0], [1000])})
+    raw = run / "raw" / "s0.jsonl"
+    raw.write_bytes(raw.read_bytes().replace(b"T-1", _PASSWORD.encode(), 1))
+    with pytest.raises(ValueError, match="configured secret sf_password") as info:
+        main(["build", "--runs", str(run), "--out", str(tmp_path / "out")])
+    assert "Hunter2" not in str(info.value)

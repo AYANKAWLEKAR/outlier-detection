@@ -64,7 +64,9 @@ are kept but clamped to 0.5-120 s, and `velocity_burst` gaps are kept exactly.
   matcher recognized), not observed harm. A prompt-level payload the agent ignored produces no
   attack label at all (only calls that match the payload are labeled), so ignored injections are
   invisible in the labels. Action-level injections label the calls the injector mutated or added
-  (none if the agent never made the targeted call).
+  (none if the agent never made the targeted call), except `exfil_volume`: it overrides the read's
+  response `item_count` and also labels the call right after that read and the first outbound
+  write after it, which are neither mutated nor added (the offline generator's shape).
 * `failed` and `budget_truncated` sessions are excluded, a survivorship bias toward sessions that
   ran cleanly.
 * The calendar is retimed from a fixed start date; only in-session gaps (clamped to 0.5-120 s) and

@@ -26,6 +26,8 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import logging
+import os
 import re
 import sys
 import time
@@ -37,11 +39,11 @@ from typing import Any
 import orjson
 import pyarrow as pa
 import pyarrow.parquet as pq
-from pydantic import BaseModel, SecretStr
+from pydantic import BaseModel, SecretStr, ValidationError
 
 from agentfw.core.envelope import Label, RawCall
 from agentfw.core.normalize import SessionTracker, normalize
-from agentfw.sandbox.config import SandboxConfig, UnsafeConfigError
+from agentfw.sandbox.config import SandboxConfig
 from agentfw.sandbox.retime import retime
 from agentfw.sandbox.tasks.schema import AGENTS_DIR, load_agents
 
@@ -50,20 +52,28 @@ __all__ = [
     "ManifestCounts",
     "ValidationReport",
     "config_secrets",
+    "env_secrets",
     "main",
     "package",
     "scan_secrets",
     "validate_dataset",
 ]
 
+logger = logging.getLogger(__name__)
+
 START_MS = 1_767_225_600_000  # 2026-01-01T00:00:00Z: day 0 of the simulated timeline
 CARD_TEMPLATE = Path(__file__).resolve().parents[2] / "docs" / "dataset_card.md"
 _OPTS = orjson.OPT_SORT_KEYS
 _FILES = ("traces.jsonl", "labels.jsonl", "traces.parquet", "labels.parquet")
 
+# A key starts at a non-alphanumeric, or right after a percent-encoded byte (``%3D``) or a JSON
+# escape still in raw text (``\n``, ``\t``, ``\r``): so ``risk_test_x`` / ``task_live_y`` are
+# identifiers, not keys, but ``%3Dsk_live_...`` and ``\nsk_live_...`` are keys.
+_KEY_START = r"(?:(?<![A-Za-z0-9])|(?<=%[0-9A-Fa-f]{2})|(?<=\\[ntr]))"
+MIN_LITERAL_SECRET = 8  # configured values shorter than this are not scanned for literally
+
 _SECRET_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    # leading boundary: ``risk_test_x`` / ``task_live_y`` are identifiers, not keys
-    ("stripe_key", re.compile(r"(?<![A-Za-z0-9])(?:sk|rk|pk)_(?:test|live)_[A-Za-z0-9]+")),
+    ("stripe_key", re.compile(_KEY_START + r"(?:sk|rk|pk)_(?:test|live)_[A-Za-z0-9]+")),
     ("stripe_webhook_secret", re.compile(r"whsec_[A-Za-z0-9]+")),
     ("openai_style_key", re.compile(r"\b(?:sk|rk|pk)-[A-Za-z0-9_-]{20,}")),  # incl. sk-proj-
     ("slack_token", re.compile(r"xox[abposr]-[A-Za-z0-9-]+")),
@@ -133,6 +143,48 @@ def config_secrets(cfg: SandboxConfig | None) -> dict[str, str]:
         if isinstance(v, SecretStr) and v.get_secret_value():
             out[name] = v.get_secret_value()
     return out
+
+
+def env_secrets(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """``{field name: value}`` of the ``SecretStr`` config fields whose upper-cased env var is
+    set and non-empty, even when the rest of the config is missing (a partial environment)."""
+    src = os.environ if env is None else env
+    return {
+        name: src[name.upper()]
+        for name, f in SandboxConfig.model_fields.items()
+        if f.annotation is SecretStr and src.get(name.upper())
+    }
+
+
+def _literal_secrets(
+    cfg: SandboxConfig | None, secrets: Mapping[str, str] | None
+) -> dict[str, str]:
+    """The configured values to scan for literally. Values shorter than ``MIN_LITERAL_SECRET``
+    (e.g. ``LLM_API_KEY=EMPTY``) would match ordinary data, so they are skipped with a note that
+    names the field, never the value."""
+    merged = {**config_secrets(cfg), **(secrets or {})}
+    out: dict[str, str] = {}
+    for name, value in sorted(merged.items()):
+        if len(value) < MIN_LITERAL_SECRET:
+            logger.warning(
+                "configured secret %s is shorter than %d characters; not scanned literally",
+                name,
+                MIN_LITERAL_SECRET,
+            )
+        else:
+            out[name] = value
+    return out
+
+
+def _error_summary(e: BaseException) -> str:
+    """An error description that never carries input values: a pydantic ``ValidationError`` is
+    reduced to its error locations and types."""
+    if isinstance(e, ValidationError):
+        return "; ".join(
+            f"{'.'.join(str(p) for p in err['loc']) or '(root)'}: {err['type']}"
+            for err in e.errors(include_input=False, include_url=False)
+        )
+    return f"{type(e).__name__}: {e}"
 
 
 def _configured_hits(text: str, secrets: Mapping[str, str]) -> list[tuple[str, int, int]]:
@@ -300,10 +352,21 @@ def _read_meta(run: Path) -> dict[str, Any]:
 
 
 def _read_rows[T](path: Path, parse: Callable[[bytes], T], sid: str, run: Path) -> list[T]:
+    where = f"session {sid} (run {run.name})"
     try:
-        return [parse(x) for x in path.read_bytes().splitlines()]
+        lines = path.read_bytes().splitlines()
     except OSError as e:
-        raise ValueError(f"session {sid} (run {run.name}): cannot read {path.name}: {e}") from e
+        raise ValueError(f"{where}: cannot read {path.name}: {e}") from e
+    out: list[T] = []
+    for i, line in enumerate(lines, 1):
+        bad: str | None = None
+        try:
+            out.append(parse(line))
+        except ValidationError as e:
+            bad = _error_summary(e)
+        if bad is not None:  # raised outside the handler: not even ``__context__`` holds the
+            raise ValueError(f"{where}: invalid row in {path.name} line {i}: {bad}")  # input
+    return out
 
 
 def _check_session(sid: str, run: Path, raws: Sequence[RawCall], labels: Sequence[Label]) -> None:
@@ -398,10 +461,12 @@ def package(
     version: str = "v1",
     seed: int = 0,
     cfg: SandboxConfig | None = None,
+    secrets: Mapping[str, str] | None = None,
 ) -> DatasetManifest:
-    """Merge, retime, check and write the dataset; see the module docs. With ``cfg``, the literal
-    values of its secrets are refused too (reported by field name, never printed)."""
-    secrets = config_secrets(cfg)
+    """Merge, retime, check and write the dataset; see the module docs. The literal values of
+    ``cfg``'s secrets and of ``secrets`` ({field: value}) are refused too (reported by field
+    name, never printed; see ``_literal_secrets`` for short values)."""
+    literal = _literal_secrets(cfg, secrets)
     sessions: dict[str, list[RawCall]] = {}
     labels: dict[str, Label] = {}
     seen: set[str] = set()
@@ -412,8 +477,8 @@ def package(
     final = [labels[r.envelope_id] for r in raws]
     traces_blob = _jsonl([_dump(r) for r in raws])
     labels_blob = _jsonl([_dump(lab) for lab in final])
-    problems = _content_problems("traces.jsonl", traces_blob.decode(), secrets)
-    problems += _content_problems("labels.jsonl", labels_blob.decode(), secrets)
+    problems = _content_problems("traces.jsonl", traces_blob.decode(), literal)
+    problems += _content_problems("labels.jsonl", labels_blob.decode(), literal)
     if problems:
         raise ValueError("refusing to package: " + "; ".join(problems))
     _check_normalizes(raws)
@@ -428,8 +493,8 @@ def package(
         created_unix=int(time.time()),
     )
     card = _render_card(manifest)
-    problems = _content_problems("DATASET_CARD.md", card, secrets)
-    problems += _content_problems("manifest.json", manifest.model_dump_json(), secrets)
+    problems = _content_problems("DATASET_CARD.md", card, literal)
+    problems += _content_problems("manifest.json", manifest.model_dump_json(), literal)
     if problems:
         raise ValueError("refusing to package: " + "; ".join(problems))
 
@@ -463,7 +528,7 @@ def _parquet_matches(d: Path, raws: Sequence[RawCall], labels: Sequence[Label]) 
         if load_labels_list(d / "labels.parquet") != list(labels):
             out.append("labels.parquet differs from labels.jsonl")
     except Exception as e:  # unreadable or malformed Parquet is a validation finding
-        out.append(f"parquet unreadable: {e}")
+        out.append(f"parquet unreadable: {_error_summary(e)}")
     return out
 
 
@@ -475,10 +540,12 @@ def validate_dataset(
     min_actions: int = 40_000,
     min_attacks: int = 600,
     cfg: SandboxConfig | None = None,
+    secrets: Mapping[str, str] | None = None,
 ) -> ValidationReport:
     """Check a packaged dataset directory; never raises on bad data, reports problems instead.
-    With ``cfg``, its secrets' literal values are findings too (by field name, never printed)."""
-    secrets = config_secrets(cfg)
+    The literal values of ``cfg``'s secrets and of ``secrets`` are findings too (by field name,
+    never printed). Validation errors are reported by location and type only, never by value."""
+    literal = _literal_secrets(cfg, secrets)
     d = Path(dir)
     problems: list[str] = []
     missing = [n for n in (*_FILES, "manifest.json", "DATASET_CARD.md") if not (d / n).is_file()]
@@ -487,7 +554,7 @@ def validate_dataset(
     try:
         manifest = DatasetManifest.model_validate_json((d / "manifest.json").read_bytes())
     except ValueError as e:
-        return ValidationReport(ok=False, problems=[f"manifest.json invalid: {e}"])
+        return ValidationReport(ok=False, problems=[f"manifest.json invalid: {_error_summary(e)}"])
     problems += [
         f"manifest.json does not list {n}"
         for n in (*_FILES, "DATASET_CARD.md")
@@ -500,7 +567,7 @@ def validate_dataset(
     for path in sorted(d.iterdir()):  # every text file: data, manifest, card, anything extra
         if path.is_file() and path.suffix != ".parquet":
             try:
-                problems += _content_problems(path.name, path.read_text(), secrets)
+                problems += _content_problems(path.name, path.read_text(), literal)
             except UnicodeDecodeError:
                 problems.append(f"{path.name}: not UTF-8 text")
     try:
@@ -511,7 +578,9 @@ def validate_dataset(
             Label.model_validate_json(x) for x in (d / "labels.jsonl").read_bytes().splitlines()
         ]
     except ValueError as e:
-        return ValidationReport(ok=False, problems=[*problems, f"jsonl rows invalid: {e}"])
+        return ValidationReport(
+            ok=False, problems=[*problems, f"jsonl rows invalid: {_error_summary(e)}"]
+        )
     ids = [r.envelope_id for r in raws]
     if len(set(ids)) != len(ids):
         problems.append("traces.jsonl: duplicate envelope_id")
@@ -520,7 +589,7 @@ def validate_dataset(
     try:
         _check_normalizes(raws)
     except Exception as e:
-        problems.append(f"an envelope failed to normalize: {e}")
+        problems.append(f"an envelope failed to normalize: {_error_summary(e)}")
     problems += _parquet_matches(d, raws, labs)
     by_id = {lab.envelope_id: lab for lab in labs}
     c = _counts(raws, [by_id[i] for i in ids if i in by_id])
@@ -540,15 +609,6 @@ def validate_dataset(
 # --- CLI -----------------------------------------------------------------------------------------
 
 
-def _env_config() -> SandboxConfig | None:
-    """The sandbox config from the environment, or None (then only the patterns are scanned)."""
-    try:
-        return SandboxConfig.from_env()
-    except (ValueError, UnsafeConfigError):  # incomplete or refused env: no literal values
-        sys.stderr.write("note: no sandbox config in the environment; secret values not scanned\n")
-        return None
-
-
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m agentfw.sandbox.package", description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -565,7 +625,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     v.add_argument("--min-attacks", type=int, default=600)
     a = ap.parse_args(argv)
     if a.cmd == "build":
-        m = package(a.runs, a.out, version=a.version, seed=a.seed, cfg=_env_config())
+        m = package(a.runs, a.out, version=a.version, seed=a.seed, secrets=env_secrets())
         sys.stdout.write(m.counts.model_dump_json(indent=2) + "\n")
         return 0
     rep = validate_dataset(
@@ -574,7 +634,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         min_sessions=a.min_sessions,
         min_actions=a.min_actions,
         min_attacks=a.min_attacks,
-        cfg=_env_config(),
+        secrets=env_secrets(),
     )
     sys.stdout.write(rep.model_dump_json(indent=2) + "\n")
     return 0 if rep.ok else 1

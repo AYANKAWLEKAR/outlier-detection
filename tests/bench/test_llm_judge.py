@@ -50,9 +50,9 @@ def test_cache_key_depends_on_model_prompt_version_and_window(tmp_path: Path) ->
     other = LlmJudge(client, tmp_path, "other-model")
     client.turns.append(_turn('{"suspicion": 0.3}'))
     assert other.score(e).fused_score == 0.3
-    v2 = LlmJudge(client, tmp_path, "test-model", prompt_version="v2")
+    v3 = LlmJudge(client, tmp_path, "test-model", prompt_version="v3")
     client.turns.append(_turn('{"suspicion": 0.4}'))
-    assert v2.score(e).fused_score == 0.4
+    assert v3.score(e).fused_score == 0.4
 
 
 @pytest.mark.parametrize("reply", ["not json", None, '{"x": 1}', '{"suspicion": "hi"}', "[1]"])
@@ -218,7 +218,7 @@ def test_config_record_excludes_client(tmp_path: Path) -> None:
     assert det.config_record() == {
         "model_id": "test-model",
         "window": 8,
-        "prompt_version": "v1",
+        "prompt_version": "v2",
         "cache_dir": str(tmp_path),
     }
 
@@ -247,3 +247,8 @@ def test_scored_call_hides_its_own_response_but_history_keeps_theirs(tmp_path: P
     assert "98765" not in user and "43210" not in user
     history = orjson.loads(history_part.split("\n")[-1])
     assert history[0]["response_meta"] == {"item_count": 111, "bytes": 2222, "error": True}
+
+
+def test_default_prompt_version_is_v2_after_the_i2_prompt_change(tmp_path: Path) -> None:
+    det, _ = _judge(tmp_path)
+    assert det.config_record()["prompt_version"] == "v2"

@@ -116,7 +116,7 @@ class LlmJudge:
         cache_dir: Path,
         model_id: str,
         window: int = 8,
-        prompt_version: str = "v1",
+        prompt_version: str = "v2",  # v2: the scored call's own response is left out (I2)
     ) -> None:
         self._client = client
         self._cache_dir = Path(cache_dir)
