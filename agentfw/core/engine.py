@@ -16,7 +16,8 @@ moves a baseline distribution). Otherwise, in order:
 1. the fused score and threshold that decided ``e``: the cached ones when they are ``e``'s, else
    a fresh pure score (and the current threshold) computed *before* anything below mutates state;
 2. sub-detector updates (with the same pre-envelope types as ``score``);
-3. pooled priors (§6.10): every finite NUMERIC value as ``signed_log1p(x)`` (and the previous
+3. pooled priors (§6.10): every finite value of a NUMERIC-typed path (never a BOOL-typed one,
+   whatever ``mag_bool_numeric`` says: spec A1.3) as ``signed_log1p(x)`` (and the previous
    response's ``item_count`` under magnitude's ``__resp__.item_count``, unless
    ``mag_resp_signal`` is off) when magnitude is enabled;
    every CATEGORICAL / ID value (derived ``__domain__`` / ``__host__`` / ``__prefix__`` included)
@@ -112,9 +113,15 @@ class Engine:
         self.calibrator = Calibrator(self.store, cfg)
         self._feed_numeric_priors = "magnitude" in self.enabled and cfg.priors_mode != "off"
         self._feed_categorical_priors = "novelty" in self.enabled and cfg.priors_mode != "off"
+        magnitude = MagnitudeDetector(self.store, cfg, self.priors, hints)
+        # spec A1.3: novelty leaves a BOOL-contradicting number to magnitude wherever magnitude
+        # has a reference for the field -- only when magnitude runs and the switch is on.
+        numeric_ref = (
+            magnitude.has_ref if "magnitude" in self.enabled and cfg.mag_bool_numeric else None
+        )
         built: dict[str, SubDetector] = {
-            "magnitude": MagnitudeDetector(self.store, cfg, self.priors, hints),
-            "novelty": NoveltyDetector(self.store, cfg, self.priors),
+            "magnitude": magnitude,
+            "novelty": NoveltyDetector(self.store, cfg, self.priors, numeric_ref),
             "velocity": VelocityDetector(self.store, cfg, hints),
             "sequence": SequenceDetector(self.store, cfg, hints),
         }

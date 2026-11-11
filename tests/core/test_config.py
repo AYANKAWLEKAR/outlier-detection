@@ -80,7 +80,12 @@ DECISION_OVERRIDES: dict[str, object] = {
 
 # Amendment A1 (spec A1.9). ``vel_count_stat`` and ``mag_score`` stay at the §6.4 / §6.3 rules
 # until Task 1.21 flips them. ``tail_prior`` equals ``cal_alpha`` by definition (D-023).
-A1_DEFAULTS: dict[str, object] = {"vel_count_stat": "logz", "mag_score": "z", "tail_prior": 0.005}
+A1_DEFAULTS: dict[str, object] = {
+    "vel_count_stat": "logz",
+    "mag_score": "z",
+    "tail_prior": 0.005,
+    "mag_bool_numeric": False,
+}
 
 
 def test_engine_config_defaults_match_global_constraints() -> None:

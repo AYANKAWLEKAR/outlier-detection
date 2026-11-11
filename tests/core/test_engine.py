@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from functools import cache
 from pathlib import Path
@@ -15,6 +16,7 @@ from agentfw.bench.protocol import Detector
 from agentfw.bench.registry import DETECTORS, make_detector
 from agentfw.bench.replay import ScoreRow, SplitSpec, canonical_hash, replay
 from agentfw.core.config import EngineConfig
+from agentfw.core.detectors.base import squash
 from agentfw.core.detectors.magnitude import RESP_FIELD
 from agentfw.core.engine import ALL_DETECTORS, Engine
 from agentfw.core.envelope import (
@@ -36,6 +38,10 @@ TOOL = "stripe.create_refund"
 LIST = "zendesk.list_tickets"
 T0 = 1_700_000_000_000
 MIN = 60_000
+# Amendment A1.3 (numeric values of BOOL-typed fields): the amended rule with the A1.2 tail score,
+# and the pre-amendment behaviour pinned explicitly (not through the default, which flips later).
+A1 = EngineConfig().replace(mag_bool_numeric=True, mag_score="tail")
+PRE = EngineConfig().replace(mag_bool_numeric=False)
 
 
 def env(
@@ -706,7 +712,8 @@ def test_small_count_field_typed_bool_early_still_scores_a_huge_value() -> None:
 
 @pytest.mark.parametrize("kind", ["always_1", "flag_0_1"])
 def test_count_field_with_only_0_1_history_scores_a_huge_value(kind: str) -> None:
-    """FR2 N1 probes: ``qty`` always 1 (or a fair 0/1 flag) for 500 calls, then ``qty=10000``.
+    """FR2 N1 probes (pre-amendment behaviour, ``mag_bool_numeric=False``): ``qty`` always 1 (or a
+    fair 0/1 flag) for 500 calls, then ``qty=10000``.
 
     Agent-independent level: novelty scores an unseen value at
     ``(1 - n_singletons/n_total) * min(1, n_total/novelty_full_n)``, which is exactly 1.0 here
@@ -714,7 +721,7 @@ def test_count_field_with_only_0_1_history_scores_a_huge_value(kind: str) -> Non
     calibrated threshold."""
     rng = np.random.default_rng(0)
     vals = [1] * 500 if kind == "always_1" else [int(x) for x in rng.integers(0, 2, 500)]
-    eng, tr = Engine(), SessionTracker()
+    eng, tr = Engine(PRE), SessionTracker()
     for i, v in enumerate(vals):
         e = make_env(
             tracker=tr,
@@ -763,25 +770,33 @@ def test_count_field_with_only_0_1_history_scores_a_huge_value(kind: str) -> Non
     assert eng.score(ok).fused_score < 0.1
 
 
-# -- FR3: pinned BOOL-field limitations (no behaviour change; Amendment A1 is where they change) --
+# -- BOOL-typed fields that carry numbers: pre-amendment pins (FR3) and Amendment A1.3 ------------
 
 
-def _qty_engine(history: list[Any]) -> tuple[Engine, SessionTracker]:
-    eng, tr = Engine(), SessionTracker()
-    for i, v in enumerate(history):
-        e = _qty_env(tr, i, v)
+def _qty_engine(
+    history: list[Any],
+    cfg: EngineConfig = EngineConfig(),  # noqa: B008 - frozen dataclass, safe as a default
+) -> tuple[Engine, SessionTracker]:
+    eng = Engine(cfg)
+    return eng, _qty_feed(eng, history)
+
+
+def _qty_feed(eng: Engine, history: list[Any], agent: str = "a", start: int = 0) -> SessionTracker:
+    tr = SessionTracker()
+    for i, v in enumerate(history, start):
+        e = _qty_env(tr, i, v, agent)
         eng.score(e)
         eng.update(e, Outcome.ALLOWED)
         tr.observe(e)
-    return eng, tr
+    return tr
 
 
-def _qty_env(tr: SessionTracker, i: int, v: Any) -> ActionEnvelope:
+def _qty_env(tr: SessionTracker, i: int, v: Any, agent: str = "a") -> ActionEnvelope:
     return make_env(
         tracker=tr,
         envelope_id=f"e{i:06d}",
         session_id=f"s{i}",
-        agent_id="a",
+        agent_id=agent,
         principal_id="p",
         seq_no=0,
         ts_unix_ms=T0 + i * 10 * MIN,
@@ -790,12 +805,16 @@ def _qty_env(tr: SessionTracker, i: int, v: Any) -> ActionEnvelope:
     )
 
 
-def test_pinned_spike_right_after_a_learned_bool_to_numeric_switch_scores_low() -> None:
-    """PINS today's behaviour; Amendment A1 is where it changes. After ``[1]*500`` and a learned
-    (ALLOWED) ``2`` the field is NUMERIC with no magnitude baseline (magnitude never pushed the
-    BOOL-typed history), so ``10000`` is in magnitude cold start for ``mag_cold_n`` observations
-    and scores low."""
-    eng, tr = _qty_engine([1] * 500 + [2])
+def _qty_scores(res: DetectorResult) -> list[DetectorScore]:
+    return [d for d in res.per_detector if d.field == "qty"]
+
+
+def test_pinned_spike_right_after_a_learned_bool_to_numeric_switch_scores_low_pre_a1() -> None:
+    """PINS the pre-amendment behaviour, ``mag_bool_numeric=False``. After ``[1]*500`` and a
+    learned (ALLOWED) ``2`` the field is NUMERIC with no magnitude baseline (magnitude never
+    pushed the BOOL-typed history), so ``10000`` is in magnitude cold start for ``mag_cold_n``
+    observations and scores low."""
+    eng, tr = _qty_engine([1] * 500 + [2], PRE)
     res = eng.score(_qty_env(tr, 501, 10000))
     assert res.field_types["qty"] is FieldType.NUMERIC
     mag = by(res, "magnitude", "qty")
@@ -803,19 +822,223 @@ def test_pinned_spike_right_after_a_learned_bool_to_numeric_switch_scores_low() 
     assert res.fused_score < 0.1
 
 
-def test_pinned_first_non_bool_number_scores_one_and_persists_while_blocked() -> None:
-    """PINS today's behaviour; Amendment A1 is where it changes. After ``[1]*60`` the first ``2``
-    scores 1.0 by novelty (``type_violation == "bool"``) whatever its magnitude, and stays 1.0 on
-    the next ``2`` when the first was BLOCKED (a blocked call never retypes the field)."""
-    eng, tr = _qty_engine([1] * 60)
+def test_pinned_first_non_bool_number_scores_one_and_persists_while_blocked_pre_a1() -> None:
+    """PINS the pre-amendment behaviour, ``mag_bool_numeric=False``. After ``[1]*60`` the first
+    ``2`` scores 1.0 by novelty (``type_violation == "bool"``) whatever its magnitude, and stays
+    1.0 on the next ``2`` when the first was BLOCKED (a blocked call never retypes the field)."""
+    eng, tr = _qty_engine([1] * 60, PRE)
     first = _qty_env(tr, 60, 2)
     res = eng.score(first)
     assert res.field_types["qty"] is FieldType.BOOL
     nov = by(res, "novelty", "qty")
     assert nov.score == pytest.approx(1.0) and nov.evidence["type_violation"] == "bool"
     assert res.fused_score == pytest.approx(1.0)
+    assert not [d for d in res.per_detector if d.detector == "magnitude" and d.field == "qty"]
     eng.update(first, Outcome.BLOCKED)
     again = eng.score(_qty_env(tr, 61, 2))
     assert again.field_types["qty"] is FieldType.BOOL
     assert by(again, "novelty", "qty").score == pytest.approx(1.0)
     assert again.fused_score == pytest.approx(1.0)
+    assert eng.store.get(key_mag("a", "shop.order", "qty")) is None  # BOOL history: never pushed
+
+
+def test_default_is_still_pre_a1() -> None:
+    assert EngineConfig().mag_bool_numeric is False
+
+
+def test_bool_to_numeric_retype_does_not_start_cold() -> None:
+    """A1.3: magnitude pushed the BOOL-typed ``1``s, so the learned retype starts warm."""
+    eng, tr = _qty_engine([1] * 500 + [2], A1)
+    res = eng.score(_qty_env(tr, 501, 10000))
+    assert res.field_types["qty"] is FieldType.NUMERIC
+    mag = by(res, "magnitude", "qty")
+    # 500 - type_min_obs (the field is UNKNOWN until then) + the learned 2
+    assert "cold" not in mag.evidence and mag.evidence["n"] == 491
+    assert "type_violation" not in mag.evidence  # NUMERIC now: the ordinary magnitude score
+    assert mag.score > 0.999 and res.fused_score > 0.999
+
+
+def test_first_non_bool_number_is_scored_by_magnitude_and_persists_while_blocked() -> None:
+    eng, tr = _qty_engine([1] * 60, A1)
+    first = _qty_env(tr, 60, 2)
+    res = eng.score(first)
+    assert res.field_types["qty"] is FieldType.BOOL
+    mag = by(res, "magnitude", "qty")
+    assert mag.evidence["type_violation"] == "bool" and mag.evidence["n"] == 50
+    # 8.109: the field never varied, so the scale is the mag_eps floor
+    assert mag.evidence["z"] == pytest.approx((math.log(3) - math.log(2)) / 0.05)
+    assert mag.score > 0.999
+    assert not [d for d in res.per_detector if d.detector == "novelty" and d.field == "qty"]
+    eng.update(first, Outcome.BLOCKED)  # a blocked call learns nothing
+    again = eng.score(_qty_env(tr, 61, 2))
+    assert again.field_types["qty"] is FieldType.BOOL
+    assert by(again, "magnitude", "qty").score == mag.score
+    assert by(again, "magnitude", "qty").evidence["n"] == 50
+
+
+def test_contradicting_value_is_scored_by_its_size() -> None:
+    eng, tr = _qty_engine([0, 1] * 40, A1)  # the field varies: 0 and 1
+    s = {v: by(eng.score(_qty_env(tr, 80, v)), "magnitude", "qty").score for v in (2, 5, 10, 10000)}
+    # 0.048, 0.335, 0.893, 1.0
+    assert s[2] < 0.1 and 0.2 < s[5] < 0.5 and 0.8 < s[10] < 0.95 and s[10000] > 0.999
+    assert eng.score(_qty_env(tr, 80, 2)).fused_score < 0.1  # a benign 1 -> 2 is no longer 1.0
+    for ok in (0, 1, True):  # boolean-like values: no magnitude score, no novelty score
+        assert not _qty_scores(eng.score(_qty_env(tr, 80, ok)))
+
+
+def test_bool_field_without_numeric_reference_falls_back_to_novelty() -> None:
+    eng, tr = _qty_engine([True] * 60, A1)  # Python bools are never pushed
+    res = eng.score(_qty_env(tr, 60, 2))
+    assert res.field_types["qty"] is FieldType.BOOL
+    assert eng.store.get(key_mag("a", "shop.order", "qty")) is None
+    nov = by(res, "novelty", "qty")
+    assert nov.score == pytest.approx(1.0) and nov.evidence["type_violation"] == "bool"
+    assert res.fused_score == pytest.approx(1.0)
+    eng2, tr2 = _qty_engine([1] * 25, A1)  # 15 numbers learned: magnitude cold
+    res2 = eng2.score(_qty_env(tr2, 25, 2))
+    mag2 = by(res2, "magnitude", "qty")
+    assert mag2.score == 0.0 and mag2.evidence["cold"] is True and mag2.evidence["n"] == 15
+    assert mag2.evidence["type_violation"] == "bool"
+    assert by(res2, "novelty", "qty").score == pytest.approx(0.3)  # (1 - 0) * 15 / novelty_full_n
+
+
+def test_novelty_fallback_ends_exactly_when_magnitude_is_warm() -> None:
+    """The fallback boundary is magnitude's own ``mag_cold_n``: 29 learned numbers leave novelty
+    scoring the contradiction, the 30th hands the field to magnitude."""
+    eng, tr = _qty_engine([1] * 39, A1)  # 39 - type_min_obs = 29 numbers pushed
+    res = eng.score(_qty_env(tr, 39, 2))
+    assert by(res, "magnitude", "qty").evidence["cold"] is True
+    assert by(res, "novelty", "qty").score == pytest.approx(29 / 50)
+    eng, tr = _qty_engine([1] * 40, A1)  # 30 numbers pushed: warm
+    res = eng.score(_qty_env(tr, 40, 2))
+    assert by(res, "magnitude", "qty").evidence["n"] == 30
+    assert "cold" not in by(res, "magnitude", "qty").evidence
+    assert not [d for d in res.per_detector if d.detector == "novelty" and d.field == "qty"]
+
+
+def test_engine_without_magnitude_keeps_the_novelty_score() -> None:
+    """The ``engine-no-magnitude`` ablation: nothing scores the value by size, so novelty keeps
+    its FR2 N1 score (and no magnitude record is written)."""
+    eng = Engine(A1, enabled=ALL_DETECTORS - {"magnitude"})
+    tr = _qty_feed(eng, [1] * 60)
+    res = eng.score(_qty_env(tr, 60, 2))
+    assert res.field_types["qty"] is FieldType.BOOL
+    nov = by(res, "novelty", "qty")
+    assert nov.score == pytest.approx(1.0) and nov.evidence["type_violation"] == "bool"
+    assert not [d for d in res.per_detector if d.detector == "magnitude"]
+    assert eng.store.get(key_mag("a", "shop.order", "qty")) is None
+    # ... also on a store where a full engine left a warm magnitude record for the field: the
+    # ablation has no magnitude to score the value, so novelty must not defer to that record
+    full, tr = _qty_engine([1] * 60, A1)
+    rec = full.store.get(key_mag("a", "shop.order", "qty"))
+    assert rec is not None and rec.to_dict()["n"] == 50
+    ablated = Engine(A1, store=full.store, enabled=ALL_DETECTORS - {"magnitude"})
+    res = ablated.score(_qty_env(tr, 60, 2))
+    assert by(res, "novelty", "qty").score == pytest.approx(1.0)
+    assert not [d for d in res.per_detector if d.detector == "magnitude"]
+
+
+def _pooled_qty_engine(cfg: EngineConfig) -> tuple[Engine, SessionTracker]:
+    """Agent ``b`` uses ``qty`` as a count (a warm pooled prior for the field); agent ``a`` only
+    ever sent ``True``, so its field is BOOL-typed and it has no magnitude record of its own."""
+    eng = Engine(cfg)
+    _qty_feed(eng, [3, 4, 5, 6, 7] * 12, agent="b", start=1000)
+    prior = eng.store.get(key_prior_mag("shop.order", "qty"))
+    assert prior is not None and prior.to_dict()["n"] == 50  # 60 - type_min_obs
+    tr = _qty_feed(eng, [True] * 60)
+    assert eng.store.get(key_mag("a", "shop.order", "qty")) is None
+    return eng, tr
+
+
+def test_bool_field_uses_a_warm_pooled_prior_as_reference() -> None:
+    """A1.3: a warm pooled prior is a usable reference too. Magnitude scores the contradicting
+    value against it (by size, ``prior_used``) and novelty stays silent."""
+    eng, tr = _pooled_qty_engine(A1)
+    low = eng.score(_qty_env(tr, 60, 2))
+    assert low.field_types["qty"] is FieldType.BOOL
+    mag = by(low, "magnitude", "qty")
+    assert mag.evidence["prior_used"] is True and mag.evidence["type_violation"] == "bool"
+    assert mag.score < 0.1  # 2 is below the pool's median: nothing unusual about its size
+    assert not [d for d in low.per_detector if d.detector == "novelty" and d.field == "qty"]
+    high = eng.score(_qty_env(tr, 60, 10000))
+    assert by(high, "magnitude", "qty").score > 0.999
+    assert not [d for d in high.per_detector if d.detector == "novelty" and d.field == "qty"]
+
+
+def test_pre_a1_ignores_a_warm_pooled_prior_in_a_bool_field() -> None:
+    """Pre-amendment behaviour, ``mag_bool_numeric=False``: magnitude skips the BOOL-typed field
+    even when the pool could score it, so novelty must keep its FR2 N1 score."""
+    eng, tr = _pooled_qty_engine(PRE)
+    res = eng.score(_qty_env(tr, 60, 2))
+    assert res.field_types["qty"] is FieldType.BOOL
+    nov = by(res, "novelty", "qty")
+    assert nov.score == pytest.approx(1.0) and nov.evidence["type_violation"] == "bool"
+    assert not [d for d in res.per_detector if d.detector == "magnitude" and d.field == "qty"]
+
+
+def test_bool_numeric_spec_score_also_scores_by_size() -> None:
+    """``mag_bool_numeric`` is independent of ``mag_score``: with the spec §6.3 z rule the
+    contradicting value goes through ``squash``."""
+    cfg = EngineConfig().replace(mag_bool_numeric=True, mag_score="z")
+    eng, tr = _qty_engine([1] * 60, cfg)
+    mag = by(eng.score(_qty_env(tr, 60, 2)), "magnitude", "qty")
+    z = (math.log(3) - math.log(2)) / 0.05
+    assert mag.evidence["type_violation"] == "bool" and "p_tail" not in mag.evidence
+    assert mag.score == pytest.approx(squash(z, cfg.z0, cfg.tau))
+    assert mag.score == pytest.approx(0.9989, abs=1e-4)
+    eng, tr = _qty_engine([0, 1] * 40, cfg)
+    res = eng.score(_qty_env(tr, 80, 2))
+    assert by(res, "magnitude", "qty").score == pytest.approx(0.147, abs=1e-3)
+    assert not [d for d in res.per_detector if d.detector == "novelty" and d.field == "qty"]
+
+
+def test_numeric_strings_in_a_bool_field_are_learned() -> None:
+    eng, tr = _qty_engine(["1"] * 60, A1)
+    res = eng.score(_qty_env(tr, 60, "2"))
+    assert res.field_types["qty"] is FieldType.BOOL
+    mag = by(res, "magnitude", "qty")
+    assert mag.score > 0.999 and mag.evidence["n"] == 50
+    assert mag.evidence["type_violation"] == "bool"
+    eng, tr = _qty_engine(["true", "false"] * 30, A1)  # not numbers: never pushed
+    assert eng.store.get(key_mag("a", "shop.order", "qty")) is None
+
+
+def test_int_too_large_for_a_float_in_a_bool_field_scores_one() -> None:
+    """Every value that contradicts BOOL gets a magnitude score once novelty defers: an int that
+    saturates to ``inf`` is scored 1.0 (``non_finite``), never dropped by both detectors."""
+    eng, tr = _qty_engine([1] * 60, A1)
+    res = eng.score(_qty_env(tr, 60, 10**400))
+    mag = by(res, "magnitude", "qty")
+    assert mag.score == 1.0 and mag.evidence["non_finite"] is True
+    assert mag.evidence["type_violation"] == "bool" and mag.evidence["n"] == 50
+    assert res.fused_score == pytest.approx(1.0)
+
+
+def test_bool_numeric_score_is_pure(tmp_path: Path) -> None:
+    eng, tr = _qty_engine([0, 1] * 40, A1)
+    before = dump(eng, tmp_path / "before.json")
+    for v in (2, 10000, True, 1):
+        eng.score(_qty_env(tr, 80, v))
+    assert dump(eng, tmp_path / "after.json") == before
+
+
+def test_bool_numeric_learns_only_on_allowed_or_approved() -> None:
+    eng, tr = _qty_engine([1] * 60, A1)
+    rec = eng.store.get(key_mag("a", "shop.order", "qty"))
+    assert rec is not None
+    before = orjson.dumps(rec.to_dict())
+    one = _qty_env(tr, 60, 1)
+    for outcome in (Outcome.BLOCKED, Outcome.DENIED):
+        eng.score(one)
+        eng.update(one, outcome)
+    assert orjson.dumps(rec.to_dict()) == before
+    eng.score(one)
+    eng.update(one, Outcome.APPROVED)
+    assert by(eng.score(_qty_env(tr, 61, 2)), "magnitude", "qty").evidence["n"] == 51
+
+
+def test_bool_numeric_does_not_feed_pooled_priors() -> None:
+    """Pooled priors (§6.10) still learn NUMERIC-typed paths only."""
+    eng, _ = _qty_engine([1] * 60, A1)
+    assert eng.store.get(key_mag("a", "shop.order", "qty")) is not None
+    assert eng.store.get(key_prior_mag("shop.order", "qty")) is None

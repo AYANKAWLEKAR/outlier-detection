@@ -25,6 +25,16 @@ detector is built (``ValueError``), so a mistyped value never silently selects t
 So is a ``tail_prior`` outside the open interval (0, 1) (NaN included), under either rule: it is
 a prior probability, degenerate at 0 and 1, and beyond them the tail score leaves [0, 1].
 
+BOOL-typed paths (spec A1.3, ``mag_bool_numeric``): a field whose history is only 0 and 1 is
+typed BOOL (§6.2). With the switch on, ``update`` pushes such a path like a NUMERIC one (only
+what ``try_number`` parses as finite: ints, floats and numeric strings; Python bools and
+``"true"`` / ``"false"`` are not numbers), under the usual key, and ``score`` scores only the
+values that contradict BOOL (``schema_infer.contradicts_bool``: a number outside {0, 1}) with the
+active rule and ``evidence["type_violation"] = "bool"``; a path with no such value emits
+nothing. ``has_ref`` tells novelty whether a field has a usable reference (a warm own record or
+a warm pooled prior), so that novelty scores the contradiction only when magnitude cannot. With
+the switch off (pre-amendment) BOOL-typed paths are neither scored nor learned.
+
 Cold keys (``n < mag_cold_n``) score against the pooled prior (§6.10) with its scale inflated by
 ``prior_iqr_inflate`` and ``prior_used=True``; with no usable prior they score 0.0 with
 ``evidence["cold"] = True``.
@@ -68,7 +78,7 @@ from agentfw.core.detectors.base import (
 from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType, Scalar
 from agentfw.core.hints import ToolHint
 from agentfw.core.patterns import try_number
-from agentfw.core.schema_infer import TypeView
+from agentfw.core.schema_infer import TypeView, contradicts_bool
 from agentfw.core.state import StateStore, key_mag, register_record
 from agentfw.core.stats.ewma import Ewma
 from agentfw.core.stats.p2 import P2Quantiles
@@ -85,6 +95,8 @@ _SCORE_MODELS: tuple[ScoreModel, ...] = get_args(ScoreModel)
 # the quartile (0.75) and to the 5 % / 95 % marker (spec A1.2).
 _Z75 = 0.6744897501960817
 _Z95 = 1.6448536269514722
+_NO_EXTRA: Mapping[str, object] = MappingProxyType({})
+_BOOL_VIOLATION: Mapping[str, object] = MappingProxyType({"type_violation": "bool"})
 
 
 def direction_for(path: str, hints: Mapping[str, str], default: Direction = "both") -> Direction:
@@ -212,6 +224,11 @@ class MagnitudeDetector:
                 return _Ref(prior, direction, prior_used=True, n=prior.n, inflate=inflate)
         return _Ref(None, direction, prior_used=False, n=n)
 
+    def has_ref(self, agent: str, tool: str, path: str) -> bool:
+        """Whether a value of this field can be scored by its size: a warm own record or a warm
+        pooled prior exists (spec A1.3: novelty's BOOL-violation score is the fallback)."""
+        return self._ref(agent, tool, path).rec is not None
+
     @staticmethod
     def _base_evidence(ref: _Ref) -> dict[str, object]:
         return {"n": ref.n, "direction": ref.direction, "prior_used": ref.prior_used}
@@ -282,10 +299,18 @@ class MagnitudeDetector:
     def score(self, e: ActionEnvelope, types: TypeView) -> list[DetectorScore]:
         out: list[DetectorScore] = []
         agent, tool = e.agent_id, e.tool_id
+        bool_numeric = self._cfg.mag_bool_numeric
         for path, values in iter_fields(e):
-            if types(path) is not FieldType.NUMERIC:
+            ft = types(path)
+            extra = _NO_EXTRA
+            if ft is FieldType.BOOL and bool_numeric:  # spec A1.3: only what contradicts BOOL
+                values = tuple(v for v in values if v is not None and contradicts_bool(v))
+                if not values:
+                    continue
+                extra = _BOOL_VIOLATION
+            elif ft is not FieldType.NUMERIC:
                 continue
-            ds = self._score_values(self._ref(agent, tool, path), values, path, {})
+            ds = self._score_values(self._ref(agent, tool, path), values, path, extra)
             if ds is not None:
                 out.append(ds)
         prev = e.prev_response
@@ -313,8 +338,12 @@ class MagnitudeDetector:
 
     def update(self, e: ActionEnvelope, types: TypeView) -> None:
         agent, tool = e.agent_id, e.tool_id
+        bool_numeric = self._cfg.mag_bool_numeric
         for path, values in iter_fields(e):
-            if types(path) is FieldType.NUMERIC:
+            ft = types(path)
+            # spec A1.3: a BOOL path is pushed too; ``_push`` drops what ``try_number`` rejects
+            # (Python bools, "true" / "false"), so only its 0 / 1 numbers are learned
+            if ft is FieldType.NUMERIC or (bool_numeric and ft is FieldType.BOOL):
                 self._push(agent, tool, path, values)
         prev = e.prev_response  # same value score() saw; never this call's own response
         if self._cfg.mag_resp_signal and prev is not None and prev.item_count is not None:

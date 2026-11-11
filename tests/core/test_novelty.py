@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 import orjson
@@ -325,3 +325,53 @@ def test_bool_violation_score_is_pure(nov: NoveltyDetector) -> None:
     for _ in range(3):
         _bool_score(nov, 10000)
     assert orjson.dumps(nov._store.get(key_nov(AGENT, TOOL, "qty")).to_dict()) == before  # type: ignore[union-attr]
+
+
+# -- A1.3: with a numeric reference for the field, magnitude scores the contradiction instead ----
+
+
+def _ref_spy(answer: bool) -> tuple[list[tuple[str, str, str]], Callable[[str, str, str], bool]]:
+    calls: list[tuple[str, str, str]] = []
+
+    def numeric_ref(agent: str, tool: str, path: str) -> bool:
+        calls.append((agent, tool, path))
+        return answer
+
+    return calls, numeric_ref
+
+
+def test_numeric_ref_true_silences_bool_violation() -> None:
+    calls, numeric_ref = _ref_spy(True)
+    det = NoveltyDetector(DictStore(), EngineConfig(), numeric_ref=numeric_ref)
+    _feed_bool(det, [0, 1] * 100)
+    assert _bool_score(det, 10000) is None
+    assert calls == [(AGENT, TOOL, "qty")]  # asked about this field, at score time only
+    rec = det._store.get(key_nov(AGENT, TOOL, "qty"))
+    assert isinstance(rec, NoveltyRecord) and rec.n_total == 200  # tracking is unchanged
+
+
+def test_numeric_ref_false_keeps_the_fallback_score() -> None:
+    calls, numeric_ref = _ref_spy(False)
+    det = NoveltyDetector(DictStore(), EngineConfig(), numeric_ref=numeric_ref)
+    _feed_bool(det, [0, 1] * 100)
+    s = _bool_score(det, 10000)
+    assert s is not None and s.score == pytest.approx(1.0)
+    assert s.evidence["type_violation"] == "bool"
+    assert calls == [(AGENT, TOOL, "qty")]
+    assert _bool_score(det, 1) is None and len(calls) == 1  # nothing contradicts: not consulted
+
+
+def test_numeric_ref_none_keeps_fr2_n1() -> None:
+    det = NoveltyDetector(DictStore(), EngineConfig(), priors=None, numeric_ref=None)
+    _feed_bool(det, [0, 1] * 100)
+    s = _bool_score(det, 10000)
+    assert s is not None and s.score == pytest.approx(1.0)
+    assert s.evidence["type_violation"] == "bool"
+
+
+def test_numeric_ref_does_not_touch_categorical_paths() -> None:
+    calls, numeric_ref = _ref_spy(True)
+    det = NoveltyDetector(DictStore(), EngineConfig(), numeric_ref=numeric_ref)
+    feed(det, "currency", ["usd", "eur"] * 100)
+    assert score(det, "currency", "jpy") == pytest.approx(1.0)
+    assert calls == []

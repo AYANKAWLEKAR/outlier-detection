@@ -27,14 +27,22 @@ id-like). Int/float 0 and 1 are boolish, so a count that starts as 0/1 would oth
 BOOL and stay BOOL, and magnitude/novelty would skip it. Python ``bool`` and ``"true"``/``"false"``
 never trigger the switch, nor do NaN/inf.
 
-Known limitation (pinned by tests in ``tests/core/test_engine.py``; Amendment A1 is where it
-changes): (1) after a *learned* (ALLOWED / APPROVED) BOOL -> NUMERIC switch, magnitude has no
-baseline for the field (it never pushed the BOOL-typed history), so after ``[1]*500`` and an
-allowed ``2``, a ``10000`` scores low: the field is in magnitude cold start for ``mag_cold_n``
-observations unless a pooled prior exists. (2) The first number outside {0, 1} in a BOOL-typed
-field scores 1.0 by novelty (``type_violation="bool"``) whatever its magnitude (after ``[1]*60``,
-a ``2`` is 1.0), and stays 1.0 on later ones while the first was BLOCKED, since a blocked call never
-retypes the field.
+How the detectors treat a BOOL-typed field that carries numbers (Amendment A1.3,
+``EngineConfig.mag_bool_numeric``; pinned in ``tests/core/test_engine.py``): with the switch on,
+magnitude learns the field's values that parse as finite numbers (its 0 / 1 ints, floats and
+numeric strings; never Python bools or ``"true"`` / ``"false"``) and scores a number outside
+{0, 1} by its size with ``type_violation="bool"``, so a learned BOOL -> NUMERIC switch starts
+with a warm magnitude record; novelty scores that number as unseen only while magnitude has no
+usable reference. Remaining limits: (1) the cold window: with fewer than ``mag_cold_n`` learned
+numbers and no warm pooled prior (the first observations, or a ``True`` / ``False``-only
+history) the first number outside {0, 1} is scored by novelty's fallback whatever its size.
+(2) A constant history flags the next integer: after ``[1]*60`` a ``2`` scores about 1.0 through
+magnitude's ``mag_eps`` floor, as for any constant numeric field, and stays so on later ones
+while the first was BLOCKED, since a blocked call never retypes the field and learns nothing.
+With the switch off (pre-amendment behaviour) magnitude skips BOOL-typed fields: the first
+number outside {0, 1} scores 1.0 by novelty whatever its magnitude, and after a learned
+BOOL -> NUMERIC switch the field is in magnitude cold start for ``mag_cold_n`` observations
+unless a pooled prior exists.
 
 ``None`` values carry no information and are skipped. Strings of ``freetext_min_len`` or more
 characters are never stored: the distinct set, reservoir and window keep ``#<xxh64 hex>``
@@ -164,8 +172,9 @@ def _is_num(v: Scalar) -> bool:
 
 
 def contradicts_bool(v: Scalar) -> bool:
-    """A number outside {0, 1}: evidence that a field typed BOOL is really a count (I3). Novelty
-    scores such a value in a BOOL-typed field as unseen (FR2 N1)."""
+    """A number outside {0, 1}: evidence that a field typed BOOL is really a count (I3). In a
+    BOOL-typed field magnitude scores such a value by its size (A1.3, ``mag_bool_numeric``) and
+    novelty scores it as unseen (FR2 N1) when magnitude has no reference or the switch is off."""
     return _contradicts_bool(v, _is_num(v))
 
 

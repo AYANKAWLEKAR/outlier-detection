@@ -20,14 +20,24 @@ evidence ``type_violation="bool"``. Boolean-like values in a BOOL path produce n
 this, a count field with only 0/1 history is typed BOOL and its first large value (scored before
 the update that retypes the field) would be invisible to every detector.
 
-Known limitation (pinned by tests in ``tests/core/test_engine.py``; Amendment A1 is where it
-changes): (1) after a *learned* (ALLOWED / APPROVED) BOOL -> NUMERIC switch, magnitude has no
-baseline for the field (it never pushed the BOOL-typed history), so after ``[1]*500`` and an
-allowed ``2``, a ``10000`` scores low: the field is in magnitude cold start for ``mag_cold_n``
-observations unless a pooled prior exists. (2) The first number outside {0, 1} in a BOOL-typed
-field scores 1.0 by novelty (``type_violation="bool"``) whatever its magnitude (after ``[1]*60``,
-a ``2`` is 1.0), and stays 1.0 on later ones while the first was BLOCKED, since a blocked call never
-retypes the field.
+Amendment A1.3 (``mag_bool_numeric``, wired by the engine as ``numeric_ref``): that score is only
+a fallback. ``numeric_ref(agent, tool, path)`` is ``MagnitudeDetector.has_ref``: True when
+magnitude has a usable reference for the field (a warm own record, which it now learns from the
+BOOL-typed 0 / 1 numbers, or a warm pooled prior) and therefore scores the contradicting value
+by its size; novelty then emits nothing for the path. It is asked only when a value contradicts
+BOOL. Tracking of BOOL paths in ``update`` is the same either way. With ``numeric_ref=None``
+(the switch off, or the engine without magnitude) the FR2 N1 score is always emitted.
+
+Remaining limits with the switch on (pinned in ``tests/core/test_engine.py``): (1) the cold
+window: while the field holds fewer than ``mag_cold_n`` learned numbers and no warm pooled prior
+exists (the first observations, or a history of ``True`` / ``False`` only, which is never
+pushed), magnitude is cold and the fallback scores the first number outside {0, 1} as unseen,
+whatever its size (0.30 after ``[1]*25``, 1.0 after ``[True]*60``). (2) A constant history flags
+the next integer: after ``[1]*60`` the field never varied, so magnitude's scale is the
+``mag_eps`` floor and a ``2`` scores about 1.0 (z = 8.1), as for any constant numeric field; it
+stays so on later ones while the first was BLOCKED, since a blocked call learns nothing. With the
+switch off (pre-amendment) the first number outside {0, 1} scores by novelty alone, and after a
+learned BOOL -> NUMERIC switch magnitude starts cold (it never pushed the BOOL-typed history).
 
 Cold keys (``n_total < mag_cold_n``, ruling NV1) may consult the pooled prior (§6.10) via
 ``PriorSource.novelty_ref``: a value is then seen if either record has it, and an unseen value is
@@ -42,6 +52,7 @@ the estimate was 1).
 from __future__ import annotations
 
 from collections import OrderedDict
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, ClassVar, Self
 
@@ -142,11 +153,18 @@ class NoveltyDetector:
     name: str = NAME
 
     def __init__(
-        self, store: StateStore, cfg: EngineConfig, priors: PriorSource | None = None
+        self,
+        store: StateStore,
+        cfg: EngineConfig,
+        priors: PriorSource | None = None,
+        numeric_ref: Callable[[str, str, str], bool] | None = None,
     ) -> None:
         self._store = store
         self._cfg = cfg
         self._priors = priors
+        # spec A1.3: ``numeric_ref(agent, tool, path)`` is True when magnitude can score a
+        # BOOL-contradicting number of that field by its size; novelty then stays silent.
+        self._numeric_ref = numeric_ref
 
     def _record(self, key: str) -> NoveltyRecord | None:
         rec = self._store.get(key)
@@ -206,11 +224,14 @@ class NoveltyDetector:
 
     def score(self, e: ActionEnvelope, types: TypeView) -> list[DetectorScore]:
         out: list[DetectorScore] = []
+        numeric_ref = self._numeric_ref
         for path, values in iter_fields(e):
             ft = types(path)
             if ft is FieldType.BOOL:
                 bad = tuple(v for v in values if v is not None and contradicts_bool(v))
-                if bad:
+                if bad and not (
+                    numeric_ref is not None and numeric_ref(e.agent_id, e.tool_id, path)
+                ):
                     rec = self._record(key_nov(e.agent_id, e.tool_id, path))
                     ds = self._score_path(rec, None, bad, path, False, violation="bool")
                     if ds is not None:

@@ -54,6 +54,12 @@ class EngineConfig:
     # its own so that a ``cal_alpha`` sweep moves thresholds and not scores. Fixed by the spec:
     # never swept, never tuned against benchmark recall.
     tail_prior: float = 0.005
+    # Amendment A1.3: in a BOOL-typed field (a history of only 0 and 1) magnitude also learns the
+    # values that parse as finite numbers (never Python bools or "true"/"false") and scores the
+    # ones that contradict BOOL (a number outside {0, 1}); novelty then scores such a value only
+    # while magnitude has no usable reference for the field. False: the pre-amendment behaviour
+    # (magnitude skips BOOL-typed fields, novelty scores the contradiction as unseen).
+    mag_bool_numeric: bool = False
     # Pooled priors (§6.10)
     prior_iqr_inflate: float = 1.5
     prior_novelty_discount: float = 0.67
