@@ -1,0 +1,38 @@
+# 009 — Trajectory monitoring: clarifications
+
+Status: **decided (Task 0.1, 2026-11-11).** Interpretation record for the trajectory-monitoring
+feature (`docs/feature-spec-trajectory-monitoring.md`). Rows T-19 onward are added by later
+tasks when a decision arises that the plan does not cover.
+
+Paper citation: "OnTrack", arXiv:2610.12375. Licence note: paraphrase only; the paper's prose,
+figures and tables are never reproduced here or in code. Nothing in the codebase is named
+"OnTrack" or "OTAP".
+
+## Scope and interpretation
+
+Branch `feat/trajectory-monitoring`, cut from `feat/tiers-0-2` at `2aafb11`. Tiers 0–2 exist; Tier 3 (blast radius, §6.9) and Tier 4 (Go proxy, Redis, enforcement) do not. The plan builds everything the feature spec places in Tiers 0–3 in Python, plus the Python-proxy parts of F3 and F2.
+
+| ID | Clarification |
+|---|---|
+| T-01 | **In scope:** F1–F8 and F10 in `agentfw/core`, `agentfw/bench`, `agentfw/synth` and the Python sandbox proxy. **Out of scope:** F9 (the spec says not before F1–F8 are measured); everything Tier 4 (Go proxy, Redis atomicity, Cedar, live graduated responses). The Python proxy is shadow-only, so `WARN_SESSION` / `HALT_SESSION` are recorded, never acted on, there. |
+| T-02 | F3/F4/F8 need blast radius and `θ_eff` (§6.9), which do not exist yet. Task 1.7 builds §6.9's **lexical + structural** sources plus the F3 annotation terms. The learned LightGBM source stays Tier 3+ work. |
+| T-03 | **Switches default to current behaviour.** Each feature adds an `EngineConfig` field (or makes `vital` opt-in via `enabled`) whose default reproduces today's scores *and* decisions. `tests/golden/*.sha256` must not change in any task. Task 4.1 measures each switch and writes `docs/decisions/010-trajectory-defaults.md`; defaults flip only on a user decision (same pattern as decision 008). |
+| T-04 | `ActionEnvelope.session_ids_seen` stays (membership, including the Bloom overflow) and `ledger_refs` is **added** next to it. The v3 id-flow path keeps reading `session_ids_seen` unless `flow_ledger` is on. |
+| T-05 | Task-input ids travel as `RawCall.task_ids` on a session's **first** call. An MCP proxy never sees the prompt; the sandbox runner passes them through `SessionInfo`. Synth sets them to the session's externally sourced (`source: external`) id values. |
+| T-06 | `regime` has four values, not three: `history+schemas`, `history_only`, `schemas_only`, `bare`. With three, every decision on today's (schema-less) benchmark would be `bare` and F8 would make the whole engine inform-only. "History" = the (agent, tool) key has ≥ `mag_cold_n` observations; "schemas" = the tool has a captured schema. |
+| T-07 | `vital` scores are reported in `per_detector` and reasons but **excluded from the fused max**. That is how "never block a single call on their own" (F2) is enforced, and it keeps the fused score — and so the goldens — unchanged when `vital` is enabled. |
+| T-08 | Loop score: the first exact duplicate in the window scores 0.7, the second and later score 1.0; a non-exact near-duplicate (arg-token Jaccard ≥ 0.9) scores 0.7. The `LOOP` flag needs `s_loop = 1.0`. This reconciles F2's formula with its own acceptance test ("fires at the 2nd duplicate") and with the synth grammar's benign single retries. |
+| T-09 | `SPIN` is a severe flag (F2 says loop/spin/stall are severe-flag eligible; F7's list omits it). `density` = Σ over the window's calls of that call's **highest** flag weight, divided by `W`, so it stays in [0, 1]. |
+| T-10 | `loop` / `spin` / `stall` are attack families labelled `attack` but listed in `RUNAWAY_FAMILIES`: they are opt-in in `GenerateConfig.families`, excluded from every per-call metric (neither positive nor negative), and scored only by session metrics. `splice` is opt-in too and reported separately. |
+| T-11 | The gate's prerequisite block (F4 step 2) fires only when the (agent, tool, path) is warm (`FlowRecord.total ≥ flow_min_obs`) and its historical presence rate `r_flow ≥ gate_flow_rate` (0.90). A cold key escalates instead. An id known only through the Bloom overflow counts as present. Otherwise, personas with benign fabricated ids (`id_flow_rate < 1`) and any un-seeded sandbox session would be false-blocked. |
+| T-12 | Python escalation (F5) = a fresh, cache-free re-score plus an optional injected judge. The Python fast path skips nothing today, so "full re-score with pooled priors and the long window" is already the fast path; fast-path shortcuts belong to the Go port. |
+| T-13 | Attribution (F10) is leave-one-group-out: an attack is "carried" by group G when it is detected with all groups and undetected without G; detected attacks that no single removal un-detects are `redundant`. That makes "removing a group changes exactly the rows it carried" true by construction instead of approximately. |
+| T-14 | Maturity cut points: `cold` n < 30 (`mat_warm_n`), `warm` 30 ≤ n < 300, `mature` n ≥ 300 (`mat_mature_n`). A cold-maturity decision becomes `ALLOW` with `notice="warn"`; a `bare` one becomes `ALLOW` with `notice="inform"`. `Decision` gains no new members. |
+| T-15 | A halted session is never idle-evicted; it stays halted until `Engine.release_session`. Other session records are evicted after `sess_idle_ms` without a call. |
+| T-16 | The orphan-candidate marker (F1) is not stored by the tracker. A provisional call whose artifact nobody consumes within the TTL (F6) is the same fact, and the engine already sees consumption through `ledger_refs`. |
+| T-17 | Blast-radius numbers the v3 spec leaves open: lexical = 0.6 for an irreversible verb in the tool name, +0.2 for a scope noun, +0.2 when a `money`/`count` field hint is present (clip to [0, 1]); structural starts at 0.3, +0.4 write, + min(0.3, log10(len)/4) for the longest id list, −0.3 read (clip); `b = 0.5·lexical + 0.5·structural`, then the F3 annotation terms, floor 0.05. |
+| T-18 | Response fingerprints in synth are computed with the same `resp_fingerprint` the proxy uses, over the generated payload's sorted-key JSON. |
+
+## Interaction with Amendment A1
+
+Amendment A1 (velocity tail probability, log-scale magnitude, generator spikes; ordered 2026-11-10, not yet on this branch): no task here touches magnitude or velocity scoring. Both edit `agentfw/synth/attacks.py` and `generate.py`; whichever lands second rebases. If A1 lands first, Task 4.1 runs on the A1 engine.
