@@ -3,6 +3,7 @@ oracle-reviewer approval loop, records it in ``extras.outcomes`` and labels it i
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,8 @@ from agentfw.bench.ablation import run_ablation as real_ablation
 from agentfw.bench.replay import BENCH_OUTCOMES, PROTOCOL_LABELS, SplitSpec
 from agentfw.bench.replay import replay as real_replay
 from agentfw.bench.run import main, run
+from agentfw.bench.sweeps import PRE_A1_SWITCHES
+from agentfw.core.config import EngineConfig
 
 REVIEW_LABEL = "oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)"
 ALLOW_LABEL = "spec §5.2 allow-all"
@@ -90,6 +93,21 @@ def test_cli_outcomes_flag(
     with pytest.raises(SystemExit):
         main([*args, "--out", str(tmp_path / "x"), "--outcomes", "deny"])
     assert "invalid choice" in capsys.readouterr().err
+
+
+def test_config_record_writes_the_engine_config(tiny_dataset: Path, tmp_path: Path) -> None:
+    """The engine-pre-a1 leaderboard row (Task 1.25): the report records the engine config it
+    replayed, field by field, not its type name."""
+    cfg = EngineConfig().replace(**PRE_A1_SWITCHES)
+    run(tiny_dataset, "engine", SplitSpec(), tmp_path, n_boot=0, cfg=cfg)
+    rec = _report(tmp_path)["meta"]["detector_config"]["cfg"]
+    assert rec["vel_count_stat"] == "logz"
+    assert rec["mag_score"] == "z"
+    assert rec["mag_bool_numeric"] is False
+    assert rec == orjson.loads(
+        orjson.dumps(dataclasses.asdict(cfg))
+    )  # every field, tuples as lists
+    assert rec["mag_probs"] == list(cfg.mag_probs)
 
 
 def test_report_unknown_protocol_label_matches_the_leaderboard() -> None:

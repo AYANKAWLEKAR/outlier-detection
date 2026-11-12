@@ -10,6 +10,7 @@ it in ``extras.outcomes`` and labels it in its header.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import time
 from collections.abc import Sequence
@@ -34,6 +35,7 @@ from agentfw.bench.replay import (
 )
 from agentfw.bench.report import RunMeta, build_report, git_sha, render_markdown, update_readme
 from agentfw.bench.sampling import sample_counts, stratified_sample
+from agentfw.core.config import EngineConfig
 from agentfw.sandbox.llm import OpenAICompatClient
 
 __all__ = ["main", "run"]
@@ -124,7 +126,11 @@ _SECRET_HINTS = ("key", "secret", "token", "password")
 
 
 def _config_record(det: object, kw: dict[str, Any]) -> dict[str, Any]:
-    """JSON-safe, credential-free record of the detector config for the report."""
+    """JSON-safe, credential-free record of the detector config for the report.
+
+    An :class:`EngineConfig` keyword is written field by field (``dataclasses.asdict``, tuples as
+    lists), so a report says which engine it replayed; other non-scalar values by type name.
+    """
     rec = getattr(det, "config_record", None)
     if callable(rec):
         return dict(rec())
@@ -132,8 +138,17 @@ def _config_record(det: object, kw: dict[str, Any]) -> dict[str, Any]:
     for k, v in kw.items():
         if any(h in k.lower() for h in _SECRET_HINTS):
             continue
-        out[k] = v if isinstance(v, str | int | float | bool | type(None)) else type(v).__name__
+        if isinstance(v, EngineConfig):
+            out[k] = {f: _jsonable(x) for f, x in dataclasses.asdict(v).items()}
+        elif isinstance(v, str | int | float | bool | type(None)):
+            out[k] = v
+        else:
+            out[k] = type(v).__name__
     return out
+
+
+def _jsonable(x: object) -> object:
+    return [_jsonable(i) for i in x] if isinstance(x, tuple | list) else x
 
 
 def _live_judge_kwargs(model: str | None, cache: Path) -> dict[str, Any]:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import orjson
@@ -12,11 +14,16 @@ from agentfw.bench.leaderboard import (
     ORACLE_DIAGNOSTIC_CAVEAT,
     Leaderboard,
     build_leaderboard,
+    render_gate_section,
 )
 from agentfw.bench.leaderboard import render_leaderboard as render
-from agentfw.bench.replay import SplitSpec
+from agentfw.bench.metrics import GATE_FAMILIES
+from agentfw.bench.replay import PROTOCOL_LABELS, SplitSpec
 from agentfw.bench.run import run
+from agentfw.bench.sweeps import PRE_A1_SWITCHES
+from agentfw.core.config import EngineConfig
 from agentfw.sandbox.llm import ChatTurn, ScriptedChatClient, Usage
+from agentfw.synth.generate import sw1_config
 
 SHA = "a" * 64
 
@@ -280,3 +287,229 @@ def test_cli_rejects_malformed_not_run(tmp_path: Path, capsys: pytest.CaptureFix
     assert exc.value.code == 2  # argparse usage error
     assert "NAME=REASON" in capsys.readouterr().err
     assert not (tmp_path / "x.md").exists()
+
+
+# --- Task 1.25: gate section under both protocols, pre-A1 rows, SW1 header (spec A1.5) ----------
+
+ROOT = Path(__file__).resolve().parents[2]
+MATRIX_JSON = ROOT / "docs/decisions/evidence/a1-gate/matrix.json"
+REVIEW = PROTOCOL_LABELS["review"]
+ALLOW = PROTOCOL_LABELS["allow"]
+GATE_RUNS = ("engine", "engine-allow-all", "engine-pre-a1", "engine-pre-a1-allow-all")
+
+
+def _load_script() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "_build_leaderboard_script", ROOT / "scripts/build_leaderboard.py"
+    )
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)  # importing must not run the script
+    return mod
+
+
+build_leaderboard_script = _load_script()
+
+
+def _gate(passed: bool, mag: tuple[int, int]) -> dict[str, Any]:
+    """A report.json ``gate`` section (``GatePreview`` as orjson writes it)."""
+    cells = {
+        fam: {
+            "bucket": bucket,
+            "detector": det,
+            "recall": (mag[0] / mag[1]) if fam == "magnitude_spike" else 1.0,
+            "n_detected": mag[0] if fam == "magnitude_spike" else 10,
+            "n_total": mag[1] if fam == "magnitude_spike" else 10,
+            "top_reason_share": 0.5,
+            "among_reasons_share": 1.0,
+        }
+        for fam, (bucket, det) in GATE_FAMILIES.items()
+    }
+    return {
+        "cells": cells,
+        "benign_fpr": 0.0058,
+        "control_fpr": 0.035,
+        "min_recall": 1.0,
+        "passed": passed,
+        "missing": [],
+        "failures": [] if passed else ["recall:novel_target"],
+    }
+
+
+def _gate_report(outcomes: str, passed: bool, mag: tuple[int, int]) -> dict[str, Any]:
+    return {
+        "meta": {"dataset_sha": SHA, "seed": 0, "detector": "engine", "split": {"kind": "time"}},
+        "extras": {"outcomes": outcomes, "n_boot": 0},
+        "gate": _gate(passed, mag),
+    }
+
+
+def _reports(review_pass: bool = True, allow_pass: bool = False) -> dict[str, dict[str, Any]]:
+    return {
+        "engine": _gate_report("review", review_pass, (77, 78)),
+        "engine-allow-all": _gate_report("allow", allow_pass, (71, 78)),
+        "engine-pre-a1": _gate_report("review", False, (73, 78)),
+        "engine-pre-a1-allow-all": _gate_report("allow", False, (59, 78)),
+    }
+
+
+@pytest.fixture
+def reports() -> dict[str, dict[str, Any]]:
+    return _reports()
+
+
+def _protocol_lines(md: str) -> list[tuple[int, str]]:
+    """(line number, protocol) of every table line that starts with a protocol label."""
+    out = []
+    for i, ln in enumerate(md.splitlines()):
+        for mode in ("review", "allow"):
+            if ln.startswith(f"| {PROTOCOL_LABELS[mode]} |"):
+                out.append((i, mode))
+    return out
+
+
+def test_gate_section_shows_both_protocols_side_by_side(reports: dict[str, Any]) -> None:
+    md = render_gate_section(reports)
+    assert PROTOCOL_LABELS["review"] in md and PROTOCOL_LABELS["allow"] in md
+    assert "original spec §9 criterion" in md and "among" in md.lower()
+    assert "engine-pre-a1" in md
+    # Rule 1: every review line is directly followed by its allow line, the engine pair first.
+    rows = _protocol_lines(md)
+    assert [mode for _, mode in rows] == ["review", "allow", "review", "allow"]
+    assert rows[1][0] == rows[0][0] + 1 and rows[3][0] == rows[2][0] + 1
+    assert md.index("`engine-allow-all`") < md.index("`engine-pre-a1`")
+    assert "Tier-1 gate met" not in md
+
+
+def test_gate_section_refuses_a_single_protocol(reports: dict[str, Any]) -> None:
+    with pytest.raises(ValueError, match="both protocols"):
+        render_gate_section({k: v for k, v in reports.items() if k != "engine-allow-all"})
+    with pytest.raises(ValueError, match="both protocols"):
+        render_gate_section({k: v for k, v in reports.items() if k != "engine-pre-a1"})
+    swapped = {**reports, "engine-allow-all": _gate_report("review", False, (71, 78))}
+    with pytest.raises(ValueError, match="both protocols"):
+        render_gate_section(swapped)  # a run named allow-all that replayed the review loop
+    no_gate = {**reports, "engine": {**reports["engine"], "gate": None}}
+    with pytest.raises(ValueError, match="gate"):
+        render_gate_section(no_gate)
+
+
+def test_gate_section_withholds_magnitude_without_the_sensitivity_rows(
+    reports: dict[str, Any],
+) -> None:
+    md = render_gate_section(reports)  # rule 4: the sensitivity companion is missing
+    assert "withheld" in md
+    assert "(77/78)" not in md and "(71/78)" not in md
+    sens = {name: {**rep, "gate": _gate(False, (51, 64))} for name, rep in _reports().items()}
+    md = render_gate_section(reports, sensitivity=sens)
+    assert "withheld" not in md
+    assert "0.987 (77/78)" in md and "0.910 (71/78)" in md and "0.797 (51/64)" in md
+    assert md.index("(77/78)") < md.index("(51/64)")  # companion rows after the gate rows
+    assert "not a gate result" in md
+
+
+def test_build_leaderboard_uses_sw1_config() -> None:
+    assert sw1_config() == build_leaderboard_script.SW1
+    assert {n for n, *_ in build_leaderboard_script.RUNS} >= {
+        "engine",
+        "engine-allow-all",
+        "engine-pre-a1",
+        "engine-pre-a1-allow-all",
+    }
+    runs = {name: rest for name, *rest in build_leaderboard_script.RUNS}
+    pre = EngineConfig().replace(**PRE_A1_SWITCHES)
+    assert runs["engine-pre-a1"] == ["engine", "review", pre]
+    assert runs["engine-pre-a1-allow-all"] == ["engine", "allow", pre]
+    assert runs["engine"] == ["engine", "review", None]
+    assert runs["engine-allow-all"] == ["engine", "allow", None]
+    assert all(len(r) == 4 for r in build_leaderboard_script.RUNS)
+
+
+@pytest.mark.parametrize(
+    ("review_pass", "allow_pass", "sentence"),
+    [
+        (True, False, f"the amended gate passes under {REVIEW} and is not met under {ALLOW}"),
+        (True, True, f"the amended gate passes under {REVIEW} and passes under {ALLOW}"),
+        (False, False, f"the amended gate is not met under {REVIEW} and is not met under {ALLOW}"),
+        (False, True, f"the amended gate is not met under {REVIEW} and passes under {ALLOW}"),
+    ],
+)
+def test_doc_header_states_the_gate_from_the_reports(
+    review_pass: bool, allow_pass: bool, sentence: str
+) -> None:
+    md = build_leaderboard_script._doc(["SECTION"], SHA, _reports(review_pass, allow_pass))
+    assert sentence in md
+    assert "Tier-1 gate met" not in md and "Tier-1 gate is met" not in md
+    assert "not met under either protocol" not in md  # the old hard-coded sentence
+
+
+def test_doc_header_names_the_dataset_sw1_and_auprc_caveat(reports: dict[str, Any]) -> None:
+    md = build_leaderboard_script._doc(["SECTION-A", "SECTION-B"], SHA, reports)
+    sw1 = sw1_config()
+    assert SHA[:12] in md
+    assert f"magnitude_far_mult {sw1.magnitude_far_mult:g}" in md
+    assert f"magnitude_topup_rate {sw1.magnitude_topup_rate:g}" in md
+    assert f'magnitude_mode "{sw1.magnitude_mode}"' in md
+    assert "6451d56" in md and "AUPRC" in md and "not comparable" in md
+    assert md.index("SECTION-A") < md.index("SECTION-B")
+    # The gate section is in the page with its magnitude cells (both companions present).
+    assert "0.987 (77/78)" in md and "withheld" not in md
+
+
+def test_doc_copies_the_sensitivity_rows_from_matrix_json(reports: dict[str, Any]) -> None:
+    md = build_leaderboard_script._doc([], SHA, reports)
+    rows = [r for r in orjson.loads(MATRIX_JSON.read_bytes())["rows"] if r["dataset"] == "sens"]
+    assert {(r["engine"], r["protocol"]) for r in rows} == {
+        (e, p) for e in ("a1", "pre-a1") for p in ("review", "allow")
+    }
+    for r in rows:
+        for fam, c in r["families"].items():
+            cell = f"{c['recall']:.3f} ({c['n_detected']}/{c['n_total']}); {c['among']:.2f}"
+            assert cell in md, (r["engine"], r["protocol"], fam)
+    assert rows[0]["dataset_sha"] in md
+
+
+def test_doc_refuses_a_matrix_without_the_sensitivity_rows(
+    reports: dict[str, Any], tmp_path: Path
+) -> None:
+    payload = orjson.loads(MATRIX_JSON.read_bytes())
+    payload["rows"] = [
+        r for r in payload["rows"] if not (r["dataset"] == "sens" and r["engine"] == "pre-a1")
+    ]
+    bad = tmp_path / "matrix.json"
+    bad.write_bytes(orjson.dumps(payload))
+    with pytest.raises(ValueError, match="sensitivity"):
+        build_leaderboard_script._doc([], SHA, reports, matrix=bad)
+
+
+def test_job_and_fresh_carry_the_engine_config(tiny_dataset: Path, tmp_path: Path) -> None:
+    mod = build_leaderboard_script
+    pre = EngineConfig().replace(**PRE_A1_SWITCHES)
+    out = tmp_path / "engine-pre-a1-allow-all"
+    mod._job(tiny_dataset, "engine", "time", out, 0, "allow", pre)
+    rep = orjson.loads((out / "report.json").read_bytes())
+    assert rep["meta"]["detector_config"]["cfg"]["mag_score"] == "z"
+    sha = rep["meta"]["dataset_sha"]
+    assert mod._fresh(out, sha, 0, "time", "engine", "allow", pre)
+    assert not mod._fresh(out, sha, 0, "time", "engine", "allow", None)  # not the default engine
+    assert not mod._fresh(out, sha, 0, "time", "engine", "review", pre)
+
+
+def test_gate_section_reads_real_reports(tiny_dataset: Path, tmp_path: Path) -> None:
+    """The report.json gate sections the leaderboard runs write render as they were measured."""
+    pre = EngineConfig().replace(**PRE_A1_SWITCHES)
+    reports: dict[str, dict[str, Any]] = {}
+    for name, outcomes, cfg in (
+        ("engine", "review", None),
+        ("engine-allow-all", "allow", None),
+        ("engine-pre-a1", "review", pre),
+        ("engine-pre-a1-allow-all", "allow", pre),
+    ):
+        kw = {} if cfg is None else {"cfg": cfg}
+        run(tiny_dataset, "engine", SplitSpec(), tmp_path / name, n_boot=0, outcomes=outcomes, **kw)  # type: ignore[arg-type]
+        reports[name] = orjson.loads((tmp_path / name / "report.json").read_bytes())
+    md = render_gate_section(reports, sensitivity=reports)
+    assert [m for _, m in _protocol_lines(md)] == ["review", "allow"] * 4
+    for rep in reports.values():
+        c = rep["gate"]["cells"]["prereq_skip"]
+        assert f"({c['n_detected']}/{c['n_total']})" in md

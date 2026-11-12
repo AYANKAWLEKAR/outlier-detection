@@ -9,6 +9,10 @@ samples, and the replay outcome mode (``extras.outcomes``, labels from
 the label-reading oracle are always labelled optimistic; spec §5.2 allow-all is labelled as the
 comparison protocol. Reports without ``extras.outcomes`` (older runs) carry no protocol caveat.
 By-time and by-agent splits are never mixed in one table (spec 5.3).
+
+:func:`render_gate_section` prints the Tier-1 gate of the engine runs' ``report.json["gate"]``
+under both protocols side by side (spec A1.5): ``engine`` with ``engine-allow-all``, then the
+engine before Amendment A1 (``engine-pre-a1`` with ``engine-pre-a1-allow-all``).
 """
 
 from __future__ import annotations
@@ -22,16 +26,21 @@ from typing import Any
 import orjson
 from pydantic import BaseModel
 
-from agentfw.bench.replay import PROTOCOL_LABELS, protocol_label
+from agentfw.bench.gate import ENGINE_ROW, PRE_A1_ROW, render_gate_matrix
+from agentfw.bench.gate import _preview_from as _gate_from_json
+from agentfw.bench.metrics import GatePreview
+from agentfw.bench.replay import PROTOCOL_LABELS, OutcomeMode, protocol_label
 
 __all__ = [
     "ALLOW_ALL_CAVEAT",
+    "GATE_RUNS",
     "ORACLE_CAVEAT",
     "ORACLE_DIAGNOSTIC_CAVEAT",
     "Leaderboard",
     "LeaderboardRow",
     "build_leaderboard",
     "main",
+    "render_gate_section",
     "render_leaderboard",
 ]
 
@@ -39,6 +48,14 @@ ORACLE_CAVEAT = PROTOCOL_LABELS["review"]
 ORACLE_DIAGNOSTIC_CAVEAT = PROTOCOL_LABELS["oracle"]
 ALLOW_ALL_CAVEAT = PROTOCOL_LABELS["allow"]
 BATCH_CAVEAT = "batch: fit offline on the train split, not an online learner"
+#: Gate rows of :func:`render_gate_section`: row name -> (oracle-reviewer run, allow-all run).
+#: The run names are those of ``scripts/build_leaderboard.py``; the row names are the engine rows
+#: of :func:`agentfw.bench.gate.render_gate_matrix` (the pre-A1 row is a companion, rule 4).
+GATE_RUNS: dict[str, tuple[str, str]] = {
+    ENGINE_ROW: ("engine", "engine-allow-all"),
+    PRE_A1_ROW: ("engine-pre-a1", "engine-pre-a1-allow-all"),
+}
+_GATE_MODES: tuple[OutcomeMode, OutcomeMode] = ("review", "allow")
 
 
 class LeaderboardRow(BaseModel):
@@ -231,6 +248,66 @@ def _family_md(lb: Leaderboard) -> list[str]:
         cells = [r.name, r.family_mode, *(_f(r.family_recall.get(f)) for f in fams)]
         lines.append("| " + " | ".join([*cells, _f(r.control_fpr)]) + " |")
     return lines
+
+
+def _gate_rows(
+    reports: Mapping[str, Mapping[str, Any]], what: str
+) -> tuple[dict[str, dict[OutcomeMode, GatePreview]], str]:
+    """The ``GATE_RUNS`` pairs of ``reports`` as gate rows, and their split kind; refuses a pair
+    missing a protocol, a run without a gate section and runs of different datasets or splits."""
+    rows: dict[str, dict[OutcomeMode, GatePreview]] = {}
+    seen: set[tuple[str, str]] = set()
+    for row, runs in GATE_RUNS.items():
+        by_mode: dict[OutcomeMode, GatePreview] = {}
+        for run, mode in zip(runs, _GATE_MODES, strict=True):
+            rep = reports.get(run)
+            if rep is None or (rep.get("extras") or {}).get("outcomes") != mode:
+                got = (
+                    "no report" if rep is None else repr((rep.get("extras") or {}).get("outcomes"))
+                )
+                raise ValueError(
+                    f"{what}: the gate is shown under both protocols {_GATE_MODES}; run {run!r} "
+                    f"must be a {mode!r} replay, got {got}"
+                )
+            gate = rep.get("gate")
+            if not isinstance(gate, Mapping):
+                raise ValueError(f"{what}: run {run!r} has no gate section in its report")
+            meta = rep["meta"]
+            seen.add((str(meta["dataset_sha"]), str(meta["split"]["kind"])))
+            by_mode[mode] = _gate_from_json(dict(gate))
+        rows[row] = by_mode
+    if len(seen) != 1:
+        raise ValueError(f"{what}: the gate runs mix datasets or splits {sorted(seen)}")
+    return rows, seen.pop()[1]
+
+
+def render_gate_section(
+    reports: Mapping[str, Mapping[str, Any]],
+    *,
+    sensitivity: Mapping[str, Mapping[str, Any]] | None = None,
+) -> str:
+    """The Tier-1 gate of the engine runs under both protocols, side by side (spec A1.5).
+
+    ``reports`` maps run names to ``report.json`` contents and must hold every run of
+    :data:`GATE_RUNS` with its ``gate`` section: ``engine`` (oracle-reviewer approval loop) next
+    to ``engine-allow-all`` (spec §5.2 allow-all), then the pre-A1 pair, each line under its
+    ``PROTOCOL_LABELS`` text verbatim with recall, among-the-reasons share and top-1 share
+    (``original spec §9 criterion``) per gated family, as
+    :func:`agentfw.bench.gate.render_gate_matrix` prints them.
+    ``sensitivity`` holds the same runs on the sensitivity dataset (``magnitude_far_mult = 1.0``);
+    without it every ``magnitude_spike`` cell is withheld (spec A1.5 rule 4). Raises
+    ``ValueError`` when either protocol of a pair is missing, a run has no gate section, or the
+    runs of one mapping mix datasets or splits.
+    """
+    results, split = _gate_rows(reports, "reports")
+    sens = None if sensitivity is None else _gate_rows(sensitivity, "sensitivity")[0]
+    head, _, rest = render_gate_matrix(results, sensitivity=sens).partition("\n\n")
+    runs = "; ".join(
+        f"`{row}`: runs `{review}` ({PROTOCOL_LABELS['review']}) and `{allow}` "
+        f"({PROTOCOL_LABELS['allow']})"
+        for row, (review, allow) in GATE_RUNS.items()
+    )
+    return f"{head}\n\nRows from the leaderboard runs, split `{split}`: {runs}.\n\n{rest}"
 
 
 def _title(lb: Leaderboard) -> str:
