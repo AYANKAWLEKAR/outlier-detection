@@ -21,6 +21,7 @@ from agentfw.synth.attacks import (
     AttackResult,
     far_bounds,
 )
+from agentfw.synth.attacks import eligible as persona_eligible
 from agentfw.synth.generate import (
     GenerateConfig,
     Manifest,
@@ -485,7 +486,7 @@ def test_cli_magnitude_defaults_are_the_config_defaults(
 # --- magnitude top-up pass, sw1_config, manifest census (Amendment A1.4) --------------------------
 
 TOPUP_ID = re.compile(r"atk-(.+)-m(\d{5})")
-WARMUP = 30  # GenerateConfig.warmup_sessions
+WARMUP = small_cfg().warmup_sessions  # the warm-up of every dataset generated below
 MONEY_COUNT_NAMES = {"amount", "count", "qty", "total"}
 CENSUS_KEYS = {
     "sessions",
@@ -715,10 +716,10 @@ def test_topup_rate_one_spikes_every_eligible_untouched_session(
     for agent, sids in order.items():
         ids = [got[sid] for sid in sids if sid in got]
         assert ids == [f"atk-{agent}-m{k:05d}" for k in range(len(ids))]
-    assert {a for a, sids in order.items() if any(s in got for s in sids)} == {
-        "sales-ops-a",
-        "support-refunds-a",
-    }
+    # every persona that can be spiked is topped up, and only those
+    spikeable = {a for a in order if persona_eligible(SPIKE, world.persona(a), world.catalog)}
+    assert spikeable < set(order)
+    assert {a for a, sids in order.items() if any(s in got for s in sids)} == spikeable
     # each top-up is a far spike: at or beyond its field's bound, strength the realized multiplier
     bounds = _bounds(world, trio.benign)
     topped = {lab["envelope_id"] for lab in labs}
@@ -805,21 +806,47 @@ def test_topup_in_own_mode_uses_all_candidates(trio: Trio, topup: Topup, world: 
     assert m.counts["magnitude_first_pass"] == len(trio.own.attack_ids(SPIKE))
 
 
-def test_topup_needs_the_spike_family(tmp_path: Path) -> None:
-    # The top-up adds magnitude spikes to a dataset that has the family; without it (or with no
-    # family at all) nothing is topped up, and the census says so.
-    for name, families in (("none", []), ("other", ["novel_target", "benign_unusual"])):
-        d = gen(tmp_path / name, small_cfg(days=5, families=families, magnitude_topup_rate=1.0))
-        assert not _topups(d) and not d.spikes()
-        assert set(d.manifest.counts) == CENSUS_KEYS
+def test_topup_runs_without_the_spike_family(trio: Trio, world: World, tmp_path: Path) -> None:
+    # A1.4's top-up is its own, magnitude-only pass (Task 1.20 review round 1): with no family at
+    # all there is no first pass, and the top-up still makes one draw per post-warm-up session
+    # with a usable candidate, spiking it below the rate (in mode "far" at or beyond the field's far
+    # bound). A rate of 0.1 keeps the run short: each spike builds a context, and the replay pins
+    # every draw all the same.
+    bounds = _bounds(world, trio.benign)
+    for mode in ("far", "own"):
+        d = gen(
+            tmp_path / mode, small_cfg(families=[], magnitude_mode=mode, magnitude_topup_rate=0.1)
+        )
+        got = _topups(d)
+        assert got == replay_topup(world, trio.benign, set(), mode=mode, rate=0.1)
+        assert len(got) >= 50
+        topped = {lab["envelope_id"] for lab in d.labels if _is_topup(lab)}
+        assert {lab["envelope_id"] for lab in d.labels if lab["label"] != "benign"} == topped
+        # every other call is the benign dataset's, byte for byte
+        assert _without(d.trace_lines, d.traces, topped) == _without(
+            trio.benign.trace_lines, trio.benign.traces, topped
+        )
+        values = _spiked_values(d, trio.benign)
+        assert len(values) == len(topped)
+        if mode == "far":
+            assert all(new >= bounds[a][(t, n)] for a, t, n, new, _ in values)
+        else:
+            assert any(new < bounds[a][(t, n)] for a, t, n, new, _ in values)
         assert {k: v for k, v in d.manifest.counts.items() if k.startswith("magnitude_")} == {
             "magnitude_first_pass": 0,
             "magnitude_dropped": 0,
-            "magnitude_topup": 0,
-            "magnitude_strength_ge_10": 0,
+            "magnitude_topup": len(got),
+            "magnitude_strength_ge_10": sum(_num(lab["strength"]) >= 10.0 for lab in d.spikes()),
         }
-    with_family = gen(tmp_path / "spike", small_cfg(days=5, magnitude_topup_rate=1.0))
-    assert len(_topups(with_family)) >= 10
+        assert d.manifest.counts["attacks"] == len(got)
+    # other families but not the spike one: the top-up runs too
+    other = gen(
+        tmp_path / "other",
+        small_cfg(days=5, families=["novel_target", "benign_unusual"], magnitude_topup_rate=1.0),
+    )
+    assert len(_topups(other)) >= 10
+    assert other.manifest.counts["magnitude_topup"] == len(_topups(other))
+    assert other.manifest.counts["magnitude_first_pass"] == 0
 
 
 def test_topup_rate_is_validated() -> None:

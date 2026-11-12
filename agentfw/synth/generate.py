@@ -108,7 +108,7 @@ def _inject_attacks(
     """Mutate benign sessions per ``cfg.families``; returns attack/control labels by envelope id
     and the magnitude census (``inject``'s ``stats``)."""
     stats = {"magnitude_first_pass": 0, "magnitude_dropped": 0, "magnitude_topup": 0}
-    if not cfg.families:
+    if not cfg.families and cfg.magnitude_topup_rate == 0:  # the top-up needs no family (A1.4)
         return by_persona, {}, stats
     by_id = {p.agent_id: p for p in personas}
 

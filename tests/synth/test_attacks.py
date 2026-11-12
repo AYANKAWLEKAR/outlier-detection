@@ -14,6 +14,7 @@ import pytest
 
 from agentfw.core.envelope import Label, RawCall
 from agentfw.core.patterns import email_domain, is_id_like
+from agentfw.synth import attacks as attacks_mod
 from agentfw.synth.attacks import (
     ATTACKS,
     CONTROL_P99_MULT,
@@ -1256,39 +1257,97 @@ def test_topup_visits_personas_in_sorted_order_on_one_stream(world: World) -> No
     assert list(out) == sorted(sessions)
 
 
-def test_topup_runs_only_with_the_spike_family(world: World) -> None:
-    sessions = {PERSONA: refund_sessions(world, [100.0] * 30)}
+def test_topup_runs_without_the_spike_family(world: World) -> None:
+    # A1.4's top-up is its own, magnitude-only pass: its skip rules are touched sessions and
+    # sessions with no (feasible) candidate, nothing else. It runs whatever families the first
+    # pass has (Task 1.20 review round 1), and in mode "far" it still uses the persona's far bounds
+    # from the sessions before any injection.
+    amounts = [100.0] * WARM + [100.0, 1.0, 12.5, 0.0] * 16
+    sessions = {PERSONA: refund_sessions(world, amounts)}
+    bound = far_bounds(sessions[PERSONA], world.persona(PERSONA), world.catalog)[REFUND]
+    assert 1.0 * M_MAX < bound <= 12.5 * M_MAX  # 1.0 is infeasible in mode "far", 12.5 is not
+    index = {c.envelope_id: i for i, s in enumerate(sessions[PERSONA]) for c in s}
 
-    def factory(agent: str, aid: str, ps: object, idx: int) -> AttackContext:
-        return replace(far_ctx(world, None), attack_id=aid)
+    def factory(agent: str, aid: str, ps: Sequence[list[RawCall]], idx: int) -> AttackContext:
+        return replace(far_ctx(world, None), attack_id=aid, persona_sessions=ps, session_index=idx)
+
+    def refund(out: dict[str, list[list[RawCall]]], i: int) -> float:
+        return _f(next(c for c in out[PERSONA][i] if c.tool_id == REFUND[0]).args["amount"])
 
     for families in (["novel_target"], ["benign_unusual"], []):
-        results = []
-        for rate in (0.0, 1.0):
-            cfg = _cfg(
-                attack_rate=0.2,
-                control_rate=0.3,
-                warmup_sessions=WARM,
-                families=families,
-                magnitude_topup_rate=rate,
-            )
-            counting, stats = _CountingRng(5), dict[str, int]()
-            res = inject(
-                sessions,
-                cfg,
-                np.random.default_rng(11),
-                factory,
-                topup_rng=_as_rng(counting),
-                stats=stats,
-            )
-            assert counting.draws == []
-            assert stats == {
+        for mode in ("far", "own"):
+            runs = []
+            for rate in (0.0, 1.0):
+                cfg = _cfg(
+                    attack_rate=0.2,
+                    control_rate=0.3,
+                    warmup_sessions=WARM,
+                    families=families,
+                    magnitude_mode=mode,
+                    magnitude_topup_rate=rate,
+                )
+                rng, counting, stats = np.random.default_rng(11), _CountingRng(5), dict[str, int]()
+                out, labels = inject(
+                    sessions, cfg, rng, factory, topup_rng=_as_rng(counting), stats=stats
+                )
+                runs.append((out, labels, stats, counting.draws, rng.bit_generator.state))
+            (out0, labels0, stats0, draws0, state0), (out1, labels1, stats1, draws1, state1) = runs
+            assert draws0 == [] and not any(_is_topup_id(lab.attack_id) for lab in labels0)
+            assert stats0 == {
                 "magnitude_first_pass": 0,
                 "magnitude_dropped": 0,
                 "magnitude_topup": 0,
             }
-            results.append(res)
-        assert results[0] == results[1]
+            touched = {index[lab.envelope_id] for lab in labels0}
+            if families == ["benign_unusual"]:
+                assert touched  # the controls took some sessions; the top-up must skip them
+            want = [
+                i
+                for i, a in enumerate(amounts)
+                if i >= WARM
+                and i not in touched
+                and a > 0
+                and (mode == "own" or a * M_MAX >= bound)
+            ]
+            assert len(want) >= 10
+            # one draw per usable untouched session, then the spike's two, on the top-up stream
+            assert draws1 == ["random", "integers", "uniform"] * len(want)
+            # the first pass is untouched: same labels first, same draws on the attack stream
+            assert labels1[: len(labels0)] == labels0 and state1 == state0
+            tops = labels1[len(labels0) :]
+            assert [index[lab.envelope_id] for lab in tops] == want
+            assert [lab.attack_id for lab in tops] == [
+                f"atk-{PERSONA}-m{k:05d}" for k in range(len(want))
+            ]
+            assert all(lab.attack_family == SPIKE_FAMILY and lab.label == "attack" for lab in tops)
+            assert stats1 == {**stats0, "magnitude_topup": len(want)}
+            for i in range(len(amounts)):
+                if i not in want:
+                    assert out1[PERSONA][i] == out0[PERSONA][i]
+                elif mode == "far":
+                    assert refund(out1, i) >= bound
+                else:
+                    assert 3.0 <= refund(out1, i) / amounts[i] <= 100.0 + 1e-9
+
+
+def test_topup_fails_loudly_when_a_usable_session_gets_no_spike(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A usable candidate guarantees the spike lands; if it ever did not, the pass must say where,
+    # not drop the top-up silently (and not depend on ``assert``, which ``python -O`` strips).
+    monkeypatch.setattr(attacks_mod, "magnitude_spike", lambda session, rng, ctx: None)
+    sessions = {PERSONA: refund_sessions(world, [100.0] * (WARM + 3))}
+
+    def factory(agent: str, aid: str, ps: object, idx: int) -> AttackContext:
+        return replace(far_ctx(world, None), attack_id=aid)
+
+    cfg = _cfg(
+        attack_rate=0.0, warmup_sessions=WARM, families=[SPIKE_FAMILY], magnitude_topup_rate=1.0
+    )
+    with pytest.raises(RuntimeError, match=rf"{PERSONA} session {WARM}\b.*atk-{PERSONA}-m00000"):
+        inject(
+            sessions, cfg, np.random.default_rng(11), factory, topup_rng=np.random.default_rng(5)
+        )
 
 
 def test_topup_spikes_only_what_the_first_pass_could_spike(world: World) -> None:
