@@ -7,12 +7,13 @@ import math
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import orjson
 import pytest
 
 from agentfw.bench.ci_regress import CI_DATASET
 from agentfw.bench.dataset import load_dir
-from agentfw.bench.metrics import compute_all, per_agent_fpr_at_recall, splice_report
+from agentfw.bench.metrics import compute_all, per_agent_fpr_at_recall, precision_at, splice_report
 from agentfw.bench.registry import make_detector
 from agentfw.bench.replay import (
     ScoreRow,
@@ -26,6 +27,9 @@ from agentfw.bench.session_metrics import (
     decision_control_fpr,
     decision_flagged,
     decision_recall_by_family,
+    first_flag_halts,
+    halt_metrics,
+    halt_sensitivity,
     length_matched,
     matched_pairs,
     session_auroc,
@@ -33,6 +37,7 @@ from agentfw.bench.session_metrics import (
     session_scores,
     vital_false_flag_rate,
 )
+from agentfw.core.config import EngineConfig
 from agentfw.synth.attacks import RUNAWAY_FAMILIES
 from agentfw.synth.generate import generate
 
@@ -362,3 +367,143 @@ def test_splice_is_reported_at_splice_free_thresholds(tmp_path: Path) -> None:
         and r.fused_score >= pa.thresholds.get(r.agent_id, math.inf)
     }
     assert splice_report(rows, warm_only=False).attack.n_detected == len(hit)
+
+
+# -- Task 3.3: halt metrics, the sensitivity curve, the first-flag baseline (F7) -----------------
+
+
+def _halt_rows() -> list[ScoreRow]:
+    """Handmade sessions (density, flags) for the halt metrics; see the test for the numbers."""
+
+    def b(sess: str, d: float, flags: str = "", **kw: Any) -> ScoreRow:
+        return _row(sess, density=d, flags=flags, **kw)
+
+    def a(sess: str, fam: str, d: float, flags: str = "") -> ScoreRow:
+        return _atk(sess, fam, density=d, flags=flags)
+
+    return [
+        b("b1", 0.0), b("b1", 1 / 6), b("b1", 0.5, "LOOP"),  # flags, never halts at 0.6
+        b("b2", 0.0), b("b2", 4 / 6, "LOOP"),  # a false halt
+        b("b3", 0.0), b("b3", 0.0), b("b3", 0.0),
+        b("b4", 0.2, "NOVEL_READ,VELOCITY_BURST", control_type="benign_unusual"),
+        b("b5", 0.0, "NOVEL_READ,PROVISIONAL"),  # non-severe flags only
+        b("r1", 0.0), a("r1", "loop", 1 / 6), a("r1", "loop", 0.5, "LOOP"),
+        a("r1", "loop", 4 / 6, "LOOP"),  # halts 2 calls after its onset (row 1)
+        a("r2", "stall", 1 / 6, "STALL"), a("r2", "stall", 2 / 6), a("r2", "stall", 0.4),
+        b("a1", 0.7), a("a1", "magnitude_spike", 0.8, "BLOCK"),  # halts before its onset
+        a("a2", "novel_target", 0.1),
+    ]  # fmt: skip
+
+
+def test_halt_metrics_on_handmade_rows() -> None:
+    rows = _halt_rows()
+    m = halt_metrics(rows, 0.6)
+    assert m.false_halt_rate == pytest.approx(1 / 5)  # b2 of b1..b5
+    assert m.recall_by_label == {"runaway": 0.5, "attacked": 0.5}  # r1 of r1, r2; a1 of a1, a2
+    assert m.median_calls_from_onset == 2.0  # r1 only: a1 halted before its onset
+    assert m.precision_at_base_rate == pytest.approx(precision_at(2 / 4, 1 / 5, 0.015))
+    assert halt_metrics(rows, 0.6, base_rate=0.5).precision_at_base_rate == pytest.approx(
+        precision_at(2 / 4, 1 / 5, 0.5)
+    )
+    # a halt is the first density >= theta (inclusive), so theta = 4/6 still halts r1 and b2
+    assert halt_metrics(rows, 4 / 6) == m
+    low = halt_metrics(rows, 0.5)
+    assert low.false_halt_rate == pytest.approx(2 / 5)
+    assert low.recall_by_label == {"runaway": 0.5, "attacked": 0.5}
+    assert low.median_calls_from_onset == 1.0  # r1 now halts on row 2
+    # Shuffled rows give the same numbers (sessions are ordered by timestamp).
+    assert halt_metrics(list(reversed(rows)), 0.6) == m
+    empty = halt_metrics([], 0.6)
+    assert math.isnan(empty.false_halt_rate) and math.isnan(empty.median_calls_from_onset)
+    assert all(math.isnan(v) for v in empty.recall_by_label.values())
+    assert math.isnan(empty.precision_at_base_rate)
+
+
+def test_halt_metrics_need_the_density_column() -> None:
+    rows = [_row("b1"), _atk("r1", "loop")]  # density None: the session gate was shut
+    with pytest.raises(ValueError, match="density"):
+        halt_metrics(rows, 0.6)
+    with pytest.raises(ValueError, match="density"):
+        halt_sensitivity(rows)
+
+
+def _random_rows(seed: int) -> list[ScoreRow]:
+    rng = np.random.default_rng(seed)
+    rows: list[ScoreRow] = []
+    for s in range(120):
+        fam = ["benign", "loop", "magnitude_spike"][int(rng.integers(3))]
+        for _ in range(int(rng.integers(1, 15))):
+            d = int(rng.integers(0, 7)) / 6
+            if fam == "benign" or rng.random() < 0.3:
+                rows.append(_row(f"s{seed}-{s}", density=d))
+            else:
+                rows.append(_atk(f"s{seed}-{s}", fam, density=d))
+    return rows
+
+
+@pytest.mark.parametrize("seed", range(5))
+def test_sensitivity_curve_is_monotone_non_increasing_in_false_halts(seed: int) -> None:
+    rows = _random_rows(seed)
+    curve = halt_sensitivity(rows)
+    thetas = [t for t, _, _ in curve]
+    assert thetas == [round(0.2 + 0.05 * i, 10) for i in range(13)]  # 0.2 .. 0.8, exact grid
+    assert 0.5 in thetas and 0.6 in thetas
+    fh = [f for _, f, _ in curve]
+    rec = [r for _, _, r in curve]
+    assert all(x >= y for x, y in itertools.pairwise(fh))
+    assert all(x >= y for x, y in itertools.pairwise(rec))
+    assert fh[0] > fh[-1]  # the curve is exercised
+    for t, f, r in curve:
+        m = halt_metrics(rows, t)
+        assert (f, r) == (m.false_halt_rate, m.recall_by_label["runaway"])
+
+
+def test_first_flag_baseline_halts_earlier_and_more() -> None:
+    rows = _halt_rows()
+    density = halt_metrics(rows, 0.6)
+    first = first_flag_halts(rows)
+    # b1, b2 (LOOP) halt; b4's VELOCITY_BURST is severe; b3 and b5 (non-severe flags) do not
+    assert first.false_halt_rate == pytest.approx(3 / 5)
+    assert first.recall_by_label == {"runaway": 1.0, "attacked": 0.5}
+    assert first.median_calls_from_onset == 0.0  # r1: 1, r2: 0, a1: 0
+    assert first.false_halt_rate > density.false_halt_rate
+    assert first.median_calls_from_onset < density.median_calls_from_onset
+    for lab, rec in density.recall_by_label.items():
+        assert first.recall_by_label[lab] >= rec
+
+
+def test_offline_halts_match_the_engine_verdicts(tmp_path: Path) -> None:
+    """Halt metrics recompute the engine's sticky halt exactly from the density column."""
+    cfg = CI_DATASET.model_copy(
+        update={"families": [*CI_DATASET.families, *sorted(RUNAWAY_FAMILIES)], "attack_rate": 0.5}
+    )
+    generate(cfg, tmp_path)
+    raws, labels, _ = load_dir(tmp_path)
+    det = make_detector("engine-vital", cfg=EngineConfig(sessions=True, theta_halt=0.5))
+    rows = replay(raws, labels, det, SplitSpec())
+    by_session: dict[str, list[ScoreRow]] = {}
+    for r in rows:
+        by_session.setdefault(r.session_id, []).append(r)
+    n_halted = 0
+    for sess in by_session.values():
+        engine_halt = next(
+            (i for i, r in enumerate(sess) if r.session_verdict == "halt_session"), None
+        )
+        offline = next(
+            (i for i, r in enumerate(sess) if r.density is not None and r.density >= 0.5), None
+        )
+        assert engine_halt == offline
+        if engine_halt is not None:  # sticky from there on
+            assert all(r.session_verdict == "halt_session" for r in sess[engine_halt:])
+            n_halted += 1
+    assert n_halted > 0
+    labels_of = session_labels(rows)
+    halted = {
+        s
+        for s, sess in by_session.items()
+        if any(r.session_verdict == "halt_session" for r in sess)
+    }
+    benign = [s for s, lab in labels_of.items() if lab == "benign"]
+    assert halt_metrics(rows, 0.5).false_halt_rate == pytest.approx(
+        sum(s in halted for s in benign) / len(benign)
+    )

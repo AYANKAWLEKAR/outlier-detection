@@ -52,15 +52,16 @@ detector's kind records (write kind, item counts) and never writes, so ``score``
 Session flags (F7 substrate, Task 2.1): ``score`` also derives the call's flags
 (``core.trajectory.flags``) into ``TrajectoryInfo.flags`` and caches them with the fused score.
 Everything else about sessions sits behind one gate, ``Engine._book`` (T-34, ruling R15): a
-``SessionBook`` when ``sessions`` or ``provisional`` -- any feature that needs session records --
-is on, else None (no ``sess:`` record is ever written, ``density`` is None and the session
-settings are not validated). With it, ``score`` reads the session's flag window into
-``TrajectoryInfo.density`` (T-09; pure, ``SessionBook.peek``), and ``update`` first records the
-call's flags in that window -- for **every** outcome, before the early return above, since a
-blocked call is still a step of the session -- with the cached flags when they are ``e``'s, else
-a fresh pure evaluation computed before anything moves (its fused score and threshold then serve
-step 1). Session records are never read by a detector, so scores, decisions and every other
-record are the same with and without the gate.
+``SessionBook`` when ``sessions``, ``provisional`` or ``session_enforce`` -- any feature that
+needs session records -- is on, else None (no ``sess:`` record is ever written, ``density`` is
+None and the session settings are not validated). With it, ``score`` reads the session's flag
+window into ``TrajectoryInfo.density`` (T-09; pure, ``SessionBook.peek``), and ``update`` first
+records the call's flags in that window -- for **every** outcome, before the early return
+above, since a blocked call is still a step of the session -- with the cached flags when they
+are ``e``'s, else a fresh pure evaluation computed before anything moves (its fused score and
+threshold then serve step 1). Session records are never read by a detector, so scores,
+decisions and every other record are the same with and without the gate -- except the decisions
+``session_enforce`` makes.
 
 Provisional flags (F6, Task 2.2; ``core.trajectory.provisional``): with ``provisional``, ``decide``
 allows a reversible call the band would block, with flag ``PROVISIONAL``, and irreversibility
@@ -85,6 +86,17 @@ only, so ``score`` stays pure -- and the injected ``judge`` (``Engine(judge=...)
 may break a tie inside the approval band, shown the envelope and the result's reasons only. A
 re-score that confirms a gate escalation blocks again. ``update`` on an envelope it did not just
 score evaluates it afresh, so the escalation (and the judge) runs again there.
+
+Session verdicts (F7, Task 3.3; ``core.trajectory.session``, T-43): behind the session gate,
+``_evaluate`` runs, in order: ``decide``; the call's flags from that decision; the provisional
+step on a copy; the density including this call; the verdict (``ladder``: ``HALT`` also when the
+session was halted before this call) and the session's fused mass; last, the session overlay
+(``session_overlay``) on the halted state read *before* this call -- with ``session_enforce`` a
+call of an already halted session is ``BLOCK``ed and its reasons start with ``HALT_REASON``. The
+flags, density and verdict never see the overlay. ``update`` records the same flags and stores
+the same verdict (sticky ``halted``) and mass (``SessionBook.record``), so what ``score`` reports
+is what the record holds; ``release_session`` clears a halt. The mass is reported, never
+thresholded.
 """
 
 from __future__ import annotations
@@ -121,7 +133,7 @@ from agentfw.core.priors import PooledPriors
 from agentfw.core.schema_infer import TypeInference, TypeView
 from agentfw.core.state import DictStore, StateStore
 from agentfw.core.trajectory import provisional
-from agentfw.core.trajectory.decide import decide
+from agentfw.core.trajectory.decide import HALT_REASON, decide, session_overlay
 from agentfw.core.trajectory.escalate import Judge
 from agentfw.core.trajectory.flags import Flag, derive_flags
 from agentfw.core.trajectory.session import SessionBook, SessionRecord
@@ -234,7 +246,7 @@ class Engine:
         # The one session gate (T-34, ruling R15): ``_book`` is None exactly when no feature needs
         # session records; recording (``update``) and density (``_evaluate``) both test it. A later
         # feature that needs the window ORs its switch into this expression.
-        sessions_on = cfg.sessions or cfg.provisional
+        sessions_on = cfg.sessions or cfg.provisional or cfg.session_enforce
         self._book: SessionBook | None = SessionBook(self.store, cfg) if sessions_on else None
         # (envelope_id, fused, threshold, trajectory, scores) of the last score
         self._cache: _Scored | None = None
@@ -281,7 +293,7 @@ class Engine:
             if self.cfg.provisional:
                 rec = book.ensure(e.session_id)
                 flags = self._advance(rec, e, fused, traj, per, outcome)
-            book.record(e, flags)
+            book.record(e, flags, fused)
             book.maybe_evict(e.ts_unix_ms)
         censor = self.cfg.cal_censor
         if censor != "none" and self.calibrator.n_scored(e.agent_id) < self.cfg.cal_censor_min_n:
@@ -318,6 +330,13 @@ class Engine:
     def state_bytes(self) -> int:
         return self.store.nbytes()
 
+    def release_session(self, session_id: str) -> None:
+        """Release a halted session (F7, a human's or a policy's call): clear its halt, its
+        verdict and its flag window (``SessionBook.release``). No-op while the session gate is
+        shut or for a session without a record."""
+        if self._book is not None:
+            self._book.release(session_id)
+
     # -- internals ------------------------------------------------------------------------------
 
     def _evaluate(
@@ -325,8 +344,9 @@ class Engine:
     ) -> tuple[
         _CallTypes, tuple[DetectorScore, ...], FusionResult, float, TrajectoryInfo, Decision
     ]:
-        """Pure: types, scores, fusion, the agent's θ, the trajectory (flags and density
-        included) and the decision (``core.trajectory.decide``)."""
+        """Pure: types, scores, fusion, the agent's θ, the trajectory (flags, density, session
+        verdict and mass included) and the decision (``core.trajectory.decide``, then the
+        session overlay, whose reason leads ``FusionResult.reasons`` when it blocks)."""
         view = self._view(e)
         per, fr = self._fuse(e, view)
         theta = self.calibrator.threshold(e.agent_id)
@@ -346,15 +366,25 @@ class Engine:
         hint = self.hints.get(e.tool_id)
         flags = traj.flags | derive_flags(per, decision, traj.irreversible, hint, self.cfg)
         book = self._book
-        density = None
-        if book is not None:
-            rec = book.peek(e.session_id)
-            if self.cfg.provisional:  # the lifecycle step on a copy: the stored record stays
-                scratch = SessionRecord() if rec is None else rec.copy()
-                theta_eff = traj.threshold_eff
-                flags |= provisional.advance(scratch, e, fr.fused, theta_eff, per, self.cfg)
-            density = book.density_with(rec, flags)
-        traj = dataclasses.replace(traj, flags=frozenset(flags), density=density)
+        if book is None:
+            traj = dataclasses.replace(traj, flags=frozenset(flags))
+            return view, per, fr, theta, traj, decision
+        rec = book.peek(e.session_id)
+        if self.cfg.provisional:  # the lifecycle step on a copy: the stored record stays
+            scratch = SessionRecord() if rec is None else rec.copy()
+            theta_eff = traj.threshold_eff
+            flags |= provisional.advance(scratch, e, fr.fused, theta_eff, per, self.cfg)
+        traj = dataclasses.replace(
+            traj,
+            flags=frozenset(flags),
+            density=book.density_with(rec, flags),
+            session_verdict=book.verdict_with(rec, flags),
+            session_mass=book.mass_with(rec, fr.fused),
+        )
+        halted = rec is not None and rec.halted  # before this call (T-43)
+        decision, traj = session_overlay(decision, traj, halted, self.cfg)
+        if self.cfg.session_enforce and halted:
+            fr = FusionResult(fr.fused, (HALT_REASON, *fr.reasons))
         return view, per, fr, theta, traj, decision
 
     def _rescore(self, e: ActionEnvelope) -> float:

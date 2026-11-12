@@ -142,6 +142,14 @@ ESCALATION_DEFAULTS: dict[str, object] = {
     "judge_allow": 0.2,
 }
 
+# Task 3.3 session verdicts (feature spec F7; T-43). ``session_enforce`` also opens the session
+# gate (T-34).
+SESSION_VERDICT_DEFAULTS: dict[str, object] = {
+    "theta_warn": 0.33,
+    "theta_halt": 0.6,
+    "session_enforce": False,
+}
+
 
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
@@ -158,6 +166,7 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | AGE_DEFAULTS
         | PREEXEC_GATE_DEFAULTS
         | ESCALATION_DEFAULTS
+        | SESSION_VERDICT_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
 

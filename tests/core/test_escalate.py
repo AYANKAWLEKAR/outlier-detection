@@ -337,7 +337,7 @@ def test_judge_thresholds_validated_only_when_on() -> None:
 
 
 def test_score_row_escalated_round_trips(tmp_path: Path) -> None:
-    """``replay`` copies ``TrajectoryInfo.escalated`` into the score table (last column)."""
+    """``replay`` copies ``TrajectoryInfo.escalated`` into the score table."""
     clock = Clock()
     raws = [*history(clock, 40), *spike(clock)]
     rows = replay(raws, {}, Engine(ESC, hints=HINTS), SplitSpec())
@@ -347,7 +347,7 @@ def test_score_row_escalated_round_trips(tmp_path: Path) -> None:
     write_score_table(rows, p)
     assert read_score_table(p) == rows
     names = [f.name for f in dataclasses.fields(ScoreRow)]
-    assert names[-1] == "escalated" and ScoreRow.__dataclass_fields__["escalated"].default is False
+    assert "escalated" in names and ScoreRow.__dataclass_fields__["escalated"].default is False
 
 
 # -- CI dataset -------------------------------------------------------------------------------

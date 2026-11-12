@@ -27,6 +27,17 @@ Task 3.4: bands on θ_eff -> gate -> escalation -> provisional -> ceiling -> ses
    ``ProvEntry`` in ``update`` (``core.trajectory.provisional``). ``REQUIRE_APPROVAL`` is left as
    it is. Escalation touches irreversible calls only, so the two never meet.
 
+5. *(Task 3.4: the authority ceiling.)*
+6. **Session overlay** (F7, ``session_enforce``; ``session_overlay``, T-43): a call whose session
+   was already halted *before* it (``SessionRecord.halted``) is ``BLOCK``ed, and is no longer
+   ``PROVISIONAL`` (a blocked call opens no entry); the engine adds ``HALT_REASON``. It is the
+   last stage and the engine applies it to what ``decide`` returns, once it has derived the
+   call's flags and density from that decision: the flag window counts the call's own evidence,
+   never the session block (no ``BLOCK`` flag from the overlay), so given the same outcomes the
+   densities, verdicts and halt metrics recomputed from them are the same with
+   ``session_enforce`` on and off. Off (or not halted): unchanged; the verdict is then
+   reported only (shadow).
+
 Pure: reads its arguments (and, through the gate and the re-score, the store) only. The
 returned ``TrajectoryInfo`` carries the flags this pipeline raised; the engine adds the derived
 and lifecycle flags after it.
@@ -46,7 +57,18 @@ from agentfw.core.trajectory.escalate import Judge, escalate
 from agentfw.core.trajectory.flags import Flag
 from agentfw.core.trajectory.gate import gate
 
-__all__ = ["band", "decide"]
+__all__ = ["HALT_REASON", "band", "decide", "session_overlay"]
+
+#: The reason of a call blocked by the session overlay (stage 6): no field, no raw id.
+HALT_REASON = Reason(
+    detector="session",
+    field=None,
+    observed="halt_session",
+    baseline_summary=None,
+    percentile=None,
+    blast_radius=None,
+    prereq_missing=None,
+)
 
 #: Decisions that make an irreversible call a candidate for escalation (F5).
 _CANDIDATES = frozenset({Decision.BLOCK, Decision.REQUIRE_APPROVAL})
@@ -122,5 +144,15 @@ def decide(
     if cfg.provisional and decision is Decision.BLOCK and not traj.irreversible:
         decision = Decision.ALLOW
         traj = dataclasses.replace(traj, flags=traj.flags | {Flag.PROVISIONAL})
-    # -- ceiling (Task 3.4), session overlay (Task 3.3) --
+    # -- ceiling (Task 3.4); the session overlay follows in the engine (session_overlay) --
     return decision, traj
+
+
+def session_overlay(
+    decision: Decision, traj: TrajectoryInfo, halted: bool, cfg: EngineConfig
+) -> tuple[Decision, TrajectoryInfo]:
+    """Stage 6 (module docstring): ``BLOCK`` without ``PROVISIONAL`` when ``session_enforce`` is
+    on and the session was ``halted`` before this call; otherwise unchanged."""
+    if not (cfg.session_enforce and halted):
+        return decision, traj
+    return Decision.BLOCK, dataclasses.replace(traj, flags=traj.flags - {Flag.PROVISIONAL})

@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from agentfw.core.sketch.bloom import BloomFilter
     from agentfw.core.trajectory.flags import Flag
     from agentfw.core.trajectory.gate import GateOutcome
+    from agentfw.core.trajectory.session import SessionVerdict
 
 __all__ = [
     "ActionEnvelope",
@@ -271,6 +272,11 @@ class TrajectoryInfo:
     escalated: bool = False
     fast_score: float | None = None
     escalated_score: float | None = None
+    #: Session verdict (F7, Task 3.3, T-43) of this call on ``density`` (sticky ``HALT``) and the
+    #: session's fused mass including this call -- the aggregate, reported and never
+    #: thresholded. Both ``None`` while the session gate is shut (like ``density``).
+    session_verdict: SessionVerdict | None = None
+    session_mass: float | None = None
 
 
 @dataclass(slots=True, frozen=True)

@@ -213,7 +213,9 @@ def test_sessions_never_move_scores_decisions_or_other_state() -> None:
 
     def strip(r: DetectorResult) -> DetectorResult:
         assert r.trajectory is not None
-        traj = dataclasses.replace(r.trajectory, density=None)
+        traj = dataclasses.replace(
+            r.trajectory, density=None, session_verdict=None, session_mass=None
+        )
         return dataclasses.replace(r, latency_us=0.0, trajectory=traj)
 
     assert [repr(strip(r)) for r in r_off] == [repr(strip(r)) for r in r_on]
@@ -374,4 +376,4 @@ def test_replay_fills_flags_and_density_and_round_trips(tmp_path: Path) -> None:
 
 def test_score_row_defaults() -> None:
     names = [f.name for f in dataclasses.fields(ScoreRow)]
-    assert names[-4:] == ["flags", "density", "session_label", "escalated"]
+    assert names[-5:] == ["flags", "density", "session_label", "escalated", "session_verdict"]

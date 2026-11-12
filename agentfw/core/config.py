@@ -147,6 +147,14 @@ class EngineConfig:
     sess_idle_ms: int = 1_800_000
     sess_sweep_every: int = 4096
     prov_unresolved_weight: float = 0.125
+    # Session verdicts (F7, Task 3.3; core.trajectory.session; T-43). Behind the session gate,
+    # every call gets a verdict on the density including it: >= ``theta_halt`` -> halt (sticky
+    # until ``Engine.release_session``), >= ``theta_warn`` -> warn, else ok; shadow only (reported,
+    # recorded) unless ``session_enforce`` (it also opens the session gate, T-34), which blocks
+    # every call of a session already halted before it.
+    theta_warn: float = 0.33
+    theta_halt: float = 0.6
+    session_enforce: bool = False
     # Provisional flags (F6, Task 2.2; core.trajectory.provisional). With ``provisional`` (it also
     # opens the session gate, T-34) a reversible call the bands would block is allowed with flag
     # ``PROVISIONAL`` and stays open for ``prov_ttl`` later calls of its session: consumed

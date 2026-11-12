@@ -132,6 +132,9 @@ class ScoreRow:
     # The escalation stage ran on this call (F5, Task 3.2: ``TrajectoryInfo.escalated``, T-42);
     # False when unscored or the detector has no trajectory.
     escalated: bool = False
+    # The call's session verdict (F7, Task 3.3: ``TrajectoryInfo.session_verdict`` -- ok /
+    # warn_session / halt_session, T-43); None when unscored or the session gate is shut.
+    session_verdict: str | None = None
 
 
 def _order(r: RawCall) -> tuple[int, str, int]:
@@ -226,6 +229,7 @@ def replay(
         flags = ""
         density: float | None = None
         escalated = False
+        session_verdict: str | None = None
         outcome = Outcome.ALLOWED
         flagged = False
         if scored:
@@ -244,6 +248,8 @@ def replay(
                 flags = ",".join(sorted(f.name for f in res.trajectory.flags))
                 density = res.trajectory.density
                 escalated = res.trajectory.escalated
+                verdict = res.trajectory.session_verdict
+                session_verdict = None if verdict is None else verdict.value
             if outcomes == "enforce" and res.decision is Decision.BLOCK:
                 outcome = Outcome.BLOCKED
         lab = labels.get(env.envelope_id)
@@ -277,6 +283,7 @@ def replay(
                 flags=flags,
                 density=density,
                 escalated=escalated,
+                session_verdict=session_verdict,
             )
         )
         detector.update(env, outcome)
