@@ -47,6 +47,7 @@ __all__ = [
     "gate_matrix",
     "load_gate_json",
     "main",
+    "preview_from_json",
     "render_gate_matrix",
 ]
 
@@ -250,7 +251,9 @@ def _cell_from(d: dict[str, Any]) -> GateCell:
     )
 
 
-def _preview_from(d: dict[str, Any]) -> GatePreview:
+def preview_from_json(d: dict[str, Any]) -> GatePreview:
+    """One ``GatePreview`` as orjson wrote it (a ``--json`` protocol entry, or a ``report.json``
+    ``gate`` section): ``null`` floats come back as ``float("nan")``, lists as tuples."""
     return GatePreview(
         cells={fam: _cell_from(c) for fam, c in d["cells"].items()},
         benign_fpr=_float(d["benign_fpr"]),
@@ -269,7 +272,7 @@ def _rows_from(d: dict[str, dict[str, Any]]) -> _Rows:
         for mode, g in by_mode.items():
             if not is_outcome_mode(mode):
                 raise ValueError(f"row {name!r}: unknown replay protocol {mode!r}")
-            row[mode] = _preview_from(g)
+            row[mode] = preview_from_json(g)
         out[name] = row
     return out
 

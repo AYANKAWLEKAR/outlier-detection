@@ -394,3 +394,15 @@ def test_load_gate_json_refuses_an_unknown_protocol(
     bad.write_bytes(orjson.dumps(payload))
     with pytest.raises(ValueError, match="unknown replay protocol 'bogus'"):
         load_gate_json(bad)
+
+
+# --- final review: a public reader of one written gate (ruling A1-25) ---------------------------
+
+
+def test_preview_from_json_is_public_and_reads_a_written_gate(
+    matrix: dict[OutcomeMode, GatePreview],
+) -> None:
+    assert "preview_from_json" in gate_mod.__all__
+    assert not hasattr(gate_mod, "_preview_from")  # one name for the one reader
+    for g in matrix.values():
+        _assert_same(gate_mod.preview_from_json(orjson.loads(_dump(g))), g)

@@ -26,8 +26,7 @@ from typing import Any
 import orjson
 from pydantic import BaseModel
 
-from agentfw.bench.gate import ENGINE_ROW, PRE_A1_ROW, render_gate_matrix
-from agentfw.bench.gate import _preview_from as _gate_from_json
+from agentfw.bench.gate import ENGINE_ROW, PRE_A1_ROW, preview_from_json, render_gate_matrix
 from agentfw.bench.metrics import GatePreview
 from agentfw.bench.replay import PROTOCOL_LABELS, OutcomeMode, protocol_label
 
@@ -290,7 +289,7 @@ def _gate_rows(
                 )
             cfgs.append((meta.get("detector_config") or {}).get("cfg"))
             seen.add((str(sha), str(split)))
-            by_mode[mode] = _gate_from_json(dict(gate))
+            by_mode[mode] = preview_from_json(dict(gate))
         if cfgs[0] != cfgs[1]:
             raise ValueError(
                 f"{what}: runs {runs[0]!r} and {runs[1]!r} replayed different engine "
