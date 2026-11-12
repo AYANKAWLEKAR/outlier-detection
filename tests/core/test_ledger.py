@@ -146,3 +146,17 @@ def test_rawcall_task_ids_default_is_omitted_and_round_trips() -> None:
     assert RawCall.model_validate_json(raw.model_dump_json()).task_ids == ()
     with pytest.raises(ValueError):
         make_raw(task_ids=tuple(f"ch_{i:010d}" for i in range(65)))
+
+
+def test_record_returns_the_number_of_new_artifacts() -> None:
+    led = ArtifactLedger(max_entries=2)
+    led.seed_task(["tk_aaaaaaaa00"])  # seeds are not any call's artifacts
+    first = make_env(
+        make_raw(
+            seq_no=0, args={"a": CH, "t": "tk_aaaaaaaa00"}, response_meta=ResponseMeta(ids=(RE,))
+        )
+    )
+    assert led.record(first) == 2  # CH (args) fills the exact table; RE overflows to the Bloom
+    assert led.record(make_env(make_raw(seq_no=1, args={"a": CH, "b": RE}))) == 0
+    third = make_env(make_raw(seq_no=2, response_meta=ResponseMeta(ids=("re_cccccccc33", RE))))
+    assert led.record(third) == 1

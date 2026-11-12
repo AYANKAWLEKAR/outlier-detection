@@ -58,12 +58,13 @@ class ArtifactLedger:
     def __len__(self) -> int:
         return len(self._entries)
 
-    def _first_sighting(self, v: str, seq: int, tool: str | None, source: str) -> None:
+    def _first_sighting(self, v: str, seq: int, tool: str | None, source: str) -> bool:
+        """Record ``v``'s first sighting; True when it was new (exact entry or Bloom add)."""
         if v in self:
-            return
+            return False
         if len(self._entries) < self.max_entries:
             self._entries[v] = LedgerEntry(seq, tool, source)
-            return
+            return True
         if self._bloom is None:
             self._bloom = BloomFilter(capacity=8 * self.max_entries)
             self.degraded = True
@@ -74,13 +75,19 @@ class ArtifactLedger:
                 self.max_entries,
             )
         self._bloom.add(v)
+        return True
 
     def seed_task(self, ids: Iterable[str]) -> None:
         for v in ids:
             self._first_sighting(v, 0, None, "task_input")
 
-    def record(self, e: ActionEnvelope) -> None:
-        """Record one call: arg ids are consumed (or first-seen), response ids first-seen."""
+    def record(self, e: ActionEnvelope) -> int:
+        """Record one call: arg ids are consumed (or first-seen), response ids first-seen.
+
+        Returns how many new artifacts the call created (first sightings, Bloom ones included;
+        task-input seeds are not the call's).
+        """
+        created = 0
         used: set[str] = set()
         for path in sorted(e.flat_args):
             for v in e.flat_args[path]:
@@ -91,10 +98,11 @@ class ArtifactLedger:
                 if entry is not None:
                     entry.consumers.append(e.seq_no)
                 else:
-                    self._first_sighting(v, e.seq_no, e.tool_id, "args")
+                    created += self._first_sighting(v, e.seq_no, e.tool_id, "args")
         if e.response_meta is not None:
             for v in e.response_meta.ids:
-                self._first_sighting(v, e.seq_no, e.tool_id, "response")
+                created += self._first_sighting(v, e.seq_no, e.tool_id, "response")
+        return created
 
     def refs_for(
         self, flat_args: dict[str, tuple[Any, ...]] | Any, task_ids: Iterable[str] = ()

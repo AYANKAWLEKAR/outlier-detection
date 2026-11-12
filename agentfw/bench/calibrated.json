@@ -10,7 +10,8 @@
     "2026-11-11 initial stamp: tiers 0-2 constants",
     "2026-11-11 rebase onto feat/tiers-0-2 a6d5f51: detectors/base.py changed by 94501da (A1.2 magnitude log-scale tail, behind mag_score); no calibrated constant depends on it",
     "2026-11-11 ledger_refs/task_ids added to envelope+normalizer (Task 1.1); additive, no calibrated constant reads them",
-    "2026-11-11 add fingerprint.py and ledger.py to NORMALIZER_FILES; no calibrated constant depends on either yet"
+    "2026-11-11 add fingerprint.py and ledger.py to NORMALIZER_FILES; no calibrated constant depends on either yet",
+    "2026-11-11 Task 1.5: normalize.py adds the recent-call ring (call_fp, recent, delta_i); ledger.py record() returns the new-artifact count; fingerprint.py call_fingerprint/arg_tokens accept ints beyond 64 bits and lone surrogates (unchanged for every value they accepted before); no calibrated constant depends on any of these"
   ],
-  "normalizer_hash": "7aef1f9ce6eefbe7efe06a3b3330d7f7c3356c24f9d75844b81404c1c13b25e6"
+  "normalizer_hash": "a6b3924267a0e220732c0efd3051f629b864e31d665970dd5a964321bb41461c"
 }

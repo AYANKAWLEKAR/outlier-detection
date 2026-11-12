@@ -6,10 +6,11 @@ import sys
 
 import orjson
 import pytest
+import xxhash
 from pydantic import ValidationError
 
 from agentfw.core import fingerprint as fpm
-from agentfw.core.envelope import ResponseMeta
+from agentfw.core.envelope import ResponseMeta, Scalar
 from agentfw.core.fingerprint import (
     MINHASH_K,
     arg_tokens,
@@ -103,3 +104,18 @@ def test_response_meta_fp_default_omitted_and_round_trips() -> None:
 def test_response_meta_fp_validator_rejects(bad: tuple[int, ...]) -> None:
     with pytest.raises(ValidationError):
         ResponseMeta(fp=bad)
+
+
+def test_call_fp_and_tokens_take_values_json_cannot_carry() -> None:
+    """Ints beyond 64 bits (and past the str-digit limit) and lone surrogates still fingerprint,
+    deterministically and distinctly; ordinary values keep their pre-existing fingerprints."""
+    odd: list[Scalar] = [10**5000, -(2**70), 2**64, "x\ud800y"]
+    fps = {call_fingerprint("t.x", {"a": (v,)}) for v in odd}
+    assert len(fps) == len(odd)
+    assert all(call_fingerprint("t.x", {"a": (v,)}) in fps for v in odd)
+    assert call_fingerprint("t.x", {"k\udc00": (1,)}) != call_fingerprint("t.x", {"k": (1,)})
+    assert all(len(arg_tokens({"a": (v,)})) == 1 for v in odd)
+    edge = 2**64 - 1  # still a JSON-able u64: unchanged rule
+    assert call_fingerprint("t.x", {"a": (edge,)}) == xxhash.xxh64_intdigest(
+        orjson.dumps(["t.x", [("a", [edge])]], option=orjson.OPT_SORT_KEYS)
+    )

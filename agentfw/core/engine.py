@@ -31,6 +31,12 @@ moves a baseline distribution). Otherwise, in order:
 
 Freetext never reaches state: the normalizer already replaced strings of ``freetext_min_len``+
 characters by a derived ``__strlen__`` length.
+
+Vital signs (F2, Task 1.5) are opt-in: ``enabled`` defaults to the v1 four (``ALL_DETECTORS``)
+and accepts ``"vital"`` too (``KNOWN_DETECTORS``). Vital scores are never fused (T-07): fusion
+runs over the v1 scores only, then the vital scores are appended to ``per_detector`` and their
+reasons (score > ``reason_min``, highest first) after the v1 reasons. So the fused score, the
+decision and every piece of state are the same with and without ``"vital"``.
 """
 
 from __future__ import annotations
@@ -47,6 +53,7 @@ from agentfw.core.detectors.magnitude import RESP_FIELD, MagnitudeDetector
 from agentfw.core.detectors.novelty import NoveltyDetector
 from agentfw.core.detectors.sequence import SequenceDetector
 from agentfw.core.detectors.velocity import VelocityDetector
+from agentfw.core.detectors.vital import VitalDetector
 from agentfw.core.envelope import (
     ActionEnvelope,
     DetectorResult,
@@ -61,10 +68,12 @@ from agentfw.core.priors import PooledPriors
 from agentfw.core.schema_infer import TypeInference, TypeView
 from agentfw.core.state import DictStore, StateStore
 
-__all__ = ["ALL_DETECTORS", "DETECTOR_ORDER", "Engine"]
+__all__ = ["ALL_DETECTORS", "DETECTOR_ORDER", "KNOWN_DETECTORS", "VITAL", "Engine"]
 
-DETECTOR_ORDER = ("magnitude", "novelty", "velocity", "sequence")
+DETECTOR_ORDER = ("magnitude", "novelty", "velocity", "sequence")  # the fused (v1) detectors
 ALL_DETECTORS = frozenset(DETECTOR_ORDER)
+VITAL = "vital"
+KNOWN_DETECTORS = ALL_DETECTORS | {VITAL}
 
 _LEARN = frozenset({Outcome.ALLOWED, Outcome.APPROVED})
 _CATEGORICAL = frozenset({FieldType.CATEGORICAL, FieldType.ID})
@@ -99,9 +108,10 @@ class Engine:
         enabled: frozenset[str] = ALL_DETECTORS,
         hints: Mapping[str, ToolHint] = _NO_HINTS,
     ) -> None:
-        unknown = set(enabled) - ALL_DETECTORS
+        unknown = set(enabled) - KNOWN_DETECTORS
         if unknown:
-            raise ValueError(f"unknown detectors {sorted(unknown)}; known: {DETECTOR_ORDER}")
+            known = (*DETECTOR_ORDER, VITAL)
+            raise ValueError(f"unknown detectors {sorted(unknown)}; known: {known}")
         if cfg.cal_censor not in CAL_CENSOR_MODES:
             raise ValueError(f"unknown cal_censor {cfg.cal_censor!r}; known: {CAL_CENSOR_MODES}")
         self.cfg = cfg
@@ -119,13 +129,18 @@ class Engine:
         numeric_ref = (
             magnitude.has_ref if "magnitude" in self.enabled and cfg.mag_bool_numeric else None
         )
+        sequence = SequenceDetector(self.store, cfg, hints)
         built: dict[str, SubDetector] = {
             "magnitude": magnitude,
             "novelty": NoveltyDetector(self.store, cfg, self.priors, numeric_ref),
             "velocity": VelocityDetector(self.store, cfg, hints),
-            "sequence": SequenceDetector(self.store, cfg, hints),
+            "sequence": sequence,
         }
         self._detectors = tuple(built[n] for n in DETECTOR_ORDER if n in self.enabled)
+        # Reported, never fused (T-07); stateless, so it has no update to run.
+        self._vital = (
+            VitalDetector(cfg, hints, sequence.is_write) if VITAL in self.enabled else None
+        )
         vel = built["velocity"]
         self._velocity = (
             vel if isinstance(vel, VelocityDetector) and "velocity" in self.enabled else None
@@ -209,7 +224,12 @@ class Engine:
         per: list[DetectorScore] = []
         for d in self._detectors:
             per.extend(d.score(e, view))
-        return tuple(per), fuse(per, self.cfg)
+        fr = fuse(per, self.cfg)
+        if self._vital is None:
+            return tuple(per), fr
+        vital = self._vital.score(e, view)
+        reasons = fr.reasons + fuse(vital, self.cfg).reasons  # vital reasons only, fused unused
+        return (*per, *vital), FusionResult(fr.fused, reasons)
 
     def _observe_priors(self, e: ActionEnvelope, view: _CallTypes) -> None:
         num, cat = self._feed_numeric_priors, self._feed_categorical_priors

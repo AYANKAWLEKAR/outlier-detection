@@ -11,7 +11,7 @@ from agentfw.bench.baselines.random_ import RandomDetector
 from agentfw.bench.baselines.static_threshold import StaticThreshold
 from agentfw.bench.protocol import Detector
 from agentfw.core.config import EngineConfig
-from agentfw.core.engine import ALL_DETECTORS, DETECTOR_ORDER, Engine
+from agentfw.core.engine import ALL_DETECTORS, DETECTOR_ORDER, KNOWN_DETECTORS, Engine
 
 __all__ = ["DETECTORS", "make_detector"]
 
@@ -39,6 +39,9 @@ DETECTORS: dict[str, Callable[..., Detector]] = {
     **{f"engine-no-{d}": _engine(ALL_DETECTORS - {d}) for d in DETECTOR_ORDER},
     **{f"engine-only-{d}": _engine(frozenset({d})) for d in DETECTOR_ORDER},
     "engine-no-priors": _engine(priors=False),
+    # v1 + the vital signs (F2). Vital scores are never fused (T-07), so this variant's fused
+    # scores equal "engine"'s; no engine-no-vital / engine-only-vital ablations.
+    "engine-vital": _engine(KNOWN_DETECTORS),
 }
 
 

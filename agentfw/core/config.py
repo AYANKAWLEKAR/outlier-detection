@@ -102,6 +102,20 @@ class EngineConfig:
     # Task 1.4 switch (T-04): "present" = a ledger ref on the envelope or a session_ids_seen hit,
     # so ids seeded from the task input count as flowing. False = v3 (session_ids_seen only).
     flow_ledger: bool = False
+    # Vital signs (F2, Task 1.5; opt-in through ``Engine(enabled=...)``, never fused: T-07).
+    # Loop: exact ``call_fp`` matches in the last ``vital_w_loop`` calls (``vital_w_loop_polling``
+    # for read-only + idempotent tools), retries of an errored call exempt up to ``vital_r_max``;
+    # an arg-token Jaccard >= ``vital_jaccard`` is a near-duplicate. Spin: ``vital_w_spin`` calls
+    # with ``delta_i < vital_spin_di``. Stall: ``vital_w_stall`` calls without a new artifact, or
+    # reads with ``delta_i < vital_stall_di``.
+    vital_w_loop: int = 8
+    vital_w_loop_polling: int = 32
+    vital_r_max: int = 3
+    vital_jaccard: float = 0.9
+    vital_w_spin: int = 4
+    vital_spin_di: float = 0.1
+    vital_w_stall: int = 6
+    vital_stall_di: float = 0.3
     # Fusion (§6.11)
     fusion_bonus: float = 0.15
     fusion_bonus_gate: float = 0.5

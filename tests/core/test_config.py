@@ -93,6 +93,18 @@ A1_DEFAULTS: dict[str, object] = {
 # Task 1.4 trajectory switches (T-03): off by default.
 TRAJECTORY_SWITCH_DEFAULTS: dict[str, object] = {"flow_ledger": False}
 
+# Task 1.5 vital-signs constants (feature spec F2; the detector itself is opt-in via ``enabled``).
+VITAL_DEFAULTS: dict[str, object] = {
+    "vital_w_loop": 8,
+    "vital_w_loop_polling": 32,
+    "vital_r_max": 3,
+    "vital_jaccard": 0.9,
+    "vital_w_spin": 4,
+    "vital_spin_di": 0.1,
+    "vital_w_stall": 6,
+    "vital_stall_di": 0.3,
+}
+
 
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
@@ -103,6 +115,7 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | USER_DECISION_DEFAULTS
         | A1_DEFAULTS
         | TRAJECTORY_SWITCH_DEFAULTS
+        | VITAL_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
 

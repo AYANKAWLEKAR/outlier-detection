@@ -36,6 +36,7 @@ __all__ = [
     "PrevResponse",
     "RawCall",
     "Reason",
+    "RecentCall",
     "ResponseMeta",
     "Scalar",
     "Verdict",
@@ -135,6 +136,25 @@ class PrevResponse:
 
 
 @dataclass(slots=True, frozen=True)
+class RecentCall:
+    """One completed call in a session's recent-call ring (vital signs, F2).
+
+    ``delta_i`` is the call's information gain, ``1 - max`` MinHash-Jaccard of its response
+    fingerprint against the earlier fingerprints in the ring (1.0 when there are none), or
+    ``None`` when the call had no fingerprint. ``new_artifacts`` counts the ledger entries the
+    call created.
+    """
+
+    seq_no: int
+    tool_id: str
+    call_fp: int
+    arg_tokens: frozenset[int]
+    error: bool
+    delta_i: float | None
+    new_artifacts: int
+
+
+@dataclass(slots=True, frozen=True)
 class IdSnapshot:
     exact: frozenset[str]
     bloom: BloomFilter | None
@@ -165,6 +185,11 @@ class ActionEnvelope:
     blast_radius: float | None = None
     ledger_refs: tuple[LedgerRef, ...] = ()
     task_ids: tuple[str, ...] = ()
+    # Vital signs (F2): this call's fingerprint, the session's completed calls before it (oldest
+    # first, at most 32) and this call's own information gain against them (see RecentCall).
+    call_fp: int = 0
+    recent: tuple[RecentCall, ...] = ()
+    delta_i: float | None = None
 
 
 class Label(BaseModel):

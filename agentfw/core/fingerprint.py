@@ -41,16 +41,46 @@ _A_OBJ = np.array(_A, dtype=object)
 _B_OBJ = np.array(_B, dtype=object)
 
 
+_INT_LO, _INT_HI = -(1 << 63), 1 << 64  # what orjson serializes
+
+
+def _safe(v: Scalar) -> Scalar:
+    """``v``, or ``"#int:<hex>"`` for an int beyond 64 bits (orjson refuses those and ``str``
+    refuses ints past the digit limit; hex has no limit). Every other value is unchanged."""
+    if isinstance(v, int) and not isinstance(v, bool) and not _INT_LO <= v < _INT_HI:
+        return f"#int:{v:x}"
+    return v
+
+
+def _utf8_safe(v: object) -> object:
+    """A string with lone surrogates (not UTF-8, so not JSON) as ``"#str:<hex of its bytes>"``."""
+    if isinstance(v, str):
+        try:
+            v.encode()
+        except UnicodeEncodeError:
+            return "#str:" + v.encode("utf-8", "surrogatepass").hex()
+    return v
+
+
 def call_fingerprint(tool_id: str, flat_args: Mapping[str, tuple[Scalar, ...]]) -> int:
-    """xxh64 of the sorted-key JSON of ``[tool_id, sorted(flat_args.items())]``; ids kept raw."""
-    payload = [tool_id, sorted((k, list(v)) for k, v in flat_args.items())]
-    return xxhash.xxh64_intdigest(orjson.dumps(payload, option=orjson.OPT_SORT_KEYS))
+    """xxh64 of the sorted-key JSON of ``[tool_id, sorted(flat_args.items())]``; ids kept raw.
+
+    Ints beyond 64 bits and strings with lone surrogates (which JSON cannot carry) are replaced
+    by tagged hex forms, so any flattened call has a fingerprint.
+    """
+    items = sorted((k, [_safe(x) for x in v]) for k, v in flat_args.items())
+    try:
+        raw = orjson.dumps([tool_id, items], option=orjson.OPT_SORT_KEYS)
+    except orjson.JSONEncodeError:  # lone surrogates somewhere: rare, so only then re-encode
+        safe = [(_utf8_safe(k), [_utf8_safe(x) for x in v]) for k, v in items]
+        raw = orjson.dumps([_utf8_safe(tool_id), safe], option=orjson.OPT_SORT_KEYS)
+    return xxhash.xxh64_intdigest(raw)
 
 
 def arg_tokens(flat_args: Mapping[str, tuple[Scalar, ...]]) -> frozenset[int]:
     """xxh32 of ``"path=value"`` for every flattened argument value."""
     return frozenset(
-        xxhash.xxh32_intdigest(f"{path}={value}".encode())
+        xxhash.xxh32_intdigest(f"{path}={_safe(value)}".encode("utf-8", "surrogatepass"))
         for path, vals in flat_args.items()
         for value in vals
     )
