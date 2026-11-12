@@ -69,6 +69,13 @@ of the session record, so its ``UNRESOLVED`` / ``OFF_TRACK`` flags and density a
 then records; ``update`` runs the same step on the stored record, opens the call's ``ProvEntry``
 when it was provisional and executed (outcome ``ALLOWED`` / ``APPROVED``; a call refused outside
 the engine opens none but keeps its flags in the window), and records the flags (T-36).
+
+Pre-execution gate (F4, Task 3.1; ``core.trajectory.gate``): with ``gate``, ``decide`` runs the
+gate on every irreversible call (irreversibility again from the blast radius whatever
+``br_mode``, T-35 / T-41) with the call's envelope, its pinned types and the sequence detector,
+which the gate reads at call time (no snapshot is kept; ``score`` stays pure). Its outcome is
+``TrajectoryInfo.gate``; a gate block is the only way the engine blocks with ``gate`` on, since
+an escalation is ``REQUIRE_APPROVAL`` and a reversible call is capped there (or provisional).
 """
 
 from __future__ import annotations
@@ -173,6 +180,8 @@ class Engine:
             raise ValueError(f"br_k must be in [0, 1], got {cfg.br_k}")
         if cfg.provisional:
             provisional.check_config(cfg)
+        if cfg.gate and not 0.0 <= cfg.gate_flow_rate <= 1.0:
+            raise ValueError(f"gate_flow_rate must be in [0, 1], got {cfg.gate_flow_rate}")
         self.cfg = cfg
         self.store: StateStore = DictStore() if store is None else store
         self.enabled = frozenset(enabled)
@@ -304,7 +313,8 @@ class Engine:
         view = self._view(e)
         per, fr = self._fuse(e, view)
         theta = self.calibrator.threshold(e.agent_id)
-        decision, traj = decide(fr.fused, self._trajectory(e, theta), self.cfg)
+        traj0 = self._trajectory(e, theta)
+        decision, traj = decide(fr.fused, traj0, self.cfg, e=e, types=view, seq=self._sequence)
         hint = self.hints.get(e.tool_id)
         flags = traj.flags | derive_flags(per, decision, traj.irreversible, hint, self.cfg)
         book = self._book
@@ -352,12 +362,12 @@ class Engine:
         hint = self.hints.get(tool)
         has_schema = hint is not None and hint.has_schema
         regime = regime_of(has_schema, seq.n_tool(agent, tool), cfg.mag_cold_n)
-        if cfg.br_mode == "off" and not cfg.provisional:
+        if cfg.br_mode == "off" and not (cfg.provisional or cfg.gate):
             return TrajectoryInfo(regime, None, irreversible(None, hint, False), theta)
         is_write = seq.is_write(agent, tool)
         b = blast_radius(e, hint, is_write, seq.has_item_count(agent, tool))
         irr = irreversible(b, hint, is_write, cfg.irreversible_b)
-        if cfg.br_mode == "off":  # b for provisional's irreversibility only (T-35)
+        if cfg.br_mode == "off":  # b for provisional's / the gate's irreversibility only (T-35)
             return TrajectoryInfo(regime, None, irr, theta)
         theta_eff = theta * (1.0 - cfg.br_k * b) if cfg.br_mode == "modulate" else theta
         return TrajectoryInfo(regime, b, irr, theta_eff)

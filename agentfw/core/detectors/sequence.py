@@ -314,10 +314,16 @@ class SequenceDetector:
         rec = self._trans(agent)
         return 0 if rec is None else rec.c0.get(tool, 0)
 
+    def flow_record(self, agent: str, tool: str, path: str) -> FlowRecord | None:
+        """The (agent, tool, path)'s id-flow history as stored right now (the live record; the
+        caller must not mutate it). Read-only."""
+        rec = self._store.get(key_flow(agent, tool, path))
+        return rec if isinstance(rec, FlowRecord) else None
+
     def usual_producer(self, agent: str, tool: str, path: str) -> str | None:
         """Commonest producer tool of this (agent, tool, path)'s ids; ties by name. Read-only."""
-        rec = self._store.get(key_flow(agent, tool, path))
-        if not isinstance(rec, FlowRecord) or not rec.producers:
+        rec = self.flow_record(agent, tool, path)
+        if rec is None or not rec.producers:
             return None
         return min(rec.producers.items(), key=lambda kv: (-kv[1], kv[0]))[0]
 

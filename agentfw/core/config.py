@@ -158,6 +158,15 @@ class EngineConfig:
     prov_ttl: int = 3
     prov_budget: float = 0.25
     prov_min_calls: int = 8
+    # Pre-execution gate (F4, Task 3.1; core.trajectory.gate). With ``gate`` an irreversible call
+    # (irreversibility then always uses the blast radius, also under ``br_mode="off"``: T-35,
+    # T-41) is checked before it executes: an id-typed value with no ledger producer on a warm
+    # key whose ids flow at least ``gate_flow_rate`` of the time blocks (flag
+    # ``PREREQ_MISSING``); a cold key or ``fused >= θ_eff`` escalates (``REQUIRE_APPROVAL``
+    # until Task 3.2). A reversible call is never blocked: capped at ``REQUIRE_APPROVAL`` (or
+    # provisional, when ``provisional`` is on).
+    gate: bool = False
+    gate_flow_rate: float = 0.90
     # Fusion (§6.11)
     fusion_bonus: float = 0.15
     fusion_bonus_gate: float = 0.5

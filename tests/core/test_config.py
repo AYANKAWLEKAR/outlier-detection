@@ -132,6 +132,9 @@ PROVISIONAL_DEFAULTS: dict[str, object] = {
 # Task 2.3 age discount for transition surprise (feature spec F6).
 AGE_DEFAULTS: dict[str, object] = {"seq_age_discount": False, "age_h": 3}
 
+# Task 3.1 pre-execution gate for irreversible calls (feature spec F4; T-11, T-41).
+PREEXEC_GATE_DEFAULTS: dict[str, object] = {"gate": False, "gate_flow_rate": 0.90}
+
 
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
@@ -146,6 +149,7 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | SESSION_DEFAULTS
         | PROVISIONAL_DEFAULTS
         | AGE_DEFAULTS
+        | PREEXEC_GATE_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
 

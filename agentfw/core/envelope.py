@@ -21,6 +21,7 @@ from pydantic import (
 if TYPE_CHECKING:
     from agentfw.core.sketch.bloom import BloomFilter
     from agentfw.core.trajectory.flags import Flag
+    from agentfw.core.trajectory.gate import GateOutcome
 
 __all__ = [
     "ActionEnvelope",
@@ -261,6 +262,9 @@ class TrajectoryInfo:
     #: this call (T-09; ``None`` unless ``EngineConfig.sessions``).
     flags: frozenset[Flag] = frozenset()
     density: float | None = None
+    #: The pre-execution gate's outcome (F4): set only when ``EngineConfig.gate`` is on and the
+    #: call is irreversible.
+    gate: GateOutcome | None = None
 
 
 @dataclass(slots=True, frozen=True)
