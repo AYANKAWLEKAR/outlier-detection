@@ -83,30 +83,32 @@ def unqualified_gate_claims(text: str) -> list[str]:
     """Paragraphs (split on blank lines, whitespace collapsed) with a gate claim that is not
     qualified: the paragraph must contain both protocol labels verbatim, or one of NEGATIONS must
     stand within 12 characters before the match or within 20 characters after it in the same
-    sentence, or between the match's "gate" / "criterion" and its claim word ("The Tier-1 gate is
-    not met"), or the match must be a quoted mention (a double quote directly before and after
-    it)."""
+    sentence, or the match must be a quoted mention (a double quote directly before and after
+    it). The window is the Task 1.26 brief's, verbatim (ruling A1-26)."""
     bad: list[str] = []
     for para in (" ".join(p.split()) for p in re.split(r"\n\s*\n", text)):
         both = PROTOCOL_LABELS["review"] in para and PROTOCOL_LABELS["allow"] in para
         for m in GATE_CLAIM.finditer(para):
             before = para[max(0, m.start() - 12) : m.start()].lower()
             after = para[m.end() : m.end() + 20].split(".")[0].lower()
-            between = para[m.end(2) : m.end()].lower() if m.group(2) else ""
             quoted = (
                 para[max(0, m.start() - 1) : m.start()] == '"'
                 and para[m.end() : m.end() + 1] == '"'
             )
-            if not (
-                both or quoted or any(n in before or n in after or n in between for n in NEGATIONS)
-            ):
+            if not (both or quoted or any(n in before or n in after for n in NEGATIONS)):
                 bad.append(para)
     return bad
 
 
 def test_docs_never_claim_the_gate_is_met_unqualified() -> None:
-    for p in (*DOCS.values(), ROOT / "docs/leaderboard.md"):
-        assert unqualified_gate_claims(p.read_text()) == [], p
+    """README, writeup and leaderboard whole; decision 008 in its A1.5 scope (``gate_scope``: the
+    Status header and the appended Amendment A1 section). The pre-A1 sentences between them are
+    the historical record that section supersedes (ruling A1-26)."""
+    texts = {name: DOCS[name].read_text() for name in ("README.md", "writeup")}
+    texts["008"] = gate_scope("008")
+    texts["leaderboard"] = (ROOT / "docs/leaderboard.md").read_text()
+    for name, text in texts.items():
+        assert unqualified_gate_claims(text) == [], name
 
 
 @pytest.mark.parametrize(
@@ -136,8 +138,6 @@ def test_gate_claim_checker_flags_violations(sentence: str) -> None:
         "The Tier-1 gate is met under neither protocol.",
         "Whether the Tier-1 gate is met is the user's open decision.",
         'No document may say "Tier-1 gate met" on the review result alone.',
-        "The Tier-1 gate is not met under the spec protocol.",
-        "**The Tier-1 gate is still not met.** Under the default protocol, two families fail.",
     ],
 )
 def test_gate_claim_checker_accepts_legitimate_sentences(sentence: str) -> None:

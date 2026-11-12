@@ -386,8 +386,9 @@ what was decided at the time:
   the writeup and `docs/leaderboard.md` now show the dual-protocol table below.
 - User decision (2026-11-10), the paragraph that starts "The Tier-1 gate is still not met". The
   gate criterion is now the amended one (spec A1.7). `test_tier1_no_regression` pins the seed-0
-  rows of `matrix.json` under each protocol, with the same −0.1 tolerance. The SW1 leaderboard
-  (Task 1.25), the README and the writeup (Task 1.26) are rebuilt.
+  rows of `matrix.json` under each protocol (spec §5.2 allow-all; oracle-reviewer approval loop
+  (labels act as a perfect human reviewer → optimistic)), with the same −0.1 tolerance. The SW1
+  leaderboard (Task 1.25), the README and the writeup (Task 1.26) are rebuilt.
 
 ### What was adopted, and from which design
 
