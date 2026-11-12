@@ -5,6 +5,8 @@ Every published number comes from this module. numpy only.
 Conventions shared by every function:
 
 * Rows whose ``fused_score`` is NaN (not sampled by the detector) are excluded from every metric.
+* Rows of the runaway families (``RUNAWAY_FAMILIES``: loop, spin, stall; T-10) are excluded from
+  every metric here, neither positive nor negative; ``bench.session_metrics`` scores them.
   The array-level functions (:func:`auprc`, :func:`fpr_at_recall`) drop NaN scores the same way.
 * A row is **flagged** when ``fused_score >= threshold``. :data:`Thresholds` is one of
 
@@ -31,6 +33,7 @@ import orjson
 from numpy.typing import NDArray
 
 from agentfw.bench.replay import ScoreRow
+from agentfw.synth.attacks import RUNAWAY_FAMILIES
 
 __all__ = [
     "BOOTSTRAP_N",
@@ -64,6 +67,7 @@ __all__ = [
     "drift_delay",
     "fpr_at_recall",
     "gate_preview",
+    "is_runaway",
     "latency_summary",
     "per_agent_fpr_at_recall",
     "precision_at",
@@ -220,8 +224,13 @@ def _rate(num: int, den: int) -> float:
     return num / den if den else math.nan
 
 
+def is_runaway(attack_family: str | None) -> bool:
+    """True for a runaway family (``RUNAWAY_FAMILIES``): in no per-call metric (T-10)."""
+    return attack_family in RUNAWAY_FAMILIES
+
+
 def _valid(rows: Sequence[ScoreRow]) -> list[ScoreRow]:
-    return [r for r in rows if not math.isnan(r.fused_score)]
+    return [r for r in rows if not math.isnan(r.fused_score) and not is_runaway(r.attack_family)]
 
 
 def calibration_rows(rows: Sequence[ScoreRow]) -> list[ScoreRow]:

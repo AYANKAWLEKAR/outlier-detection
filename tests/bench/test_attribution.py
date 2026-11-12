@@ -1,17 +1,22 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from agentfw.bench.attribution import (
     DEFAULT_GROUPS,
     REDUNDANT,
     attribution_table,
     detected_attacks,
 )
-from agentfw.bench.ci_regress import ci_dataset
+from agentfw.bench.ci_regress import CI_DATASET, ci_dataset
+from agentfw.bench.dataset import load_dir
 from agentfw.bench.registry import make_detector
 from agentfw.bench.replay import ScoreRow, SplitSpec, replay
 from agentfw.core.config import EngineConfig
 from agentfw.core.engine import ALL_DETECTORS
 from agentfw.core.envelope import Label, RawCall
+from agentfw.synth.attacks import RUNAWAY_FAMILIES
+from agentfw.synth.generate import generate
 
 
 def replay_rows(raws: list[RawCall], labels: dict[str, Label], name: str) -> list[ScoreRow]:
@@ -58,3 +63,37 @@ def test_attributed_attacks_have_test_split_rows() -> None:
     test_ids = {r.attack_id for r in rows if r.label == "attack" and r.split == "test"}
     assert detected_attacks(rows) <= test_ids
     assert detected_attacks(rows, splits=frozenset({"train", "test"})) >= detected_attacks(rows)
+
+
+def test_runaway_attacks_are_never_attributed(tmp_path: Path) -> None:
+    """T-10: runaway rows are in no per-call metric, so attribution (which matches test-split
+    recall, T-20) neither detects nor tabulates them, even when the engine flags them."""
+    families = [*CI_DATASET.families, *sorted(RUNAWAY_FAMILIES)]
+    # attack rate 0.5: enough runaway rows that the engine flags some on the test split
+    generate(CI_DATASET.model_copy(update={"families": families, "attack_rate": 0.5}), tmp_path)
+    raws, labels, _ = load_dir(tmp_path)
+    rows = replay_rows(raws, labels, "engine")
+    flagged_runaway = {
+        r.attack_id
+        for r in rows
+        if r.attack_family in RUNAWAY_FAMILIES
+        and r.split == "test"
+        and r.decision in ("block", "require_approval")
+    }
+    assert flagged_runaway  # the engine does flag some: the exclusion is not vacuous
+    detected = detected_attacks(rows)
+    assert not detected & flagged_runaway
+    runaway_ids = {
+        lab.attack_id for lab in labels.values() if lab.attack_family in RUNAWAY_FAMILIES
+    }
+    assert not detected_attacks(rows, splits=frozenset({"train", "test"})) & runaway_ids
+    table = attribution_table(
+        raws,
+        labels,
+        groups=DEFAULT_GROUPS,
+        cfg=EngineConfig(),
+        outcomes="review",
+        split=SplitSpec(),
+    )
+    assert not RUNAWAY_FAMILIES & set(table)
+    assert "unknown" not in table

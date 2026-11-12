@@ -40,6 +40,23 @@ candidate can get there within ``M_MAX`` stays benign, consumes its attack id an
 ``magnitude_topup_rate > 0`` (A1.4): after the first pass, a magnitude-only top-up pass spikes
 untouched post-warm-up sessions on its own stream (``topup_rng``), ids ``atk-{agent}-m{k:05d}``.
 
+Runaway families (Task 1.6, F2; T-10, T-28): ``loop``, ``spin`` and ``stall`` live in
+``RUNAWAY_ATTACKS``, not ``ATTACKS`` (whose sorted keys are SW1's family list), and run only when
+listed in ``GenerateConfig.families``. Each picks a read with a non-error response and inserts a
+run of ``r`` reads right after it (``r`` log-uniform on [``RUN_MIN``, ``RUN_MAX``], 0.5-3 s gaps,
+the session's later calls shifted by the run's duration so it stays contiguous); every inserted
+call is labelled with the family, ``strength = r``. ``loop``: copies of the read (same args, same
+``response_meta``). ``spin``: the read's tool with each pool-backed id arg drawn uniformly from the
+persona's pool, and the read's ``response_meta`` (same ``fp``, no new ids). ``stall``: persona
+read tools whose id args are ids the session has already seen and whose catalog response has an
+item count exactly when the picked read's does, each with that read's ``response_meta`` (its ids
+were seen, its ``fp``), so the run creates no new artifact and no tool gets a foreign shape.
+
+R10 (T-29): an attack that rewrites a response keeps ``response_meta.fp`` consistent with it.
+``exfil_volume``'s inflated read drops its ``fp`` (the payload text it was computed from is not
+available and no longer matches the item count) and its appended write fingerprints the same blob
+its ``bytes`` counts.
+
 ``inject`` draws only from the attack RNG it is handed (and, for the top-up, the top-up RNG), so
 persona streams, and therefore every non-attacked session, are unaffected by the attack rate.
 """
@@ -56,6 +73,7 @@ import numpy as np
 import orjson
 
 from agentfw.core.envelope import JsonValue, Label, RawCall, ResponseMeta
+from agentfw.core.fingerprint import resp_fingerprint
 from agentfw.core.ids import new_ulid
 from agentfw.core.patterns import email_domain, is_id_like
 from agentfw.synth.dists import IdPool, new_id, uniform
@@ -77,6 +95,12 @@ __all__ = [
     "CONTROL_P99_MULT",
     "M_MAX",
     "M_MIN",
+    "RUNAWAY_ATTACKS",
+    "RUNAWAY_FAMILIES",
+    "RUN_GAP_MAX_MS",
+    "RUN_GAP_MIN_MS",
+    "RUN_MAX",
+    "RUN_MIN",
     "SCOPE_MAX",
     "SCOPE_MIN",
     "V_MAX",
@@ -106,6 +130,8 @@ _Z99 = 2.326
 _OUTBOUND = ("mail.send_email", "slack.post_message")
 _MONEY_COUNT_NAMES = frozenset({"amount", "count", "qty", "total"})
 _RAND_ALPHABET = np.array(list("abcdefghijklmnopqrstuvwxyz0123456789"))
+RUN_MIN, RUN_MAX = 5, 60  # runaway repeats r, log-uniform (F2)
+RUN_GAP_MIN_MS, RUN_GAP_MAX_MS = 500, 3000
 
 
 @dataclass(slots=True)
@@ -212,6 +238,10 @@ def _vocab(a: ArgSpec) -> list[str] | None:
 
 def _writes(persona: Persona, catalog: Catalog) -> list[str]:
     return [t for t in persona.tools if t in catalog and catalog[t].kind == "write"]
+
+
+def _reads(persona: Persona, catalog: Catalog) -> list[str]:
+    return [t for t in persona.tools if t in catalog and catalog[t].kind == "read"]
 
 
 def _flows_from_read(a: ArgSpec, catalog: Catalog) -> bool:
@@ -330,6 +360,13 @@ _ELIGIBLE: dict[str, Callable[[Persona, Catalog], bool]] = {
     "slow_drift": _any_write_arg(lambda a, cat, name: _is_money_count(name, a)),
     "exfil_volume": _eligible_exfil,
     CONTROL: _eligible_control,
+    "loop": lambda persona, catalog: bool(_reads(persona, catalog)),
+    "spin": lambda persona, catalog: any(
+        a.type == "id" and a.prefix in {sp.prefix for sp in persona.id_pools.values()}
+        for t in _reads(persona, catalog)
+        for a in catalog[t].args.values()
+    ),
+    "stall": lambda persona, catalog: bool(_reads(persona, catalog)),
 }
 
 
@@ -618,19 +655,18 @@ def burst_duplicates(orig: RawCall, r: int, w_ms: int, rng: np.random.Generator)
     """``r`` copies of ``orig`` at sorted uniform offsets in (0, ``w_ms``] ms. Shared by
     ``velocity_burst`` and the sandbox injector."""
     offsets = np.sort(rng.integers(1, w_ms + 1, size=r))
-    dups = []
-    for off in offsets:
-        ts = orig.ts_unix_ms + int(off)
-        dups.append(
-            orig.model_copy(
-                update={
-                    "envelope_id": new_ulid(ts, rng),
-                    "ts_unix_ms": ts,
-                    "args": copy.deepcopy(orig.args),
-                }
-            )
-        )
-    return dups
+    return [_copy_at(orig, orig.ts_unix_ms + int(off), rng) for off in offsets]
+
+
+def _copy_at(orig: RawCall, ts: int, rng: np.random.Generator) -> RawCall:
+    """``orig`` at ``ts`` with a fresh envelope id (two draws from ``rng``) and deep-copied args."""
+    return orig.model_copy(
+        update={
+            "envelope_id": new_ulid(ts, rng),
+            "ts_unix_ms": ts,
+            "args": copy.deepcopy(orig.args),
+        }
+    )
 
 
 def _scope_cands(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, str]]:
@@ -748,7 +784,8 @@ def exfil_volume(
     assert read.response_meta is not None
     median = _item_median(read.tool_id, ctx.catalog)
     assert median is not None
-    meta = read.response_meta.model_copy(update={"item_count": round(v * median)})
+    # R10: the old fp covered the old item count and the payload text is not here to redo it.
+    meta = read.response_meta.model_copy(update={"item_count": round(v * median), "fp": None})
     out = _replace_call(session, i, read.model_copy(update={"response_meta": meta}))
     j = _next_outbound(out, i, ctx)
     if j is None:
@@ -759,7 +796,8 @@ def exfil_volume(
         args = plan_args(tool, ctx.persona, ctx.catalog, rng, ctx.pools)
         produced = {k: spec.produced[k] for k in spec.response.produces_ids}
         ids = tuple(new_id(pa.prefix or "id_", rng) for pa in produced.values())
-        size = 64 + len(orjson.dumps(list(ids)))
+        blob = orjson.dumps(list(ids))
+        size = 64 + len(blob)
         out.append(
             read.model_copy(
                 update={
@@ -768,7 +806,9 @@ def exfil_volume(
                     "ts_unix_ms": ts,
                     "tool_id": tool,
                     "args": args,
-                    "response_meta": ResponseMeta(bytes=size, ids=ids),
+                    "response_meta": ResponseMeta(
+                        bytes=size, ids=ids, fp=resp_fingerprint(blob.decode(), None, False)
+                    ),
                 }
             )
         )
@@ -811,6 +851,182 @@ def benign_unusual(
     return AttackResult(_replace_call(session, i, new), [lab])
 
 
+# --- runaway families (Task 1.6, F2; opt-in, T-10) ----------------------------------------------
+# Draw order (attack RNG only): the candidate, ``r``, the family's per-call draws (spin: one pool
+# index per pool-backed id arg; stall: tool, ``plan_args``, one seen id per id arg), then ``r``
+# gaps, then two ULID draws per inserted call.
+
+
+def _repeats(rng: np.random.Generator) -> int:
+    return int(
+        np.clip(
+            round(math.exp(rng.uniform(math.log(RUN_MIN), math.log(RUN_MAX)))), RUN_MIN, RUN_MAX
+        )
+    )
+
+
+def _clean_read(ctx: AttackContext, c: RawCall, *, fp: bool) -> bool:
+    """A read with a non-error response (and, with ``fp``, a response fingerprint)."""
+    rm = c.response_meta
+    return (
+        _kind(ctx, c) == "read"
+        and rm is not None
+        and not rm.error
+        and (rm.fp is not None or not fp)
+    )
+
+
+def _insert_run(
+    session: list[RawCall],
+    i: int,
+    run: list[RawCall],
+    rng: np.random.Generator,
+    ctx: AttackContext,
+    family: str,
+) -> AttackResult:
+    """``run`` inserted right after call ``i`` at 0.5-3 s gaps, each with a fresh envelope id and
+    no ``task_ids``; the calls after ``i`` move later by the run's duration (so replay, which
+    orders by time, sees the run contiguous) and everything is renumbered. Labels: the run."""
+    gaps = rng.integers(RUN_GAP_MIN_MS, RUN_GAP_MAX_MS + 1, size=len(run))
+    t0 = ts = session[i].ts_unix_ms
+    placed: list[RawCall] = []
+    for gap, c in zip(gaps, run, strict=True):
+        ts += int(gap)
+        placed.append(_copy_at(c, ts, rng).model_copy(update={"task_ids": ()}))
+    shift = ts - t0
+    later = [c.model_copy(update={"ts_unix_ms": c.ts_unix_ms + shift}) for c in session[i + 1 :]]
+    out = _renumber([*session[: i + 1], *placed, *later])
+    r = float(len(run))
+    return AttackResult(out, [_label(ctx, family, c.envelope_id, r) for c in placed])
+
+
+def _loop_cands(session: list[RawCall], ctx: AttackContext) -> list[int]:
+    return [i for i, c in enumerate(session) if _clean_read(ctx, c, fp=False)]
+
+
+def loop(
+    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+) -> AttackResult | None:
+    """``r`` copies of a read right after it: same args, same ``response_meta``."""
+    cands = _loop_cands(session, ctx)
+    if not cands:
+        return None
+    i = cands[int(rng.integers(len(cands)))]
+    r = _repeats(rng)
+    return _insert_run(session, i, [session[i]] * r, rng, ctx, "loop")
+
+
+def _pool_args(
+    tool: str, catalog: Catalog, pools: Mapping[str, IdPool]
+) -> list[tuple[str, IdPool]]:
+    """``(arg, pool)`` for each ``id`` arg of ``tool`` whose prefix one of ``pools`` carries."""
+    by_prefix = {p.prefix: p for _, p in sorted(pools.items())}
+    return [
+        (n, by_prefix[a.prefix])
+        for n, a in catalog[tool].args.items()
+        if a.type == "id" and a.prefix in by_prefix
+    ]
+
+
+def _spin_cands(session: list[RawCall], ctx: AttackContext) -> list[int]:
+    return [
+        i
+        for i, c in enumerate(session)
+        if _clean_read(ctx, c, fp=True)
+        and any(
+            isinstance(c.args.get(n), str) for n, _ in _pool_args(c.tool_id, ctx.catalog, ctx.pools)
+        )
+    ]
+
+
+def spin(
+    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+) -> AttackResult | None:
+    """``r`` calls of a read's tool right after it, each pool-backed id arg drawn uniformly from
+    the persona's pool, every one answered with the read's ``response_meta``."""
+    cands = _spin_cands(session, ctx)
+    if not cands:
+        return None
+    i = cands[int(rng.integers(len(cands)))]
+    r = _repeats(rng)
+    orig = session[i]
+    pooled = [
+        (n, p)
+        for n, p in _pool_args(orig.tool_id, ctx.catalog, ctx.pools)
+        if isinstance(orig.args.get(n), str)
+    ]
+    run: list[RawCall] = []
+    for _ in range(r):
+        call = orig
+        for n, p in pooled:
+            call = mutate_replace(call, n, p.ids[int(rng.integers(len(p.ids)))])
+        run.append(call)
+    return _insert_run(session, i, run, rng, ctx, "spin")
+
+
+def _seen_ids(session: list[RawCall], upto: int) -> list[str]:
+    """Id-like values in the args and response ids of ``session[:upto]``, sorted."""
+    return sorted(v for v in _known_before(session, upto) if is_id_like(v))
+
+
+def _id_args(tool: str, catalog: Catalog) -> list[tuple[str, ArgSpec]]:
+    return [(n, a) for n, a in catalog[tool].args.items() if a.type in ("id", "list_of_id")]
+
+
+def _of_prefix(seen: list[str], prefix: str | None) -> list[str]:
+    return [v for v in seen if prefix is None or v.startswith(prefix)]
+
+
+def _stall_tools(seen: list[str], earlier: RawCall, ctx: AttackContext) -> list[str]:
+    """Persona read tools whose every id arg can take an id the session has already seen and
+    whose catalog response has an item count exactly when ``earlier``'s response does, so the
+    copied ``response_meta`` keeps the shape of the tool it lands on (a sticky ``has_item_count``
+    would otherwise relearn the tool's kind for the agent)."""
+    with_count = earlier.response_meta is not None and earlier.response_meta.item_count is not None
+    return [
+        t
+        for t in _reads(ctx.persona, ctx.catalog)
+        if (ctx.catalog[t].response.item_count is not None) == with_count
+        and all(_of_prefix(seen, a.prefix) for _, a in _id_args(t, ctx.catalog))
+    ]
+
+
+def _stall_cands(session: list[RawCall], ctx: AttackContext) -> list[int]:
+    return [
+        i
+        for i, c in enumerate(session)
+        if _clean_read(ctx, c, fp=True) and _stall_tools(_seen_ids(session, i + 1), c, ctx)
+    ]
+
+
+def stall(
+    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+) -> AttackResult | None:
+    """``r`` persona reads right after a read, re-reading only ids the session has seen, each
+    answered with that read's ``response_meta``: busy, but no new artifact."""
+    cands = _stall_cands(session, ctx)
+    if not cands:
+        return None
+    i = cands[int(rng.integers(len(cands)))]
+    r = _repeats(rng)
+    seen = _seen_ids(session, i + 1)
+    earlier = session[i]
+    tools = _stall_tools(seen, earlier, ctx)
+    run: list[RawCall] = []
+    for _ in range(r):
+        tool = tools[int(rng.integers(len(tools)))]
+        args = plan_args(tool, ctx.persona, ctx.catalog, rng, ctx.pools)
+        for n, a in _id_args(tool, ctx.catalog):
+            ids = _of_prefix(seen, a.prefix)
+            pick = ids[int(rng.integers(len(ids)))]
+            args[n] = pick if a.type == "id" else [pick]
+        run.append(earlier.model_copy(update={"tool_id": tool, "args": args}))
+    return _insert_run(session, i, run, rng, ctx, "stall")
+
+
+RUNAWAY_ATTACKS: dict[str, AttackFn] = {"loop": loop, "spin": spin, "stall": stall}
+RUNAWAY_FAMILIES: frozenset[str] = frozenset(RUNAWAY_ATTACKS)
+
 ATTACKS: dict[str, AttackFn] = {
     "magnitude_spike": magnitude_spike,
     "prereq_skip": prereq_skip,
@@ -831,6 +1047,9 @@ _CANDS: dict[str, Callable[[list[RawCall], AttackContext], Sequence[object]]] = 
     "slow_drift": _drift_cands,
     "exfil_volume": _exfil_cands,
     CONTROL: _control_cands,
+    "loop": _loop_cands,
+    "spin": _spin_cands,
+    "stall": _stall_cands,
 }
 
 
@@ -858,9 +1077,11 @@ def inject(
     knows the catalog, personas and pools). Personas are visited in sorted ``agent_id`` order and
     sessions in time order; only ``rng`` (the attack stream) is ever drawn from. The family is
     uniform over the families applicable to THAT session (persona-eligible and with something to
-    mutate); a session where none applies stays benign. ``benign_unusual`` is never chosen as an
-    attack: its draw is independent of attack selection (a session is a control candidate only if it
-    was not attacked), and with it disabled no control draw is made (streams are unchanged).
+    mutate); a session where none applies stays benign. Families resolve in ``ATTACKS`` and
+    ``RUNAWAY_ATTACKS``; one not listed in ``cfg.families`` is never considered, so registering a
+    family changes no draw of a config that does not list it. ``benign_unusual`` is never chosen as
+    an attack: its draw is independent of attack selection (a session is a control candidate only
+    if it was not attacked), and with it disabled no control draw is made (streams are unchanged).
 
     ``cfg.magnitude_mode == "far"`` (A1.4) with ``magnitude_spike`` enabled: each persona's far
     bounds are computed once, from its untouched sessions (one extra ``ctx_factory`` call per
@@ -888,7 +1109,8 @@ def inject(
     if cfg.magnitude_topup_rate > 0 and topup_rng is None:
         raise ValueError("magnitude_topup_rate > 0 needs its own RNG stream: pass topup_rng")
     families = list(dict.fromkeys(cfg.families))
-    unknown = sorted(set(families) - set(ATTACKS))
+    registry = {**ATTACKS, **RUNAWAY_ATTACKS}  # read per call: tests monkeypatch ATTACKS
+    unknown = sorted(set(families) - set(registry))
     if unknown:
         raise ValueError(f"unknown attack family: {unknown}")
     controls = CONTROL in families
@@ -938,7 +1160,7 @@ def inject(
                 ]
                 if fams:
                     family = fams[int(rng.integers(len(fams)))]
-                    res = ATTACKS[family](sessions[idx], rng, ctx)
+                    res = registry[family](sessions[idx], rng, ctx)
                     # applicable() found a candidate, so ``None`` is a far-mode spike with no
                     # feasible one; no other family or mode returns it here.
                     if res is not None:

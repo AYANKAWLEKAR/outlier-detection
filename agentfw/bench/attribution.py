@@ -11,6 +11,8 @@ loses is counted under ``"redundant"``.
 **test-split** rows count (the population :func:`agentfw.bench.metrics.compute_all` evaluates
 per-call metrics on), so the table covers the same attacks as test-split recall; calibration and
 train rows are ignored. No warm filter is applied: it matches ``compute_all(warm_only=False)``.
+Runaway attacks (``metrics.is_runaway``, T-10) are in no per-call metric, so they are never
+"detected" here and never enter the table.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
 from agentfw.bench.ablation import parallel_map
+from agentfw.bench.metrics import is_runaway
 from agentfw.bench.registry import make_detector
 from agentfw.bench.replay import OutcomeMode, ScoreRow, SplitSpec, replay
 from agentfw.core.config import EngineConfig
@@ -56,11 +59,14 @@ def detected_attacks(
     rows: Sequence[ScoreRow], *, splits: frozenset[str] = frozenset({"test"})
 ) -> set[str]:
     """Attack ids with an attack row in ``splits`` (default: test only; no warm filter) decided
-    block or require_approval."""
+    block or require_approval. Runaway attacks never count (T-10)."""
     return {
         r.attack_id or r.envelope_id
         for r in rows
-        if r.label == "attack" and r.split in splits and r.decision in _FLAGGED
+        if r.label == "attack"
+        and not is_runaway(r.attack_family)
+        and r.split in splits
+        and r.decision in _FLAGGED
     }
 
 
@@ -103,7 +109,7 @@ def attribution_table(
     family = {
         lab.attack_id: lab.attack_family or "unknown"
         for lab in labels.values()
-        if lab.label == "attack" and lab.attack_id is not None
+        if lab.label == "attack" and lab.attack_id is not None and not is_runaway(lab.attack_family)
     }
     table: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for atk in sorted(full):
