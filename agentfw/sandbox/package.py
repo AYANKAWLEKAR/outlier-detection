@@ -11,7 +11,10 @@ the labels, keep their exact gaps), re-sorted by ``(ts, session_id, seq_no)``, c
 label per envelope, every envelope normalizes, no secrets, only reserved email domains) and written
 as ``traces.jsonl`` / ``labels.jsonl`` (same row shape as ``agentfw.synth.generate``, so
 ``agentfw.bench.dataset.load_dir`` reads both), ``traces.parquet`` / ``labels.parquet``,
-``manifest.json`` (sha256 per file) and ``DATASET_CARD.md``.
+``manifest.json`` (sha256 per file) and ``DATASET_CARD.md``. When the source runs captured tool
+schemas (``schemas.jsonl``, F3), they are merged into one ``schemas.jsonl`` (``core.schemas`` rows,
+each ``(tool_id, hash)`` once, ``captured_at`` set to the timeline's day 0, T-33); it is optional,
+so a package or run without it stays valid.
 
 Transcripts are **not** part of the public dataset: they hold model prose and tool output that the
 benchmark does not need. They are never copied into the output directory.
@@ -43,6 +46,7 @@ from pydantic import BaseModel, SecretStr, ValidationError
 
 from agentfw.core.envelope import Label, RawCall, ResponseMeta
 from agentfw.core.normalize import SessionTracker, normalize
+from agentfw.core.schemas import ToolSchema
 from agentfw.sandbox.config import SandboxConfig
 from agentfw.sandbox.retime import retime
 from agentfw.sandbox.tasks.schema import AGENTS_DIR, load_agents
@@ -65,6 +69,8 @@ START_MS = 1_767_225_600_000  # 2026-01-01T00:00:00Z: day 0 of the simulated tim
 CARD_TEMPLATE = Path(__file__).resolve().parents[2] / "docs" / "dataset_card.md"
 _OPTS = orjson.OPT_SORT_KEYS
 _FILES = ("traces.jsonl", "labels.jsonl", "traces.parquet", "labels.parquet")
+_SCHEMAS = "schemas.jsonl"
+_OPTIONAL_FILES = (_SCHEMAS,)  # absent from runs and packages that predate schema capture
 
 # A key starts at a non-alphanumeric, or right after a percent-encoded byte (``%3D``) or a JSON
 # escape still in raw text (``\n``, ``\t``, ``\r``, ``\b``, ``\f``, ``\u201c``): so
@@ -318,6 +324,11 @@ def _traces_table(raws: Sequence[RawCall]) -> pa.Table:
             "seq_no": pa.array([r["seq_no"] for r in rows], pa.int64()),
             "ts_unix_ms": pa.array([r["ts_unix_ms"] for r in rows], pa.int64()),
             "tool_id": pa.array([r["tool_id"] for r in rows], pa.string()),
+            # a session's first call only (F1); the dump omits it when empty
+            "task_ids": pa.array(
+                [list(r["task_ids"]) if "task_ids" in r else [] for r in rows],  # type: ignore[call-overload]
+                pa.list_(pa.string()),
+            ),
             "args": pa.array([_json_str(r["args"]) for r in rows], pa.string()),
             "response_meta": pa.array(
                 [
@@ -432,6 +443,29 @@ def _load_run(
     }
 
 
+def _read_schemas(runs: Sequence[Path]) -> bytes:
+    """The runs' captured schemas merged into one ``schemas.jsonl`` blob (empty when none): every
+    ``(tool_id, hash)`` once, in capture order, ``captured_at`` set to ``START_MS`` (T-33)."""
+    rows: dict[tuple[str, str], ToolSchema] = {}
+    found: list[ToolSchema] = []
+    for run in runs:
+        path = run / _SCHEMAS
+        if not path.is_file():
+            continue
+        for i, line in enumerate(path.read_bytes().splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                found.append(ToolSchema.from_row(orjson.loads(line)))
+            except (ValueError, TypeError) as e:  # a row is input: name the place, never echo it
+                raise ValueError(
+                    f"{run.name}/{_SCHEMAS} line {i}: invalid schema row ({type(e).__name__})"
+                ) from None
+    for sc in sorted(found, key=lambda x: x.captured_at):  # stable: ties keep read order
+        rows.setdefault((sc.tool_id, sc.hash), sc)
+    return _jsonl([{**sc.to_row(), "captured_at": START_MS} for sc in rows.values()])
+
+
 # --- packaging -----------------------------------------------------------------------------------
 
 
@@ -503,6 +537,9 @@ def package(
     labels_blob = _jsonl([_dump(lab) for lab in final])
     problems = _content_problems("traces.jsonl", traces_blob.decode(), literal)
     problems += _content_problems("labels.jsonl", labels_blob.decode(), literal)
+    schemas_blob = _read_schemas([Path(r) for r in run_dirs])
+    if schemas_blob:
+        problems += _content_problems(_SCHEMAS, schemas_blob.decode(), literal)
     if problems:
         raise ValueError("refusing to package: " + "; ".join(problems))
     _check_normalizes(raws)
@@ -529,10 +566,13 @@ def package(
     _write_parquet(_traces_table(raws), out_dir / "traces.parquet")
     _write_parquet(_labels_table(final), out_dir / "labels.parquet")
     (out_dir / "DATASET_CARD.md").write_text(card)
-    manifest.files = {
-        n: hashlib.sha256((out_dir / n).read_bytes()).hexdigest()
-        for n in (*_FILES, "DATASET_CARD.md")
-    }
+    written = [*_FILES, "DATASET_CARD.md"]
+    if schemas_blob:
+        (out_dir / _SCHEMAS).write_bytes(schemas_blob)
+        written.append(_SCHEMAS)
+    elif (out_dir / _SCHEMAS).exists():  # a stale file from an earlier build into this directory
+        (out_dir / _SCHEMAS).unlink()
+    manifest.files = {n: hashlib.sha256((out_dir / n).read_bytes()).hexdigest() for n in written}
     (out_dir / "manifest.json").write_bytes(
         orjson.dumps(_dump(manifest), option=_OPTS | orjson.OPT_INDENT_2) + b"\n"
     )
@@ -553,6 +593,23 @@ def _parquet_matches(d: Path, raws: Sequence[RawCall], labels: Sequence[Label]) 
             out.append("labels.parquet differs from labels.jsonl")
     except Exception as e:  # unreadable or malformed Parquet is a validation finding
         out.append(f"parquet unreadable: {_error_summary(e)}")
+    return out
+
+
+def _schema_problems(path: Path) -> list[str]:
+    """Rows must parse as ``core.schemas`` rows and carry the hash of their own contents. Findings
+    give the line and the kind of fault, never the row."""
+    out: list[str] = []
+    for i, line in enumerate(path.read_bytes().splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            row = ToolSchema.from_row(orjson.loads(line))
+        except (ValueError, TypeError) as e:
+            out.append(f"{path.name} line {i}: invalid schema row ({type(e).__name__})")
+            continue
+        if ToolSchema.capture(row.tool_id, row.input_schema, row.annotations, 0).hash != row.hash:
+            out.append(f"{path.name} line {i}: hash does not match the row's contents")
     return out
 
 
@@ -584,7 +641,12 @@ def validate_dataset(
         for n in (*_FILES, "DATASET_CARD.md")
         if n not in manifest.files
     ]
-    known = (*_FILES, "DATASET_CARD.md")
+    known = (*_FILES, "DATASET_CARD.md", *_OPTIONAL_FILES)
+    for n in _OPTIONAL_FILES:  # optional: absent is fine, but listed and present must agree
+        if n in manifest.files and not (d / n).is_file():
+            problems.append(f"{n}: listed in manifest.json but missing")
+        elif n not in manifest.files and (d / n).is_file():
+            problems.append(f"manifest.json does not list {n}")
     unexpected = len(manifest.files.keys() - set(known))
     if unexpected:  # a manifest key is input text: count it, never echo or open it
         problems.append(f"manifest.json lists {unexpected} unexpected entries (names withheld)")
@@ -601,6 +663,8 @@ def validate_dataset(
                 problems += _content_problems(path.name, path.read_text(), literal)
             except UnicodeDecodeError:
                 problems.append(f"{path.name}: not UTF-8 text")
+    if (d / _SCHEMAS).is_file():
+        problems += _schema_problems(d / _SCHEMAS)
     raws: list[RawCall] = []
     labs: list[Label] = []
     for fname, model, rows in (("traces.jsonl", RawCall, raws), ("labels.jsonl", Label, labs)):

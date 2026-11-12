@@ -55,9 +55,11 @@ from mcp.types import (
 from pydantic import ValidationError
 
 from agentfw.bench.protocol import Detector
-from agentfw.core.envelope import Label, Outcome, RawCall
+from agentfw.core.envelope import JsonValue, Label, Outcome, RawCall
+from agentfw.core.hints import ToolAnnotations
 from agentfw.core.ids import new_ulid
 from agentfw.core.normalize import SessionTracker, normalize
+from agentfw.core.schemas import ToolSchema
 from agentfw.sandbox.proxy_py.response_meta import extract_response_meta
 from agentfw.sandbox.proxy_py.sinks import EnvelopeSink
 
@@ -97,6 +99,21 @@ class SessionInfo:
     session_id: str
     agent_id: str
     principal_id: str
+    task_ids: tuple[str, ...] = ()
+    """The id-like values of the session's task inputs; stamped on the session's first call."""
+
+
+def _core_annotations(tool: Tool) -> ToolAnnotations:
+    """The tool's MCP annotations as core's plain data (an undeclared hint stays ``None``)."""
+    a = tool.annotations
+    if a is None:
+        return ToolAnnotations()
+    return ToolAnnotations(
+        read_only=a.read_only_hint,
+        destructive=a.destructive_hint,
+        idempotent=a.idempotent_hint,
+        open_world=a.open_world_hint,
+    )
 
 
 @dataclass(slots=True)
@@ -163,6 +180,7 @@ class FirewallProxy:
         self.clock_ms = clock_ms
         self._rng = np.random.default_rng() if rng is None else rng
         self._routes: dict[str, tuple[str, str]] | None = None
+        self._schema_hashes: dict[str, str] = {}
         self._seq = 0
         self._history: list[RawCall] = []
         self._tracker = SessionTracker()
@@ -171,7 +189,9 @@ class FirewallProxy:
     # -- discovery ---------------------------------------------------------------------------
 
     async def list_tools(self) -> list[Tool]:
-        """Every downstream tool, renamed ``server.tool``; refreshes the routing table."""
+        """Every downstream tool, renamed ``server.tool``; refreshes the routing table and
+        records each tool's schema (F3): a row for a tool not yet seen, and a new row, with a
+        ``tool-definition drift`` warning, for one whose schema or annotations changed."""
         tools: list[Tool] = []
         routes: dict[str, tuple[str, str]] = {}
         for server, ds in self.downstreams.items():
@@ -182,8 +202,25 @@ class FirewallProxy:
                 name = f"{server}.{t.name}"
                 routes[name] = (server, t.name)
                 tools.append(t.model_copy(update={"name": name}))
+                self._capture_schema(name, t)
         self._routes = routes
         return tools
+
+    def _capture_schema(self, tool_id: str, tool: Tool) -> None:
+        """Shadow-only bookkeeping: a failing sink never breaks discovery. ``captured_at`` is wall
+        time, not ``clock_ms``, so a capture never consumes a tick of an injected clock."""
+        try:
+            schema_in: dict[str, JsonValue] = dict(tool.input_schema)
+            row = ToolSchema.capture(tool_id, schema_in, _core_annotations(tool), wall_ms())
+            known = self._schema_hashes.get(tool_id)
+            if known == row.hash:
+                return
+            if known is not None:
+                logger.warning("tool-definition drift: %s", tool_id)
+            self.sink.write_schema(row.to_row())
+            self._schema_hashes[tool_id] = row.hash
+        except Exception:  # boundary: schema capture must not affect the session
+            logger.exception("schema capture failed for %s", tool_id)
 
     # -- the call path -----------------------------------------------------------------------
 
@@ -251,7 +288,8 @@ class FirewallProxy:
         if mutation is not None:
             self.sink.write_labels(mutation.labels)
             for extra in mutation.extra_calls:
-                extra = extra.model_copy(update={"seq_no": self._next_seq()})
+                # a copy is never the session's first call: no task_ids (F1)
+                extra = extra.model_copy(update={"seq_no": self._next_seq(), "task_ids": ()})
                 self._shadow_score(extra.model_copy(update={"response_meta": None}))
                 self._record(extra)
         return result
@@ -270,15 +308,17 @@ class FirewallProxy:
 
     def _new_raw(self, tool_id: str, args: dict[str, Any]) -> RawCall:
         ts = self.clock_ms()
+        seq = self._next_seq()
         return RawCall(
             envelope_id=new_ulid(ts, self._rng),
             session_id=self.session.session_id,
             agent_id=self.session.agent_id,
             principal_id=self.session.principal_id,
-            seq_no=self._next_seq(),
+            seq_no=seq,
             ts_unix_ms=ts,
             tool_id=tool_id,
             args=args,
+            task_ids=self.session.task_ids if seq == 0 else (),  # the first call only
         )
 
     async def _forward(self, server: str, tool: str, args: dict[str, Any]) -> CallToolResult:

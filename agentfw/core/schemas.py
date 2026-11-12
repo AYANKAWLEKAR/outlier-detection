@@ -88,11 +88,12 @@ class ToolSchema:
         h = schema_hash(input_schema, _annotations_row(annotations))
         return cls(tool_id, input_schema, annotations, captured_at, h)
 
-    def to_row(self) -> dict[str, object]:
+    def to_row(self) -> dict[str, JsonValue]:
+        annotations: dict[str, JsonValue] = dict(_annotations_row(self.annotations))
         return {
             "tool_id": self.tool_id,
             "input_schema": self.input_schema,
-            "annotations": _annotations_row(self.annotations),
+            "annotations": annotations,
             "captured_at": self.captured_at,
             "hash": self.hash,
         }

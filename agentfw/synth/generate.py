@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -189,7 +189,7 @@ def tool_schemas(catalog: Catalog, captured_at: int) -> list[ToolSchema]:
     ]
 
 
-def _jsonl(rows: list[dict[str, object]]) -> bytes:
+def _jsonl(rows: Sequence[Mapping[str, object]]) -> bytes:
     return b"".join(orjson.dumps(r, option=orjson.OPT_SORT_KEYS) + b"\n" for r in rows)
 
 

@@ -8,7 +8,7 @@ from typing import Any, Protocol
 from mcp.server.mcpserver import MCPServer
 
 from agentfw.sandbox.config import SandboxConfig
-from agentfw.sandbox.tools.common import mark_fake, ok, tool_error
+from agentfw.sandbox.tools.common import ADD_CLOSED, READ, mark_fake, ok, tool_error
 
 
 class SlackBackend(Protocol):
@@ -94,12 +94,12 @@ class LiveSlackBackend:
 def build_server(backend: SlackBackend) -> MCPServer:
     server = MCPServer("slack")
 
-    @server.tool()
+    @server.tool(annotations=ADD_CLOSED)
     def post_message(channel: str, text: str) -> dict[str, Any]:
         """Post a message to the sandbox channel."""
         return ok(backend.post_message(channel, text))
 
-    @server.tool()
+    @server.tool(annotations=READ)
     def read_channel(limit: int = 20) -> dict[str, Any]:
         """Read recent messages from the sandbox channel (newest first)."""
         return ok(backend.read_channel(limit))

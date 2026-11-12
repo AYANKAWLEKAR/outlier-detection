@@ -11,7 +11,7 @@ import anyio
 import orjson
 import pytest
 from mcp import Client
-from mcp.types import CallToolResult, TextContent
+from mcp.types import CallToolResult, ListToolsResult, TextContent, Tool, ToolAnnotations
 
 from agentfw.bench.dataset import load_traces
 from agentfw.core.engine import Engine
@@ -25,8 +25,10 @@ from agentfw.core.envelope import (
     RawCall,
     ResponseMeta,
 )
+from agentfw.core.hints import ToolAnnotations as CoreAnnotations
 from agentfw.core.patterns import is_id_like
-from agentfw.sandbox.proxy_py import FirewallProxy, JsonlSink, MutationResult
+from agentfw.core.schemas import ToolSchema, load_schemas
+from agentfw.sandbox.proxy_py import FirewallProxy, JsonlSink, MutationResult, SessionInfo
 from agentfw.sandbox.tools.stripe_server import fake_stripe_ids
 from tests.sandbox.proxy.conftest import COMPANY, SESSION, MemorySink, make_proxy
 from tests.sandbox.proxy.flaky import NOT_JSON
@@ -543,3 +545,114 @@ async def test_shadow_engine_end_to_end_writes_jsonl(tmp_path: Path) -> None:
     assert all(0.0 <= v["result"]["fused_score"] <= 1.0 for v in verdicts)
     assert [lab.envelope_id for lab in labels] == [calls[2].envelope_id]
     assert calls[-1].response_meta is not None and calls[-1].response_meta.error is True
+
+
+# --- tools/list schema capture (F3) and task ids (F1) ------------------------------------------
+
+
+class StubDownstream:
+    """A downstream whose tool list the test controls (a reconnect after a definition change)."""
+
+    def __init__(self, schema: dict[str, Any]) -> None:
+        self.schema = schema
+
+    async def list_tools(self) -> ListToolsResult:
+        tool = Tool(
+            name="op",
+            input_schema=self.schema,
+            annotations=ToolAnnotations(read_only_hint=True),
+        )
+        return ListToolsResult(tools=[tool])
+
+    async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> CallToolResult:
+        raise AssertionError("not called")
+
+
+async def test_list_tools_writes_one_schema_row_per_tool() -> None:
+    async with make_proxy() as (proxy, sink, _):
+        tools = await proxy.list_tools()
+        assert sorted(r["tool_id"] for r in sink.schemas) == sorted(t.name for t in tools)
+        before = len(sink.schemas)
+        await proxy.list_tools()  # an unchanged re-capture adds nothing
+        assert len(sink.schemas) == before
+    schemas = {s.tool_id: s for s in (ToolSchema.from_row(r) for r in sink.schemas)}
+    refund = schemas["stripe.create_refund"]  # round-trips through the core row shape
+    assert refund.annotations.destructive is True and refund.annotations.read_only is False
+    props = refund.input_schema["properties"]
+    assert isinstance(props, dict) and props["charge_id"] == {
+        "title": "Charge Id",
+        "type": "string",
+    }
+    assert schemas["zendesk.get_ticket"].annotations.read_only is True
+    assert schemas["flaky.ok"].annotations == CoreAnnotations()  # undeclared stays undeclared
+    assert all(s.captured_at > 0 for s in schemas.values())
+
+
+async def test_schema_drift_logged(caplog: pytest.LogCaptureFixture) -> None:
+    ds = StubDownstream({"type": "object", "properties": {"a": {"type": "string"}}})
+    sink = MemorySink()
+    proxy = FirewallProxy({"srv": ds}, SESSION, sink)
+    with caplog.at_level(logging.WARNING, logger="agentfw.sandbox.proxy_py.proxy"):
+        await proxy.list_tools()
+        assert not any("drift" in r.getMessage() for r in caplog.records)
+        ds.schema = {"type": "object", "properties": {"a": {"type": "integer"}}}
+        await proxy.list_tools()
+    assert [r.getMessage() for r in caplog.records if "drift" in r.getMessage()] == [
+        "tool-definition drift: srv.op"
+    ]
+    assert [r["tool_id"] for r in sink.schemas] == ["srv.op", "srv.op"]
+    assert sink.schemas[0]["hash"] != sink.schemas[1]["hash"]
+
+
+async def test_failing_schema_sink_does_not_break_discovery(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class Broken(MemorySink):
+        def write_schema(self, row: dict[str, Any]) -> None:
+            raise OSError("disk full")
+
+    async with make_proxy(sink=Broken()) as (proxy, _, _):
+        assert len(await proxy.list_tools()) > 0
+    assert any("schema capture failed" in r.getMessage() for r in caplog.records)
+
+
+async def test_first_call_carries_task_ids_only() -> None:
+    session = SessionInfo("sess_t", "agent_support", "user_ops", task_ids=(TICKET, CHARGE_ID))
+    async with make_proxy(session=session) as (proxy, sink, _):
+        await proxy.call_tool("zendesk.get_ticket", {"ticket_id": TICKET})
+        await proxy.call_tool("zendesk.get_ticket", {"ticket_id": TICKET})
+        await proxy.call_tool("nope.nothing", {})  # no envelope, no seq: not "the first call"
+    assert [c.task_ids for c in sink.calls] == [(TICKET, CHARGE_ID), ()]
+
+
+async def test_default_session_has_no_task_ids() -> None:
+    async with make_proxy() as (proxy, sink, _):
+        await proxy.call_tool("zendesk.get_ticket", {"ticket_id": TICKET})
+    assert sink.calls[0].task_ids == ()
+
+
+async def test_jsonl_sink_writes_schemas_that_load(tmp_path: Path) -> None:
+    async with make_proxy(sink=JsonlSink(tmp_path)) as (proxy, _, _):
+        await proxy.list_tools()
+        await proxy.list_tools()
+    loaded = load_schemas(tmp_path / "schemas.jsonl")
+    assert "stripe.create_refund" in loaded
+    assert len((tmp_path / "schemas.jsonl").read_bytes().splitlines()) == len(loaded)
+
+
+class CopyingMutator:
+    """Like the velocity_burst injector: extra calls are model_copies of the (seq 0) raw."""
+
+    def mutate(self, raw: RawCall, history: Sequence[RawCall]) -> MutationResult | None:
+        extras = [
+            raw.model_copy(update={"envelope_id": f"{raw.envelope_id}x{i}"}) for i in range(2)
+        ]
+        return MutationResult(raw=raw, forward=True, extra_calls=extras)
+
+
+async def test_extra_calls_never_carry_task_ids() -> None:
+    session = SessionInfo("sess_t", "agent_support", "user_ops", task_ids=(TICKET,))
+    async with make_proxy(session=session, mutator=CopyingMutator()) as (proxy, sink, _):
+        await proxy.call_tool("zendesk.get_ticket", {"ticket_id": TICKET})
+    assert [c.seq_no for c in sink.calls] == [0, 1, 2]
+    assert [c.task_ids for c in sink.calls] == [(TICKET,), (), ()]

@@ -14,7 +14,7 @@ from mcp.server.mcpserver import MCPServer
 from agentfw.sandbox.config import SandboxConfig
 from agentfw.sandbox.seed.company import Company
 from agentfw.sandbox.seed.zendesk_seed import SCHEMA, seed_zendesk
-from agentfw.sandbox.tools.common import mark_fake, ok, tool_error
+from agentfw.sandbox.tools.common import ADD_OPEN, OVERWRITE, READ, mark_fake, ok, tool_error
 from agentfw.sandbox.tools.stripe_server import fake_stripe_ids
 
 STATUSES = ("new", "open", "pending", "hold", "solved", "closed")
@@ -186,22 +186,22 @@ class LiveZendeskBackend(SqliteZendeskBackend):
 def build_server(backend: ZendeskBackend) -> MCPServer:
     server = MCPServer("zendesk")
 
-    @server.tool()
+    @server.tool(annotations=READ)
     def get_ticket(ticket_id: str) -> dict[str, Any]:
         """Retrieve a ticket, including its comments."""
         return ok(backend.get_ticket(ticket_id))
 
-    @server.tool()
+    @server.tool(annotations=READ)
     def list_tickets(status: str = "open", limit: int = 20) -> dict[str, Any]:
         """List tickets in a status (new, open, pending, hold, solved, closed)."""
         return ok(backend.list_tickets(status, limit))
 
-    @server.tool()
+    @server.tool(annotations=ADD_OPEN)
     def add_comment(ticket_id: str, body: str, public: bool = True) -> dict[str, Any]:
         """Add a comment to a ticket."""
         return ok(backend.add_comment(ticket_id, body, public))
 
-    @server.tool()
+    @server.tool(annotations=OVERWRITE)
     def update_status(ticket_id: str, status: str) -> dict[str, Any]:
         """Set a ticket's status."""
         return ok(backend.update_status(ticket_id, status))

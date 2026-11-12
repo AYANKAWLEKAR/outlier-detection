@@ -9,13 +9,14 @@ from typing import Protocol
 
 import orjson
 
-from agentfw.core.envelope import DetectorResult, Label, RawCall
+from agentfw.core.envelope import DetectorResult, JsonValue, Label, RawCall
 
-__all__ = ["CALLS", "LABELS", "VERDICTS", "EnvelopeSink", "JsonlSink"]
+__all__ = ["CALLS", "LABELS", "SCHEMAS", "VERDICTS", "EnvelopeSink", "JsonlSink"]
 
 CALLS = "calls.jsonl"
 LABELS = "labels.jsonl"
 VERDICTS = "verdicts.jsonl"
+SCHEMAS = "schemas.jsonl"
 _OPTS = orjson.OPT_SORT_KEYS | orjson.OPT_SERIALIZE_NUMPY | orjson.OPT_PASSTHROUGH_DATACLASS
 
 
@@ -25,6 +26,10 @@ class EnvelopeSink(Protocol):
     def write_labels(self, labels: Sequence[Label]) -> None: ...
 
     def write_verdict(self, envelope_id: str, result: DetectorResult) -> None: ...
+
+    def write_schema(self, row: dict[str, JsonValue]) -> None:
+        """One captured tool schema (a ``core.schemas.ToolSchema`` row)."""
+        ...
 
 
 def _default(obj: object) -> object:
@@ -40,7 +45,8 @@ def _default(obj: object) -> object:
 
 class JsonlSink:
     """Appends one sorted-key JSON object per line to ``calls.jsonl`` / ``labels.jsonl`` /
-    ``verdicts.jsonl`` under ``dir``. Each write opens, appends and closes (so it is flushed)."""
+    ``verdicts.jsonl`` / ``schemas.jsonl`` under ``dir``. Each write opens, appends and closes
+    (so it is flushed)."""
 
     def __init__(self, dir: Path) -> None:
         self.dir = Path(dir)
@@ -61,3 +67,6 @@ class JsonlSink:
 
     def write_verdict(self, envelope_id: str, result: DetectorResult) -> None:
         self._append(VERDICTS, [{"envelope_id": envelope_id, "mode": "shadow", "result": result}])
+
+    def write_schema(self, row: dict[str, JsonValue]) -> None:
+        self._append(SCHEMAS, [row])

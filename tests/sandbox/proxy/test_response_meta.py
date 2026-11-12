@@ -7,6 +7,7 @@ from typing import Any
 import orjson
 from mcp.types import CallToolResult, ImageContent, TextContent
 
+from agentfw.core.fingerprint import resp_fingerprint
 from agentfw.sandbox.proxy_py import extract_response_meta
 
 
@@ -86,3 +87,19 @@ def test_ids_walk_nested_json_dedup_and_cap() -> None:
 
 def test_ids_from_non_json_text_are_not_extracted() -> None:
     assert extract_response_meta(_res("charge ch_0000000001 refunded")).ids == ()
+
+
+def test_response_meta_fp_matches_core_function() -> None:
+    res = _res('{"data": [1, 2, 3], "note": "three open tickets for acme"}', "second block here")
+    meta = extract_response_meta(res)
+    text = '{"data": [1, 2, 3], "note": "three open tickets for acme"}\nsecond block here'
+    assert meta.fp == resp_fingerprint(text, 3, False) and meta.fp is not None
+    err = extract_response_meta(_res("boom: no such charge", is_error=True))
+    assert err.fp == resp_fingerprint("boom: no such charge", None, True)
+    assert err.fp != resp_fingerprint("boom: no such charge", None, False)
+
+
+def test_response_meta_fp_none_without_words() -> None:
+    assert extract_response_meta(_res()).fp is None
+    assert extract_response_meta(_res("   ")).fp is None
+    assert extract_response_meta(CallToolResult(content=[], is_error=False)).fp is None

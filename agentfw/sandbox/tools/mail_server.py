@@ -11,7 +11,7 @@ from typing import Any, Protocol
 from mcp.server.mcpserver import MCPServer
 
 from agentfw.sandbox.config import ALLOWED_SMTP_HOSTS, SandboxConfig, UnsafeConfigError
-from agentfw.sandbox.tools.common import mark_fake, tool_error
+from agentfw.sandbox.tools.common import ADD_OPEN, mark_fake, tool_error
 
 _ADDR = re.compile(r"^[^@\s,;<>]+@[^@\s,;<>]+\.[^@\s,;<>]+$")
 _SENDER = "agent@sandbox.example"
@@ -83,7 +83,7 @@ class LiveMailBackend:
 def build_server(backend: MailBackend) -> MCPServer:
     server = MCPServer("mail")
 
-    @server.tool()
+    @server.tool(annotations=ADD_OPEN)
     def send_email(
         to: list[str], subject: str, body: str, cc: list[str] | None = None
     ) -> dict[str, Any]:

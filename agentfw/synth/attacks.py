@@ -579,6 +579,8 @@ def prereq_skip(
         if j < i and _kind(ctx, c) == "read":
             continue
         kept.append(target if j == i else c)
+    if kept[0] is not session[0]:  # the session's first call was dropped: its task ids move on
+        kept[0] = kept[0].model_copy(update={"task_ids": session[0].task_ids})
     out = [c.model_copy(update={"seq_no": k}) for k, c in enumerate(kept)]
     t = next(k for k, c in enumerate(out) if c.envelope_id == target.envelope_id)
     labels = [_label(ctx, "prereq_skip", target.envelope_id)]
@@ -659,12 +661,14 @@ def burst_duplicates(orig: RawCall, r: int, w_ms: int, rng: np.random.Generator)
 
 
 def _copy_at(orig: RawCall, ts: int, rng: np.random.Generator) -> RawCall:
-    """``orig`` at ``ts`` with a fresh envelope id (two draws from ``rng``) and deep-copied args."""
+    """``orig`` at ``ts`` with a fresh envelope id (two draws from ``rng``) and deep-copied args.
+    A copy is never a session's first call, so it carries no ``task_ids`` (F1, T-33)."""
     return orig.model_copy(
         update={
             "envelope_id": new_ulid(ts, rng),
             "ts_unix_ms": ts,
             "args": copy.deepcopy(orig.args),
+            "task_ids": (),
         }
     )
 
@@ -806,6 +810,7 @@ def exfil_volume(
                     "ts_unix_ms": ts,
                     "tool_id": tool,
                     "args": args,
+                    "task_ids": (),
                     "response_meta": ResponseMeta(
                         bytes=size, ids=ids, fp=resp_fingerprint(blob.decode(), None, False)
                     ),

@@ -949,3 +949,19 @@ def test_cli_topup_rate_default_is_the_config_default(
     assert main(["--days", "1", "--max-sessions", "3", "--out", str(tmp_path)]) == 0
     m = orjson.loads((tmp_path / "manifest.json").read_bytes())
     assert m["config"]["magnitude_topup_rate"] == 0.25
+
+
+def test_only_a_sessions_first_call_carries_task_ids_with_attacks(tmp_path: Path) -> None:
+    """Attack copies (burst duplicates, runaway repeats) are never a session's first call (T-33)."""
+    d = gen(tmp_path / "x", small_cfg())
+    assert any(lab["label"] == "attack" for lab in d.labels)
+    seen: set[object] = set()
+    first = 0
+    for row in sorted(d.traces, key=lambda r: (str(r["session_id"]), int(r["seq_no"]))):  # type: ignore[call-overload]
+        sid = row["session_id"]
+        if sid not in seen:
+            seen.add(sid)
+            first += bool(row.get("task_ids"))
+        else:
+            assert "task_ids" not in row, row["envelope_id"]
+    assert first > 0

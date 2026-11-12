@@ -10,6 +10,9 @@
   into reads and disable id-flow on real writes.
 * ``bytes``: UTF-8 length of every text block.
 * ``error``: the result's ``is_error`` flag (``isError`` on the wire).
+* ``fp``: ``core.fingerprint.resp_fingerprint`` of the text blocks joined by newlines (the same
+  function the synth generator uses), with the extracted ``item_count`` and ``error``; ``None``
+  when the text has no words.
 * ``ids``: up to 256 distinct id-like string *values* (``patterns.is_id_like``), in document order.
 """
 
@@ -21,6 +24,7 @@ import orjson
 from mcp.types import CallToolResult, TextContent
 
 from agentfw.core.envelope import ResponseMeta
+from agentfw.core.fingerprint import resp_fingerprint
 from agentfw.core.patterns import is_id_like
 
 __all__ = ["LIST_KEYS", "MAX_IDS", "extract_response_meta"]
@@ -77,9 +81,12 @@ def extract_response_meta(result: CallToolResult) -> ResponseMeta:
         except orjson.JSONDecodeError:
             doc = _NOT_JSON
     parsed = doc is not _NOT_JSON
+    item_count = _item_count(doc) if parsed and not result.is_error else None
+    error = bool(result.is_error)
     return ResponseMeta(
-        item_count=_item_count(doc) if parsed and not result.is_error else None,
+        item_count=item_count,
         bytes=sum(len(t.encode()) for t in texts),
-        error=bool(result.is_error),
+        error=error,
         ids=_ids(doc) if parsed else (),
+        fp=resp_fingerprint("\n".join(texts), item_count, error),
     )
