@@ -162,11 +162,21 @@ class EngineConfig:
     # (irreversibility then always uses the blast radius, also under ``br_mode="off"``: T-35,
     # T-41) is checked before it executes: an id-typed value with no ledger producer on a warm
     # key whose ids flow at least ``gate_flow_rate`` of the time blocks (flag
-    # ``PREREQ_MISSING``); a cold key or ``fused >= θ_eff`` escalates (``REQUIRE_APPROVAL``
-    # until Task 3.2). A reversible call is never blocked: capped at ``REQUIRE_APPROVAL`` (or
-    # provisional, when ``provisional`` is on).
+    # ``PREREQ_MISSING``); a cold key or ``fused >= θ_eff`` escalates (``REQUIRE_APPROVAL``,
+    # then the escalation stage when ``escalate`` is on). A reversible call is never blocked:
+    # capped at ``REQUIRE_APPROVAL`` (or provisional, when ``provisional`` is on).
     gate: bool = False
     gate_flow_rate: float = 0.90
+    # Two-tier escalation (F5, Task 3.2; core.trajectory.escalate; T-12, T-42). With ``escalate``
+    # an irreversible call whose decision after the gate is ``BLOCK`` or ``REQUIRE_APPROVAL``
+    # (a gate escalation or a band candidate; never a gate block) is re-scored fresh from the
+    # store: the more severe of that decision and the fresh score's band stands (a confirmed
+    # gate escalation is ``BLOCK`` again). Then, inside the approval band only, an injected judge
+    # (``Engine(judge=...)``) may move it: score >= ``judge_block`` -> ``BLOCK``,
+    # <= ``judge_allow`` -> ``ALLOW``. Irreversibility then always uses the blast radius (T-35).
+    escalate: bool = False
+    judge_block: float = 0.8
+    judge_allow: float = 0.2
     # Fusion (§6.11)
     fusion_bonus: float = 0.15
     fusion_bonus_gate: float = 0.5

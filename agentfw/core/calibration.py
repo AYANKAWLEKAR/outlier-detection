@@ -15,7 +15,16 @@ from agentfw.core.envelope import Decision, Outcome
 from agentfw.core.state import StateStore, key_cal, register_record
 from agentfw.core.stats.p2 import P2Quantiles, p2_tail
 
-__all__ = ["CalRecord", "Calibrator"]
+__all__ = ["CalRecord", "Calibrator", "band"]
+
+
+def band(fused: float, theta: float, cal_delta: float) -> Decision:
+    """The §6.8 decision band of ``fused`` against ``theta`` (NaN -> ``ALLOW``)."""
+    if fused >= theta:
+        return Decision.BLOCK
+    if fused >= theta - cal_delta:
+        return Decision.REQUIRE_APPROVAL
+    return Decision.ALLOW
 
 
 @register_record
@@ -65,11 +74,7 @@ class Calibrator:
         """The §6.8 band of ``fused`` against ``theta`` (default: the agent's threshold)."""
         if theta is None:
             theta = self.threshold(agent)
-        if fused >= theta:
-            return Decision.BLOCK
-        if fused >= theta - self.cfg.cal_delta:
-            return Decision.REQUIRE_APPROVAL
-        return Decision.ALLOW
+        return band(fused, theta, self.cfg.cal_delta)
 
     def observe(self, agent: str, fused: float, outcome: Outcome) -> None:
         if outcome not in (Outcome.ALLOWED, Outcome.APPROVED):

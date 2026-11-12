@@ -74,8 +74,17 @@ Pre-execution gate (F4, Task 3.1; ``core.trajectory.gate``): with ``gate``, ``de
 gate on every irreversible call (irreversibility again from the blast radius whatever
 ``br_mode``, T-35 / T-41) with the call's envelope, its pinned types and the sequence detector,
 which the gate reads at call time (no snapshot is kept; ``score`` stays pure). Its outcome is
-``TrajectoryInfo.gate``; a gate block is the only way the engine blocks with ``gate`` on, since
-an escalation is ``REQUIRE_APPROVAL`` and a reversible call is capped there (or provisional).
+``TrajectoryInfo.gate``; with ``escalate`` off a gate block is the only way the engine blocks
+with ``gate`` on, since an escalation is ``REQUIRE_APPROVAL`` and a reversible call is capped
+there (or provisional).
+
+Escalation (F5, Task 3.2; ``core.trajectory.escalate``; T-12, T-42): with ``escalate``, ``decide``
+re-scores an irreversible call it would block or hold for approval (not a gate block) through
+``_rescore`` -- the fused score recomputed from the store, never from the per-call cache; read
+only, so ``score`` stays pure -- and the injected ``judge`` (``Engine(judge=...)``, default none)
+may break a tie inside the approval band, shown the envelope and the result's reasons only. A
+re-score that confirms a gate escalation blocks again. ``update`` on an envelope it did not just
+score evaluates it afresh, so the escalation (and the judge) runs again there.
 """
 
 from __future__ import annotations
@@ -113,6 +122,7 @@ from agentfw.core.schema_infer import TypeInference, TypeView
 from agentfw.core.state import DictStore, StateStore
 from agentfw.core.trajectory import provisional
 from agentfw.core.trajectory.decide import decide
+from agentfw.core.trajectory.escalate import Judge
 from agentfw.core.trajectory.flags import Flag, derive_flags
 from agentfw.core.trajectory.session import SessionBook, SessionRecord
 
@@ -167,6 +177,7 @@ class Engine:
         store: StateStore | None = None,
         enabled: frozenset[str] = ALL_DETECTORS,
         hints: Mapping[str, ToolHint] = _NO_HINTS,
+        judge: Judge | None = None,
     ) -> None:
         unknown = set(enabled) - KNOWN_DETECTORS
         if unknown:
@@ -182,10 +193,16 @@ class Engine:
             provisional.check_config(cfg)
         if cfg.gate and not 0.0 <= cfg.gate_flow_rate <= 1.0:
             raise ValueError(f"gate_flow_rate must be in [0, 1], got {cfg.gate_flow_rate}")
+        if cfg.escalate and not 0.0 <= cfg.judge_allow < cfg.judge_block <= 1.0:
+            raise ValueError(
+                "need 0 <= judge_allow < judge_block <= 1, got "
+                f"judge_allow={cfg.judge_allow}, judge_block={cfg.judge_block}"
+            )
         self.cfg = cfg
         self.store: StateStore = DictStore() if store is None else store
         self.enabled = frozenset(enabled)
         self.hints = hints
+        self.judge = judge  # F5's optional tie-breaker; consulted only with ``escalate`` on
         self.inference = TypeInference(self.store, cfg)
         self.priors = PooledPriors(self.store, cfg)
         self.calibrator = Calibrator(self.store, cfg)
@@ -314,7 +331,18 @@ class Engine:
         per, fr = self._fuse(e, view)
         theta = self.calibrator.threshold(e.agent_id)
         traj0 = self._trajectory(e, theta)
-        decision, traj = decide(fr.fused, traj0, self.cfg, e=e, types=view, seq=self._sequence)
+        reasons = _with_b(fr.reasons, traj0.blast_radius) if self.judge is not None else ()
+        decision, traj = decide(
+            fr.fused,
+            traj0,
+            self.cfg,
+            e=e,
+            types=view,
+            seq=self._sequence,
+            rescore=lambda: self._rescore(e),
+            judge=self.judge,
+            reasons=reasons,
+        )
         hint = self.hints.get(e.tool_id)
         flags = traj.flags | derive_flags(per, decision, traj.irreversible, hint, self.cfg)
         book = self._book
@@ -328,6 +356,11 @@ class Engine:
             density = book.density_with(rec, flags)
         traj = dataclasses.replace(traj, flags=frozenset(flags), density=density)
         return view, per, fr, theta, traj, decision
+
+    def _rescore(self, e: ActionEnvelope) -> float:
+        """F5's fresh re-score (T-12): ``e``'s fused score recomputed from the store -- types
+        looked up again, every detector re-run -- never from the engine's per-call cache. Pure."""
+        return self._fuse(e, self._view(e))[1].fused
 
     def _advance(
         self,
@@ -362,12 +395,12 @@ class Engine:
         hint = self.hints.get(tool)
         has_schema = hint is not None and hint.has_schema
         regime = regime_of(has_schema, seq.n_tool(agent, tool), cfg.mag_cold_n)
-        if cfg.br_mode == "off" and not (cfg.provisional or cfg.gate):
+        if cfg.br_mode == "off" and not (cfg.provisional or cfg.gate or cfg.escalate):
             return TrajectoryInfo(regime, None, irreversible(None, hint, False), theta)
         is_write = seq.is_write(agent, tool)
         b = blast_radius(e, hint, is_write, seq.has_item_count(agent, tool))
         irr = irreversible(b, hint, is_write, cfg.irreversible_b)
-        if cfg.br_mode == "off":  # b for provisional's / the gate's irreversibility only (T-35)
+        if cfg.br_mode == "off":  # b for the irreversibility of F4-F6 only (T-35, T-41, T-42)
             return TrajectoryInfo(regime, None, irr, theta)
         theta_eff = theta * (1.0 - cfg.br_k * b) if cfg.br_mode == "modulate" else theta
         return TrajectoryInfo(regime, b, irr, theta_eff)

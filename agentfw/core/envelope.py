@@ -265,6 +265,12 @@ class TrajectoryInfo:
     #: The pre-execution gate's outcome (F4): set only when ``EngineConfig.gate`` is on and the
     #: call is irreversible.
     gate: GateOutcome | None = None
+    #: Two-tier escalation (F5): ``escalated`` is True when the escalation stage ran on this call
+    #: (``EngineConfig.escalate``, T-42); then ``fast_score`` is the fused score of the fast path
+    #: and ``escalated_score`` the fresh re-score the decision rests on (both ``None`` otherwise).
+    escalated: bool = False
+    fast_score: float | None = None
+    escalated_score: float | None = None
 
 
 @dataclass(slots=True, frozen=True)

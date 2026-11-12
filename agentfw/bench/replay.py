@@ -129,6 +129,9 @@ class ScoreRow:
     # The session's label (``session_metrics.session_labels``: benign / runaway / attacked),
     # filled by ``replay`` once every row is built (Task 2.4).
     session_label: str | None = None
+    # The escalation stage ran on this call (F5, Task 3.2: ``TrajectoryInfo.escalated``, T-42);
+    # False when unscored or the detector has no trajectory.
+    escalated: bool = False
 
 
 def _order(r: RawCall) -> tuple[int, str, int]:
@@ -222,6 +225,7 @@ def replay(
         decision: str | None = None
         flags = ""
         density: float | None = None
+        escalated = False
         outcome = Outcome.ALLOWED
         flagged = False
         if scored:
@@ -239,6 +243,7 @@ def replay(
             if res.trajectory is not None:
                 flags = ",".join(sorted(f.name for f in res.trajectory.flags))
                 density = res.trajectory.density
+                escalated = res.trajectory.escalated
             if outcomes == "enforce" and res.decision is Decision.BLOCK:
                 outcome = Outcome.BLOCKED
         lab = labels.get(env.envelope_id)
@@ -271,6 +276,7 @@ def replay(
                 decision=decision,
                 flags=flags,
                 density=density,
+                escalated=escalated,
             )
         )
         detector.update(env, outcome)

@@ -135,6 +135,13 @@ AGE_DEFAULTS: dict[str, object] = {"seq_age_discount": False, "age_h": 3}
 # Task 3.1 pre-execution gate for irreversible calls (feature spec F4; T-11, T-41).
 PREEXEC_GATE_DEFAULTS: dict[str, object] = {"gate": False, "gate_flow_rate": 0.90}
 
+# Task 3.2 two-tier escalation with an optional judge in the approval band (feature spec F5).
+ESCALATION_DEFAULTS: dict[str, object] = {
+    "escalate": False,
+    "judge_block": 0.8,
+    "judge_allow": 0.2,
+}
+
 
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
@@ -150,6 +157,7 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | PROVISIONAL_DEFAULTS
         | AGE_DEFAULTS
         | PREEXEC_GATE_DEFAULTS
+        | ESCALATION_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
 
