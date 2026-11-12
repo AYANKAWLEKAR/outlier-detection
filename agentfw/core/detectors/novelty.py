@@ -42,10 +42,8 @@ emits nothing. A negative number in an ``up`` field (``qty`` / ``amount`` / ``co
 names, money / count hints) scores about 0.01 (one-sided, z = 0: after ``[0, 1]*40`` both ``-5``
 and ``-10000`` in ``qty``), and so does a fraction between 0 and 1 in any field; a ``both`` field
 still scores a large negative number by its size. Before the amendment novelty scored each of
-them 1.0. (4) Not changed by the amendment: a non-finite float (``inf``, ``-inf``, ``"1e999"``,
-NaN) contradicts nothing, because ``contradicts_bool`` wants a finite value, so in a BOOL-typed
-field neither detector scores it and it is never learned; an infinite value in a NUMERIC-typed
-field scores 1.0 by magnitude, as does an int too large for a float in the BOOL-typed one. With the
+them 1.0. (4) Under ``mag_bool_numeric=True`` an infinite number in a BOOL-typed field scores 1.0
+by magnitude; with the switch off it is scored by no detector (pre-amendment behaviour). With the
 switch off (pre-amendment) the first number outside {0, 1} scores by novelty alone, and after a
 learned BOOL -> NUMERIC switch magnitude starts cold (it never pushed the BOOL-typed history).
 

@@ -31,9 +31,12 @@ what ``try_number`` parses as finite: ints, floats and numeric strings; Python b
 ``"true"`` / ``"false"`` are not numbers), under the usual key, and ``score`` scores only the
 values that contradict BOOL (``schema_infer.contradicts_bool``: a number outside {0, 1}) with the
 active rule and ``evidence["type_violation"] = "bool"``; a path with no such value emits
-nothing. ``has_ref`` tells novelty whether a field has a usable reference (a warm own record or
-a warm pooled prior), so that novelty scores the contradiction only when magnitude cannot. With
-the switch off (pre-amendment) BOOL-typed paths are neither scored nor learned.
+nothing. An infinite number (``try_number`` gives ``±inf``: ``inf``, ``-inf``, ``"1e999"``) is a
+number outside {0, 1} as well (ruling A1-13): it scores 1.0 through the non-finite handling, with
+``non_finite`` and ``type_violation``, and is never pushed; NaN is still skipped. ``has_ref``
+tells novelty whether a field has a usable reference (a warm own record or a warm pooled prior),
+so that novelty scores the contradiction only when magnitude cannot. With the switch off
+(pre-amendment) BOOL-typed paths are neither scored nor learned.
 
 Cold keys (``n < mag_cold_n``) score against the pooled prior (§6.10) with its scale inflated by
 ``prior_iqr_inflate`` and ``prior_used=True``; with no usable prior they score 0.0 with
@@ -97,6 +100,12 @@ _Z75 = 0.6744897501960817
 _Z95 = 1.6448536269514722
 _NO_EXTRA: Mapping[str, object] = MappingProxyType({})
 _BOOL_VIOLATION: Mapping[str, object] = MappingProxyType({"type_violation": "bool"})
+
+
+def _is_inf(v: Scalar) -> bool:
+    """Whether ``try_number`` parses ``v`` as ``+inf`` or ``-inf`` (ruling A1-13)."""
+    x = try_number(v)
+    return x is not None and math.isinf(x)
 
 
 def direction_for(path: str, hints: Mapping[str, str], default: Direction = "both") -> Direction:
@@ -304,7 +313,10 @@ class MagnitudeDetector:
             ft = types(path)
             extra = _NO_EXTRA
             if ft is FieldType.BOOL and bool_numeric:  # spec A1.3: only what contradicts BOOL
-                values = tuple(v for v in values if v is not None and contradicts_bool(v))
+                # ruling A1-13: an infinite number is a number outside {0, 1} too
+                values = tuple(
+                    v for v in values if v is not None and (contradicts_bool(v) or _is_inf(v))
+                )
                 if not values:
                     continue
                 extra = _BOOL_VIOLATION

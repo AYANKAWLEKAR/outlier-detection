@@ -945,21 +945,56 @@ def test_pinned_contradiction_not_above_the_learned_range_scores_low() -> None:
         assert res.fused_score == pytest.approx(1.0)
 
 
-@pytest.mark.parametrize("cfg", [A1, PRE], ids=["a1", "pre_a1"])
-def test_pinned_non_finite_float_in_a_bool_field_is_scored_by_no_detector(
-    cfg: EngineConfig,
-) -> None:
-    """PINS a limit A1.3 leaves as it was (the same with ``mag_bool_numeric`` on and off).
-    ``contradicts_bool`` wants a finite value from a float or a string, so ``inf``, ``-inf``,
-    ``"1e999"`` (JSON 1e999) and NaN in a BOOL-typed field contradict nothing: magnitude's BOOL
-    branch and novelty both drop them, and an ALLOWED one neither retypes the field nor is pushed.
-    An infinite value in a NUMERIC-typed field scores 1.0 (``non_finite``), and so does an int
-    too large for a float in this field (the ``10**400`` test below)."""
-    eng, tr = _qty_engine([0, 1] * 40, cfg)
+def test_non_finite_in_a_bool_field_scores_one_under_a1() -> None:
+    """Ruling A1-13 (``mag_bool_numeric=True``): an infinite number is a number outside {0, 1},
+    so in a BOOL-typed field ``inf``, ``-inf`` and ``"1e999"`` (JSON 1e999) score 1.0 by
+    magnitude through the non-finite handling (``non_finite``, ``type_violation == "bool"``), as
+    in a NUMERIC-typed field, and are never pushed: an ALLOWED one can not be learned away. NaN is
+    still skipped (no score, no update)."""
+    eng, tr = _qty_engine([0, 1] * 40, A1)
     key = key_mag("a", "shop.order", "qty")
     rec = eng.store.get(key)
-    before = None if rec is None else orjson.dumps(rec.to_dict())
-    assert (before is not None) is cfg.mag_bool_numeric
+    assert rec is not None
+    before = orjson.dumps(rec.to_dict())
+    for i, v in enumerate((math.inf, -math.inf, "1e999"), 80):
+        e = _qty_env(tr, i, v)
+        res = eng.score(e)
+        assert res.field_types["qty"] is FieldType.BOOL
+        mag = by(res, "magnitude", "qty")
+        assert mag.score == 1.0 and mag.evidence["non_finite"]
+        assert mag.evidence["type_violation"] == "bool"
+        assert res.fused_score > 0.999
+        eng.update(e, Outcome.ALLOWED)  # learned, yet never pushed
+        tr.observe(e)
+        rec = eng.store.get(key)
+        assert rec is not None and orjson.dumps(rec.to_dict()) == before
+        again = eng.score(_qty_env(tr, i, math.inf))
+        assert again.field_types["qty"] is FieldType.BOOL
+        assert by(again, "magnitude", "qty").score == 1.0
+    e = _qty_env(tr, 83, math.nan)
+    res = eng.score(e)
+    assert res.field_types["qty"] is FieldType.BOOL
+    assert not _qty_scores(res) and res.fused_score < 0.1
+    eng.update(e, Outcome.ALLOWED)
+    rec = eng.store.get(key)
+    assert rec is not None and orjson.dumps(rec.to_dict()) == before
+    # in a list the path score is the maximum over its values: the infinite one scores 1.0
+    eng, tr = _qty_engine([[1, 1, 1]] * 40, A1, field="flags")
+    res = eng.score(_qty_env(tr, 40, [math.inf, 2], field="flags"))
+    assert res.field_types["flags[]"] is FieldType.BOOL
+    mag = by(res, "magnitude", "flags[]")
+    assert mag.score == 1.0 and mag.evidence["non_finite"]
+    assert mag.evidence["type_violation"] == "bool"
+
+
+def test_pinned_non_finite_float_in_a_bool_field_is_scored_by_no_detector_pre_a1() -> None:
+    """PINS the pre-amendment behaviour, ``mag_bool_numeric=False``. ``contradicts_bool`` wants a
+    finite value from a float or a string, so ``inf``, ``-inf``, ``"1e999"`` (JSON 1e999) and NaN
+    in a BOOL-typed field contradict nothing: novelty drops them, magnitude skips BOOL-typed
+    paths, and an ALLOWED one neither retypes the field nor is pushed."""
+    eng, tr = _qty_engine([0, 1] * 40, PRE)
+    key = key_mag("a", "shop.order", "qty")
+    assert eng.store.get(key) is None
     for i, v in enumerate((math.inf, -math.inf, "1e999", math.nan), 80):
         e = _qty_env(tr, i, v)
         res = eng.score(e)
@@ -967,18 +1002,15 @@ def test_pinned_non_finite_float_in_a_bool_field_is_scored_by_no_detector(
         assert not _qty_scores(res) and res.fused_score < 0.1
         eng.update(e, Outcome.ALLOWED)  # learned, yet nothing to learn from it
         tr.observe(e)
-    rec = eng.store.get(key)
-    assert (None if rec is None else orjson.dumps(rec.to_dict())) == before
+    assert eng.store.get(key) is None
     assert eng.score(_qty_env(tr, 84, 1)).field_types["qty"] is FieldType.BOOL
-    # in a list the non-finite value is dropped and the path is scored on its finite
+    # in a list the non-finite value is dropped and the path is scored by novelty on its finite
     # contradiction alone, never 1.0 through ``non_finite``
-    eng, tr = _qty_engine([[1, 1, 1]] * 40, cfg, field="flags")
+    eng, tr = _qty_engine([[1, 1, 1]] * 40, PRE, field="flags")
     res = eng.score(_qty_env(tr, 40, [math.inf, 2], field="flags"))
     (ds,) = [d for d in res.per_detector if d.field == "flags[]"]
-    assert ds.detector == ("magnitude" if cfg.mag_bool_numeric else "novelty")
+    assert ds.detector == "novelty"
     assert ds.evidence["type_violation"] == "bool" and "non_finite" not in ds.evidence
-    if cfg.mag_bool_numeric:
-        assert ds.evidence["observed"] == 2.0
 
 
 def test_bool_field_without_numeric_reference_falls_back_to_novelty() -> None:

@@ -42,9 +42,9 @@ while the first was BLOCKED, since a blocked call never retypes the field and le
 (3) A contradiction that is not above the learned range is no longer flagged: magnitude scores it
 by its size with the field's direction and novelty is silent, so a negative number in an ``up``
 field (a negative count in ``qty``) and a fraction between 0 and 1 in any field score about 0.01
-where novelty used to score 1.0. (4) Not changed by the amendment: a non-finite float (``inf``,
-``-inf``, ``"1e999"``, NaN) in a BOOL-typed field contradicts nothing (see ``contradicts_bool``),
-so no detector scores it and it is never learned.
+where novelty used to score 1.0. (4) Under ``mag_bool_numeric=True`` an infinite number in a
+BOOL-typed field scores 1.0 by magnitude; with the switch off it is scored by no detector
+(pre-amendment behaviour).
 With the switch off (pre-amendment behaviour) magnitude skips BOOL-typed fields: the first
 number outside {0, 1} scores 1.0 by novelty whatever its magnitude, and after a learned
 BOOL -> NUMERIC switch the field is in magnitude cold start for ``mag_cold_n`` observations
