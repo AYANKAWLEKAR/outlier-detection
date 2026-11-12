@@ -791,7 +791,11 @@ def test_topup_is_deterministic_and_uses_its_own_stream(
         assert hashlib.sha256((tmp_path / name).read_bytes()).hexdigest() == digest
     # rate 0: no top-up id, and the bytes of Task 1.19's far dataset
     assert topup_cfg(0.0) == small_cfg(magnitude_mode="far") == trio.far.manifest.config
-    assert trio.far.manifest.files == SMALL_FAR_FILES != again.manifest.files
+    # T-24: the trajectory branch adds ``task_ids`` / ``response_meta.fp``; with them stripped
+    # the far traces are still byte-identical to the pinned digest.
+    assert trio.far.manifest.files["labels.jsonl"] == SMALL_FAR_FILES["labels.jsonl"]
+    assert _strip_trace_fields(trio.far.trace_lines) == SMALL_FAR_FILES["traces.jsonl"]
+    assert trio.far.manifest.files != again.manifest.files
     assert not _topups(trio.far) and trio.far.manifest.counts["magnitude_topup"] == 0
     # the third stream (A1.4): its own, a function of the seed
     want = np.random.default_rng([0, stable_hash("attacks:magnitude_topup")])
