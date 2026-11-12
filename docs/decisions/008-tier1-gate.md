@@ -409,7 +409,10 @@ and are not in the code.
 
 `tail_prior`, `magnitude_far_mult` and `magnitude_topup_rate` are fixed by the spec. They were
 not swept or changed against any seed's recall, and nothing was retuned after the measurement
-below. The generator defaults did not change, so the CI, tiny, validation and decision-008
+below. Spec A1.4 discloses how the top-up rate was chosen: 0.015 was set once, in the draft
+phase, when prototypes with a fixed count of 120 and a rate of 0.01 had already been replayed and
+their recalls were known; no other rate was generated, and nothing was retuned after the
+measurement. The generator defaults did not change, so the CI, tiny, validation and decision-008
 datasets are byte-identical to before.
 
 ### Tier-1 gate under both protocols, SW1 seeds 0, 1 and 2
@@ -437,6 +440,13 @@ under one protocol next to a fail under the other. Which protocol's result close
 user's open decision (D-028; spec A1.13 item 1). The original spec §9 criterion (top-1 share
 ≥ 0.90) fails under both protocols on every seed (velocity_burst 0.24 to 0.43). The Tier-2 exit is
 not reached: the live sandbox dataset v1 has not been built.
+
+The composition of the `magnitude_spike` cell (spec A1.4; `matrix.json` `census`, the same
+rendering as under the leaderboard's gate tables), one line per seed:
+
+- Seed 0. Census of the magnitude_spike gate cell (spec A1.4): n 81 (warm test rows, bucket 10-100) by persona: support-refunds-c 22, lead-router-a 17, support-refunds-a 11, sales-ops-a 8, support-refunds-b 8, billing-disputes-a 4, sales-ops-b 4, crm-hygiene-a 3, exec-assistant-a 2, payouts-ops-a 1, renewals-a 1; over all 264 spikes of the dataset, median strength 48.3 and share with strength >= 10 0.970.
+- Seed 1. Census of the magnitude_spike gate cell (spec A1.4): n 85 (warm test rows, bucket 10-100) by persona: lead-router-a 23, support-refunds-c 15, sales-ops-a 9, sales-ops-b 9, crm-hygiene-a 8, support-refunds-a 8, payouts-ops-a 5, support-refunds-b 4, exec-assistant-a 2, billing-disputes-a 1, renewals-a 1; over all 252 spikes of the dataset, median strength 50.5 and share with strength >= 10 0.988.
+- Seed 2. Census of the magnitude_spike gate cell (spec A1.4): n 85 (warm test rows, bucket 10-100) by persona: support-refunds-c 20, support-refunds-a 16, lead-router-a 10, sales-ops-a 9, support-refunds-b 9, sales-ops-b 8, payouts-ops-a 4, billing-disputes-a 3, crm-hygiene-a 3, renewals-a 3; over all 262 spikes of the dataset, median strength 51.5 and share with strength >= 10 0.981.
 
 ### Companion rows (spec A1.5 rule 4)
 
@@ -521,7 +531,8 @@ benign range, 97 to 99 % of them have strength ≥ 10, so the 3-10 bucket is nea
 
 ### What is still not met
 
-Spec A1.12, with the numbers measured on the implementation (`matrix.json`, `matrix.md`).
+Spec A1.12 (items 1 to 14), with the numbers measured on the implementation (`matrix.json`,
+`matrix.md`); item 15 comes from `docs/leaderboard.md`.
 
 1. **The amended criterion fails under spec §5.2 allow-all on seeds 0, 1 and 2.** Seed 0:
    exfil_volume 0.579 (11/19), prereq_skip 0.533 (8/15), novel_target 0.163 (8/49), velocity_burst
@@ -569,14 +580,15 @@ Spec A1.12, with the numbers measured on the implementation (`matrix.json`, `mat
    variance-to-mean ratio is above 2). The share of benign velocity scores ≥ 0.5 under the
    oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) is 0.76 % /
    1.22 % / 0.92 % on seeds 0 / 1 / 2 (pre-A1 1.11 % / 1.42 % / 1.27 %), above the 0.5 % prior. The
-   per-agent shares are now recorded in `matrix.md` with no threshold; the highest is payouts-ops-a
-   at 3.53 % (seed 2).
+   per-agent shares are now recorded in `matrix.md` with no threshold; the highest under the
+   oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) is
+   payouts-ops-a at 3.53 % (seed 2; 3.67 % under spec §5.2 allow-all).
 10. **Not measured:** `Engine.score` latency p99 on an idle machine (`latency_p99_us` is null in
-    `matrix.json`; three runs under load stayed below the 200 µs budget and are not pinned); seed 1
-    and seed 2 on the sensitivity dataset; Go parity of `erfc` and the cube root; the cause of the
-    sensitivity and allow-all magnitude drop against the prototype's fixed-count data; the 90-day
-    seed-0 ablation evidence of decision 007, which was measured on the pre-A1 engine (decision
-    007's dated addendum records only the `tiny_dataset` re-measurement).
+    `matrix.json`; three runs of the warm-key perf test under load stayed below the 200 µs budget
+    and are not pinned); seed 1 and seed 2 on the sensitivity dataset; Go parity of `erfc` and the
+    cube root; the cause of the sensitivity and allow-all magnitude drop against the prototype's
+    fixed-count data; the 90-day seed-0 ablation evidence of decision 007, which was measured on the
+    pre-A1 engine (decision 007's dated addendum records only the `tiny_dataset` re-measurement).
 11. **A BOOL-typed field in magnitude cold start** still gets only novelty's ramped fallback score.
 12. **The magnitude gate cell is concentrated.** Seed 0: 81 attacks on 11 of 20 personas;
     support-refunds-c holds 22 (27 %) and the three refund personas 41 (51 %). Seed 1: 85 on 11
@@ -587,6 +599,24 @@ Spec A1.12, with the numbers measured on the implementation (`matrix.json`, `mat
     usual value scores close to 1" holds at ×100 on every SW1 field, and at ×10 only on narrow
     fields (log-sd up to about 0.6). At ×10 on sales-ops-a `amount` (log-sd 0.86) the score is
     0.575 (spec A1.2).
+14. **A1.3 silences novelty on BOOL-typed contradictions that are not above the learned range**
+    (spec A1.12 item 14). Under `mag_bool_numeric = True` a negative number in an `up` BOOL-typed
+    field (e.g. `qty = -5`) and a fraction between 0 and 1 in any BOOL-typed field now score about
+    0.01 by magnitude (z = 0 under the one-sided rule for the negative number; novelty's fallback
+    is silent once magnitude has a reference), where the pre-A1 engine scored 1.0 (novelty FR2
+    N1). Pinned by
+    `tests/core/test_engine.py::test_pinned_contradiction_not_above_the_learned_range_scores_low`.
+    Keeping novelty's score for those values is a behaviour change left to the user (spec A1.13
+    item 6).
+15. **On the leaderboard's ranking metric the engine before Amendment A1 does better** (found on
+    the implementation's leaderboard; not in spec A1.12). Per-agent FPR@95 under the
+    oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) is
+    0.490 [0.405, 0.557] for the amended engine and 0.456 [0.344, 0.536] for the engine before A1
+    by time, and 0.726 [0.675, 0.787] against 0.689 [0.645, 0.819] by agent; the 95 % CIs overlap.
+    The engine before A1 ranks first by time on `docs/leaderboard.md`. By agent, the control FPR
+    at that operating point is 0.931 against 0.822. Under spec §5.2 allow-all the amended engine
+    is lower on both splits (0.542 against 0.555 by time, 0.673 against 0.679 by agent). Nothing
+    was retuned in response.
 
 ### Decisions left to the user
 
@@ -599,5 +629,5 @@ This amendment takes a default on each point below. Each is the user's decision;
 3. **The top-up rate 0.015 and the 50-attack minimum as a dataset-validity assertion.** Default: `magnitude_topup_rate = 0.015` on SW1; a dataset with fewer than 50 attacks in the gate cell fails the acceptance test (A1.4, A1.7).
 4. **The acceptance file goes green on its `review` parameter (oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)), with its `allow` parameter (spec §5.2 allow-all) as a strict xfail.** Default: yes (plan Task 1.24).
 5. **×10 on the widest SW1 field scores 0.575.** Default: accepted (A1.2, A1.12 item 13).
-6. **A1.3 lowers an existing score.** After `[0, 1]·40` a `2` scored 1.0 by novelty (FR2 N1) and now scores 0.048; a `5` scores 0.335. Default: accepted (`mag_bool_numeric = True`).
+6. **A1.3 lowers an existing score.** After `[0, 1]·40` a `2` scored 1.0 by novelty (FR2 N1) and now scores 0.048; a `5` scores 0.335. A negative number in an `up` BOOL-typed field (e.g. `qty = -5`) and a fraction between 0 and 1 in any BOOL-typed field now score about 0.01 by magnitude (novelty's fallback is silent once magnitude has a reference) where the pre-A1 engine scored 1.0; keeping novelty's score for those values is a behaviour change (A1.12 item 14). Default: accepted (`mag_bool_numeric = True`).
 7. **The new defaults leave each agent's calibrator holding old-formula scores after an upgrade (A1.8).** Default: the calibrator records are kept and the thresholds adapt over time; they are not reset.

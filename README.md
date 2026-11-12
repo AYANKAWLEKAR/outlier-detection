@@ -128,6 +128,9 @@ dataset (`magnitude_far_mult = 1.0`). The sensitivity rows are not gate results.
 pre-A1 engine also passes the amended criterion under the oracle-reviewer approval loop (labels act
 as a perfect human reviewer → optimistic) and fails it under spec §5.2 allow-all (decision 008).
 
+The composition of the SW1 seed-0 `magnitude_spike` cell (spec A1.4; `matrix.json` `census`, the
+same line as under the leaderboard's gate tables): Census of the magnitude_spike gate cell (spec A1.4): n 81 (warm test rows, bucket 10-100) by persona: support-refunds-c 22, lead-router-a 17, support-refunds-a 11, sales-ops-a 8, support-refunds-b 8, billing-disputes-a 4, sales-ops-b 4, crm-hygiene-a 3, exec-assistant-a 2, payouts-ops-a 1, renewals-a 1; over all 264 spikes of the dataset, median strength 48.3 and share with strength >= 10 0.970.
+
 | dataset | engine | Protocol | magnitude_spike 10-100 | scope_blowup | exfil_volume | prereq_skip | novel_target | velocity_burst | benign FPR | control FPR | amended criterion |
 |---|---|---|---|---|---|---|---|---|---|---|---|
 | SW1 seed 0 (`a455b10c705d`) | amended (A1) | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 1.000 (81/81); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 1.00; 0.84 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 1.000 (50/50); 1.00; 0.40 | 0.0058 | 0.035 | PASS |

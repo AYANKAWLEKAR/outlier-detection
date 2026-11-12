@@ -17,9 +17,10 @@ from typing import Any
 import orjson
 import pytest
 
-from agentfw.bench.gate import ORIGINAL_CRITERION_LABEL
+from agentfw.bench.gate import ORIGINAL_CRITERION_LABEL, MagnitudeCensus, render_census
 from agentfw.bench.replay import PROTOCOL_LABELS
 from agentfw.bench.report import README_END, README_START
+from agentfw.synth.generate import sw1_config
 
 ROOT = Path(__file__).resolve().parents[2]
 MATRIX = ROOT / "docs/decisions/evidence/a1-gate/matrix.json"
@@ -365,3 +366,263 @@ def test_clarifications_table_has_d021_to_d028() -> None:
     assert ids == [f"D-{i:03d}" for i in range(1, 29)]
     assert "smallest α" in text  # D-021: the per-agent operating point
     assert 'no document may say "Tier-1 gate met" on the review result alone' in text  # D-028
+
+
+# --- Final-review fix list, Part B (rulings A1-28, A1-30 to A1-33): the numbers added to the docs
+# are pinned to their sources (matrix.json, docs/leaderboard.md, the README report block, the
+# spec), never to themselves.
+
+LEADERBOARD = ROOT / "docs/leaderboard.md"
+SPEC = ROOT / "docs/spec.md"
+REVIEW, ALLOW = PROTOCOL_LABELS["review"], PROTOCOL_LABELS["allow"]
+
+
+def flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def units_with(name: str, needle: str) -> list[str]:
+    units = [u for u in prose_units(gate_scope(name)) if needle in u]
+    assert units, (name, needle)
+    return units
+
+
+def pct(x: float, nd: int = 2) -> str:
+    return f"{100 * x:.{nd}f} %"
+
+
+def census_line(seed: int) -> str:
+    """The census line of ``render_census`` for a seed's ``matrix.json`` census (spec A1.4)."""
+    return render_census(MagnitudeCensus(**_matrix()["census"][str(seed)]))
+
+
+def test_census_line_is_matrix_json_seed0_on_the_leaderboard() -> None:
+    """The leaderboard's census (computed from the dataset) is matrix.json's seed-0 census."""
+    assert flat(LEADERBOARD.read_text()).count(census_line(0)) == 2
+
+
+@pytest.mark.parametrize(
+    ("name", "start", "end", "seeds"),
+    [
+        ("README.md", "\n## Tier-1 gate under both protocols, SW1 seed 0\n", "\n| dataset |", (0,)),
+        ("writeup", "\n## 6. Tier-1 status\n", "\n**Companion rows", (0, 1, 2)),
+        (
+            "008",
+            "\n### Tier-1 gate under both protocols, SW1 seeds 0, 1 and 2\n",
+            "\n### Companion rows",
+            (0, 1, 2),
+        ),
+    ],
+)
+def test_census_line_stands_with_the_gate_table(
+    name: str, start: str, end: str, seeds: tuple[int, ...]
+) -> None:
+    """Spec A1.4 / ruling A1-31: the README's dual-protocol table intro carries the seed-0 census
+    line; the writeup's and decision 008's seed tables carry one per seed."""
+    text = gate_scope(name)
+    section = text[text.index(start) :]
+    section = flat(section[: section.index(end)])
+    for seed in seeds:
+        assert census_line(seed) in section, (name, seed)
+
+
+def test_008_names_the_highest_per_agent_velocity_share_under_each_protocol() -> None:
+    """Ruling A1-32 docs-4: the maximum of matrix.md's per-agent table under each protocol."""
+    best = {
+        proto: max(
+            (v, a, r["seed"])
+            for r in _matrix()["rows"]
+            if (r["dataset"], r["engine"], r["protocol"]) == ("sw1", "a1", proto)
+            for a, v in r["per_agent_benign_velocity_share_ge_0_5"].items()
+        )
+        for proto in ("review", "allow")
+    }
+    (rv, agent, seed), (av, a2, s2) = best["review"], best["allow"]
+    assert (agent, seed) == (a2, s2)
+    want = (
+        f"the highest under the {REVIEW} is {agent} at {pct(rv)} "
+        f"(seed {seed}; {pct(av)} under {ALLOW})"
+    )
+    assert want in flat(gate_scope("008"))
+
+
+def test_writeup_velocity_share_names_both_protocols() -> None:
+    """Ruling A1-32 docs-3: seed 0's benign velocity share and its largest per-agent share."""
+    rev, alw = (_row("sw1", 0, "a1", p) for p in ("review", "allow"))
+    vr, va = (r["benign_share_ge_0_5"]["velocity"] for r in (rev, alw))
+    share = f"{pct(vr)} on seed 0 ({pct(va)} under {ALLOW}"
+    per_r, per_a = (r["per_agent_benign_velocity_share_ge_0_5"] for r in (rev, alw))
+    agent = max(per_r, key=lambda a: per_r[a])
+    assert pct(per_r[agent], 1) == pct(per_a[agent], 1)  # "under both protocols"
+    [unit] = units_with("writeup", share)
+    assert REVIEW in unit
+    assert f"reaches {pct(per_r[agent], 1)} on {agent} (the same under both protocols)" in unit
+
+
+def leaderboard_table(split: str) -> dict[str, list[str]]:
+    """``docs/leaderboard.md``'s ranking table of one split: run name -> cells."""
+    text = LEADERBOARD.read_text()
+    sec = text[text.index(f"#### Leaderboard: synthetic benchmark (SW1), split `{split}`") :]
+    sec = sec[: sec.index("#### Per-family")]
+    rows = {}
+    for line in sec.splitlines():
+        parts = [p.strip() for p in line.strip().strip("|").split("|")]
+        if line.startswith("| ") and parts[0] not in ("Rank", "---"):
+            rows[parts[1]] = parts
+    return rows
+
+
+def leaderboard_control_fpr(split: str, run: str) -> str:
+    text = LEADERBOARD.read_text()
+    sec = text[
+        text.index(f"#### Per-family attack recall: synthetic benchmark (SW1), split `{split}`") :
+    ]
+    [line] = [ln for ln in sec.splitlines() if ln.startswith(f"| {run} | per_agent |")]
+    return line.strip().strip("|").split("|")[-1].strip()
+
+
+def _fpr(split: str, run: str) -> tuple[float, str]:
+    """(per-agent FPR@95, "value [lo, hi]") of a leaderboard row."""
+    parts = leaderboard_table(split)[run]
+    v = parts[5].split()[0]
+    return float(v), f"{v} {parts[6]}"
+
+
+@pytest.mark.parametrize("name", ["writeup", "008"])
+def test_ranking_metric_disclosure_is_the_leaderboard(name: str) -> None:
+    """Ruling A1-33 critic-1: on the leaderboard's ranking metric the engine before A1 is better
+    under the oracle-reviewer loop on both splits (CIs overlap; it ranks first by time); the
+    by-agent control FPR rises; under spec §5.2 allow-all the amended engine is lower."""
+    [unit] = units_with(name, "ranking metric")
+    assert REVIEW in unit and ALLOW in unit
+    (at, at_s), (pt, pt_s) = _fpr("time", "engine"), _fpr("time", "engine-pre-a1")
+    (ag, ag_s), (pg, pg_s) = _fpr("agent", "engine"), _fpr("agent", "engine-pre-a1")
+    assert pt < at and pg < ag  # the engine before A1 is better under the oracle-reviewer loop
+    for s1, s2 in ((at_s, pt_s), (ag_s, pg_s)):
+        lo1, hi1 = map(float, s1.split("[")[1].rstrip("]").split(","))
+        lo2, hi2 = map(float, s2.split("[")[1].rstrip("]").split(","))
+        assert lo1 <= hi2 and lo2 <= hi1  # "the 95 % CIs overlap"
+    assert f"is {at_s} for the amended engine and {pt_s} for the engine before A1 by time" in unit
+    assert f"and {ag_s} against {pg_s} by agent" in unit
+    assert "the 95 % CIs overlap" in unit
+    assert leaderboard_table("time")["engine-pre-a1"][0] == "1"
+    assert "ranks first by time" in unit
+    ca, cp = (leaderboard_control_fpr("agent", r) for r in ("engine", "engine-pre-a1"))
+    assert (
+        float(ca) > float(cp)
+        and f"control FPR at that operating point is {ca} against {cp}" in unit
+    )
+    (aat, _), (apt, _) = _fpr("time", "engine-allow-all"), _fpr("time", "engine-pre-a1-allow-all")
+    (aag, _), (apg, _) = _fpr("agent", "engine-allow-all"), _fpr("agent", "engine-pre-a1-allow-all")
+    assert aat < apt and aag < apg
+    assert f"({aat:.3f} against {apt:.3f} by time, {aag:.3f} against {apg:.3f} by agent)" in unit
+    assert "Nothing was retuned" in unit
+
+
+def readme_report_value(pattern: str) -> re.Match[str]:
+    m = re.search(pattern, readme_report_block())
+    assert m, pattern
+    return m
+
+
+def test_writeup_review_run_numbers_carry_the_label() -> None:
+    """Ruling A1-32 docs-3: 0.490 (twice) and slow_drift's 0.656 (143/218) are the oracle-reviewer
+    run's numbers; 0.542 is the spec §5.2 allow-all row."""
+    review_fpr = leaderboard_table("time")["engine"][5].split()[0]
+    allow_fpr = leaderboard_table("time")["engine-allow-all"][5].split()[0]
+    assert review_fpr == "0.490"
+    units = units_with("writeup", f"FPR@95 of {review_fpr}") + units_with(
+        "writeup", f"per-agent FPR of {review_fpr}"
+    )
+    assert len(units) == 2
+    for u in units:
+        assert f"{REVIEW}" in u and f"{allow_fpr} under {ALLOW}" in u, u
+    m = readme_report_value(r"\| slow_drift \| all \| (\d\.\d{3}) \((\d+)/(\d+)\) \|")
+    [unit] = units_with("writeup", f"({m.group(1)}, {m.group(2)} of {m.group(3)} envelopes")
+    assert REVIEW in unit
+
+
+def test_latency_sentences_name_their_measurement() -> None:
+    """Ruling A1-32 docs-2: "stayed below the budget" is the three warm-key perf-test runs of
+    matrix.json's latency note; the leaderboard replays' p99 (README report block) is about
+    0.3 ms; neither is a latency result."""
+    note = _matrix()["latency_note"]
+    p99s = [float(x) for x in re.findall(r"\d+\.\d", note.split("p99 =")[1].split("(")[0])]
+    assert note.count("Three runs of") == 1 and len(p99s) == 3 and max(p99s) < 200
+    p99 = float(readme_report_value(r"Latency: p50 [\d.]+ us, p99 ([\d.]+) us").group(1))
+    assert round(p99 / 1000, 1) == 0.3
+    text = flat(DOCS["writeup"].read_text())
+    below = [m.start() for m in re.finditer("stayed below", text)]
+    assert len(below) == 2
+    for i in below:
+        assert "three runs of the warm-key perf test" in text[i - 120 : i].lower(), text[
+            i - 120 : i
+        ]
+    assert text.count("showed p99 of about 0.3 ms") == 2
+    assert (
+        text.count("neither is a latency result") + text.count("Neither is a latency result") == 2
+    )
+    assert "three runs of the warm-key perf test" in flat(gate_scope("008"))
+
+
+def test_writeup_top_up_is_a_fixed_rate_pass() -> None:
+    """Ruling A1-32 docs-5: the top-up rate is sw1_config's, 81 is matrix.json's seed-0 gate cell,
+    and the 50 floor is the acceptance test's."""
+    rate = sw1_config(0).magnitude_topup_rate
+    n = _matrix()["census"]["0"]["gated_test_n"]
+    acc = (ROOT / "tests/acceptance/test_tier1_exit.py").read_text()
+    m = re.search(r"^MIN_MAGNITUDE_N = (\d+)", acc, flags=re.M)
+    assert m
+    text = flat(DOCS["writeup"].read_text())
+    assert f"fixed-rate pass at {rate}" in text
+    assert f"({n} spikes in the seed-0 gate cell" in text
+    assert f"fewer than {m.group(1)} gated spikes fails the acceptance test (D-026)" in text
+    assert "so the gate cell holds at least" not in text
+
+
+def test_top_up_rate_disclosure_is_the_specs() -> None:
+    """Ruling A1-32 docs-1: decision 008 and writeup §8 repeat spec A1.4's disclosure."""
+    spec = flat(SPEC.read_text())
+    m = re.search(r"fixed count of (\d+) .{0,60}? a rate of (0\.\d+)", spec)
+    assert m and "their recalls were known when 0.015 was chosen" in spec
+    for name in ("writeup", "008"):
+        [unit] = units_with(name, f"fixed count of {m.group(1)}")
+        assert f"a rate of {m.group(2)}" in unit and "recalls were known" in unit, name
+        assert str(sw1_config(0).magnitude_topup_rate) in unit, name
+
+
+def _section(text: str, head: str) -> str:
+    s = text[text.index(head) + len(head) :]
+    return s[: s.index("\n#")] if "\n#" in s else s
+
+
+def test_008_copies_spec_a1_13_verbatim() -> None:
+    spec = _section(SPEC.read_text(), "### A1.13 Decisions left to the user\n")
+    d008 = DOCS["008"].read_text().split("Spec A1.13, copied verbatim:\n", 1)[1]
+    assert spec.strip() == d008.strip()
+
+
+def test_a1_3_limit_is_disclosed_and_pinned() -> None:
+    """Ruling A1-30: spec A1.12 and A1.13 item 6, decision 008 and the writeup name the case the
+    core test pins."""
+    test = "test_pinned_contradiction_not_above_the_learned_range_scores_low"
+    assert f"def {test}()" in (ROOT / "tests/core/test_engine.py").read_text()
+    spec = SPEC.read_text()
+    a1_12 = flat(_section(spec, "### A1.12 What is still not met\n"))
+    assert f"tests/core/test_engine.py::{test}" in a1_12
+    item6 = flat(_section(spec, "### A1.13 Decisions left to the user\n")).split(" 6. ")[1]
+    item6 = item6.split(" 7. ")[0]
+    for text in (a1_12, item6, flat(gate_scope("008")), flat(DOCS["writeup"].read_text())):
+        assert "`qty = -5`" in text and "fraction between 0 and 1" in text and "about 0.01" in text
+
+
+def test_writeup_manual_inspection_note_is_narrowed() -> None:
+    """Ruling A1-28: §7's (manual inspection) note covers the parquet-derived counts and ranges
+    only and names where the other numbers come from."""
+    text = DOCS["writeup"].read_text()
+    s7 = flat(text[text.index("## 7. Failure cases") : text.index("## 8. Limitations")])
+    intro = s7.split(" - **")[0]
+    assert "Every count and score range in this section" not in intro
+    assert "scores.parquet" in intro and "*(manual inspection)*" in intro
+    for src in ("matrix.json", "docs/leaderboard.md", "README"):
+        assert src in intro, src
