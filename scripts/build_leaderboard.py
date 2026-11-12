@@ -9,7 +9,9 @@ allow-all (``engine-allow-all``), and the engine before Amendment A1
 (``EngineConfig().replace(**PRE_A1_SWITCHES)``) under both protocols (``engine-pre-a1``,
 ``engine-pre-a1-allow-all``). The page opens with the Tier-1 gate of those four runs (split
 ``time``) under both protocols side by side (spec A1.5), with the sensitivity companion rows
-copied from ``docs/decisions/evidence/a1-gate/matrix.json``. ``llm_judge`` needs a live judge
+copied from ``docs/decisions/evidence/a1-gate/matrix.json`` and, under each gate table, the
+magnitude census of ``--traces`` (spec A1.4; ``agentfw.bench.gate.dataset_census``, a cheap
+replay that ``--reuse`` also runs). ``llm_judge`` needs a live judge
 model, so it is listed as not run; it is never faked here.
 
     uv run python scripts/build_leaderboard.py [--traces traces/sw1-seed0] [--reuse] [--jobs 4]
@@ -32,6 +34,7 @@ from typing import Any
 
 import orjson
 
+from agentfw.bench.gate import MagnitudeCensus, dataset_census
 from agentfw.bench.leaderboard import (
     GATE_RUNS,
     build_leaderboard,
@@ -196,15 +199,29 @@ def _doc(
     sha: str,
     reports: Mapping[str, Mapping[str, Any]],
     *,
+    census: MagnitudeCensus,
     matrix: Path = GATE_EVIDENCE,
 ) -> str:
     """The page: header, the gate section of ``reports`` (run name -> report.json of split
-    ``time``) with the sensitivity companion rows of ``matrix``, then ``sections`` under their
-    own level-2 heading (so the outline never files the SW1 tables under the companion block)."""
+    ``time``) with the sensitivity companion rows of ``matrix`` and ``census`` (the magnitude
+    census of dataset ``sha``), then ``sections`` under their own level-2 heading (so the outline
+    never files the SW1 tables under the companion block). Raises ``ValueError`` when a gate run
+    is not of dataset ``sha``."""
+    for runs in GATE_RUNS.values():
+        for run_name in runs:
+            got = str(((reports.get(run_name) or {}).get("meta") or {}).get("dataset_sha"))
+            if got != sha:
+                raise ValueError(
+                    f"gate run {run_name!r} is of dataset {got[:12]!r}, the page reports dataset "
+                    f"{sha[:12]!r} (its census and tables)"
+                )
     sens = _sensitivity_reports(matrix)
     sens_sha = str(next(iter(sens.values()))["meta"]["dataset_sha"])
     gate = render_gate_section(
-        reports, sensitivity=sens, sensitivity_source=f"rows copied from `{_EVIDENCE_REL}`"
+        reports,
+        sensitivity=sens,
+        sensitivity_source=f"rows copied from `{_EVIDENCE_REL}`",
+        census=census,
     )
     personas = len(load_personas(SW1.personas_dir))
     head = [
@@ -295,7 +312,7 @@ def main() -> None:
         name: orjson.loads((a.results / GATE_SPLIT / name / "report.json").read_bytes())
         for name, *_ in RUNS
     }
-    a.out.write_text(_doc(sections, sha, gate_reports))
+    a.out.write_text(_doc(sections, sha, gate_reports, census=dataset_census(a.traces)))
     print(a.out)
 
 

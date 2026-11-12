@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from pathlib import Path
+from typing import Any
 
 import orjson
 import pytest
@@ -23,6 +25,8 @@ from agentfw.bench.metrics import GATE_FAMILIES, GateCell, GatePreview, gate_pre
 from agentfw.bench.replay import PROTOCOL_LABELS, OutcomeMode, SplitSpec
 from agentfw.bench.sweeps import PRE_A1_SWITCHES
 from agentfw.core.config import EngineConfig
+from agentfw.synth.generate import GenerateConfig, Manifest, generate
+from agentfw.synth.load import CATALOG_DIR, PERSONAS_DIR, TASKS_DIR, TIER0_PERSONA_IDS
 
 
 def _direct(traces: Path, cfg: EngineConfig, mode: OutcomeMode) -> GatePreview:
@@ -294,16 +298,43 @@ def test_cli_always_computes_pre_a1_row(tiny_dataset: Path, tmp_path: Path) -> N
                 assert g["cells"]["magnitude_spike"]["n_total"] > 0
 
 
-def test_cli_sensitivity_traces_shows_magnitude_cells(tiny_dataset: Path, tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def far_pair(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, Path]:
+    """A tiny far-mode dataset and its sensitivity dataset (the same config with
+    ``magnitude_far_mult = 1.0``): the pair ``--traces`` / ``--sensitivity-traces`` accepts."""
+    out = []
+    for mult in (5.0, 1.0):
+        d = tmp_path_factory.mktemp(f"far_{mult:g}")
+        generate(_tiny_config(magnitude_mode="far", magnitude_far_mult=mult), d)
+        out.append(d)
+    return out[0], out[1]
+
+
+def _tiny_config(**kw: Any) -> GenerateConfig:
+    """``tests/conftest.py``'s tiny dataset config with ``kw`` on top."""
+    return GenerateConfig(
+        seed=0, personas_dir=PERSONAS_DIR, persona_ids=list(TIER0_PERSONA_IDS),
+        tasks_dir=TASKS_DIR, catalog_dir=CATALOG_DIR, days=5, attack_rate=0.15,
+        families=["magnitude_spike", "prereq_skip", "novel_target"], **kw,
+    )  # fmt: skip
+
+
+def test_cli_sensitivity_traces_shows_magnitude_cells(
+    far_pair: tuple[Path, Path], tmp_path: Path
+) -> None:
+    traces, sens_dir = far_pair
     md_path, js_path = tmp_path / "gate.md", tmp_path / "gate.json"
-    args = ["--traces", str(tiny_dataset), "--sensitivity-traces", str(tiny_dataset)]
+    args = ["--traces", str(traces), "--sensitivity-traces", str(sens_dir)]
     assert main([*args, "--out", str(md_path), "--json", str(js_path)]) == 0
     rep = orjson.loads(js_path.read_bytes())
-    assert rep["sensitivity_traces"] == str(tiny_dataset)
+    assert rep["sensitivity_traces"] == str(sens_dir)
     assert list(rep["sensitivity"]) == [ENGINE_ROW, PRE_A1_ROW]
-    # The sensitivity rows are the engine and the pre-A1 engine replayed on that directory (here
-    # the same dataset, so they equal the main rows).
-    assert rep["sensitivity"] == rep["results"]
+    # The sensitivity rows are the engine and the pre-A1 engine replayed on that directory.
+    pre_cfg = EngineConfig().replace(**PRE_A1_SWITCHES)
+    for name, cfg in ((ENGINE_ROW, EngineConfig()), (PRE_A1_ROW, pre_cfg)):
+        for mode in ("review", "allow"):
+            want = orjson.loads(_dump(_direct(sens_dir, cfg, mode)))
+            assert rep["sensitivity"][name][mode] == want, (name, mode)
     md = md_path.read_text()
     assert "withheld" not in md
     assert _COMPANION_HEAD in md
@@ -349,6 +380,16 @@ def test_load_gate_json_round_trips_nan(tmp_path: Path, monkeypatch: pytest.Monk
         return {"review": g, "allow": g}
 
     monkeypatch.setattr(gate_mod, "gate_matrix", fake_gate_matrix)
+    monkeypatch.setattr(gate_mod, "dataset_census", lambda traces_dir: _CENSUS)  # no dataset here
+    monkeypatch.chdir(tmp_path)  # "t" and "s": manifests only, a dataset and its sensitivity one
+    for d, mult, sha in (("t", 5.0, "1" * 64), ("s", 1.0, "2" * 64)):
+        m = Manifest(
+            config=_tiny_config(magnitude_mode="far", magnitude_far_mult=mult),
+            files={"traces.jsonl": sha, "labels.jsonl": sha},
+            counts={},
+        )
+        Path(d).mkdir()
+        (Path(d) / "manifest.json").write_text(m.model_dump_json())
     js = tmp_path / "gate.json"
     main(["--traces", "t", "--json", str(js)])
     results, sens = load_gate_json(js)
@@ -374,10 +415,12 @@ def test_load_gate_json_round_trips_nan(tmp_path: Path, monkeypatch: pytest.Monk
 
 
 @pytest.fixture(scope="module")
-def written_gate_json(tiny_dataset: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
+def written_gate_json(
+    far_pair: tuple[Path, Path], tmp_path_factory: pytest.TempPathFactory
+) -> Path:
     """One `--json` file with both sections, written once for every case that edits a copy."""
     js = tmp_path_factory.mktemp("gate_json") / "gate.json"
-    args = ["--traces", str(tiny_dataset), "--sensitivity-traces", str(tiny_dataset)]
+    args = ["--traces", str(far_pair[0]), "--sensitivity-traces", str(far_pair[1])]
     assert main([*args, "--json", str(js)]) == 0
     return js
 
@@ -445,3 +488,173 @@ def test_cli_companion_paragraph_is_unchanged(tiny_dataset: Path, tmp_path: Path
     md_path = tmp_path / "gate.md"
     assert main(["--traces", str(tiny_dataset), "--out", str(md_path)]) == 0
     assert _companion_paragraph(md_path.read_text()) == _CLI_COMPANION_PARAGRAPH
+
+
+# --- final review: the magnitude census under every gate table (spec A1.4, ruling A1-31) ---------
+
+ROOT = Path(__file__).resolve().parents[2]
+SW1_SEED0 = ROOT / "traces/sw1-seed0"
+MATRIX_JSON = ROOT / "docs/decisions/evidence/a1-gate/matrix.json"
+_CENSUS = gate_mod.MagnitudeCensus(
+    gated_test_n=5,
+    by_persona={"b-agent": 2, "a-agent": 2, "c-agent": 1},
+    share_strength_ge_10=32 / 33,
+    median_strength=48.27679911482127,
+    n_spikes=264,
+)
+_CENSUS_LINE = (
+    "Census of the magnitude_spike gate cell (spec A1.4): n 5 (warm test rows, bucket 10-100) by "
+    "persona: a-agent 2, b-agent 2, c-agent 1; over all 264 spikes of the dataset, median "
+    "strength 48.3 and share with strength >= 10 0.970."
+)
+
+
+def _census_by_hand(rows: list[Any], traces: Path) -> dict[str, Any]:
+    """The census as decision 008 / matrix.json define it, recomputed without the shared code."""
+    first: dict[str, Any] = {}
+    for r in sorted(rows, key=lambda r: (r.ts_unix_ms, r.envelope_id)):
+        if (
+            r.split == "test"
+            and r.is_warm
+            and r.label == "attack"
+            and r.attack_family == "magnitude_spike"
+            and r.attack_id
+        ):
+            first.setdefault(r.attack_id, r)
+    by_persona: dict[str, int] = {}
+    for r in first.values():
+        if r.strength >= 10:  # bucket "10-100" (strengths lie in [3, 100])
+            by_persona[r.agent_id] = by_persona.get(r.agent_id, 0) + 1
+    strengths: dict[str, float] = {}
+    for line in (traces / "labels.jsonl").read_bytes().splitlines():
+        lab = orjson.loads(line)
+        if lab["attack_family"] == "magnitude_spike":
+            strengths.setdefault(lab["attack_id"], float(lab["strength"]))
+    s = sorted(strengths.values())
+    mid = len(s) // 2
+    return {
+        "gated_test_n": sum(by_persona.values()),
+        "by_persona": dict(sorted(by_persona.items())),
+        "share_strength_ge_10": sum(x >= 10 for x in s) / len(s),
+        "median_strength": s[mid] if len(s) % 2 else (s[mid - 1] + s[mid]) / 2,
+        "n_spikes": len(s),
+    }
+
+
+def test_render_census_line() -> None:
+    assert gate_mod.render_census(_CENSUS) == _CENSUS_LINE
+
+
+def test_dataset_census_on_a_tiny_dataset(
+    tiny_dataset: Path, matrix: dict[OutcomeMode, GatePreview]
+) -> None:
+    got = gate_mod.dataset_census(tiny_dataset)
+    rows, _ = replay_detector(tiny_dataset, "engine", SplitSpec(), EngineConfig(), "review")
+    assert dataclasses.asdict(got) == _census_by_hand(rows, tiny_dataset)
+    # The census reads labels, split and warm flags only: the engine's rows give the same one, and
+    # its n is the gate's magnitude cell size under either protocol.
+    assert gate_mod.magnitude_census(rows, tiny_dataset) == got
+    for g in matrix.values():
+        assert got.gated_test_n == g.cells["magnitude_spike"].n_total > 0
+
+
+def test_dataset_census_reproduces_matrix_json_seed0() -> None:
+    if not (SW1_SEED0 / "manifest.json").exists():
+        pytest.skip("traces/sw1-seed0 is not generated here (scripts/build_leaderboard.py does it)")
+    m = orjson.loads(MATRIX_JSON.read_bytes())
+    want_sha = {r["dataset_sha"] for r in m["rows"] if (r["dataset"], r["seed"]) == ("sw1", 0)}
+    sha = orjson.loads((SW1_SEED0 / "manifest.json").read_bytes())["files"]["traces.jsonl"][:12]
+    if {sha} != want_sha:
+        pytest.skip(f"traces/sw1-seed0 is dataset {sha}, matrix.json seed 0 is {want_sha}")
+    assert dataclasses.asdict(gate_mod.dataset_census(SW1_SEED0)) == m["census"]["0"]
+
+
+def test_census_line_under_every_main_gate_table() -> None:
+    g = _both(_preview())
+    rows = {ENGINE_ROW: g, PRE_A1_ROW: g}
+    for sens in (rows, None):  # magnitude cells shown, and withheld: the census is composition
+        md = render_gate_matrix(rows, sensitivity=sens, census=_CENSUS)
+        lines = md.splitlines()
+        at = [i for i, ln in enumerate(lines) if ln == _CENSUS_LINE]
+        assert len(at) == len(rows)  # one under each main table, none under the companions
+        for i in at:
+            assert lines[i - 1] == "" and lines[i - 2].startswith(f"| {PROTOCOL_LABELS['allow']} |")
+        if sens is not None:
+            assert at[-1] < lines.index(_COMPANION_HEAD)
+    assert "Census of the magnitude_spike" not in render_gate_matrix(rows, sensitivity=rows)
+
+
+def test_cli_prints_the_census_of_traces(tiny_dataset: Path, tmp_path: Path) -> None:
+    md_path = tmp_path / "gate.md"
+    assert main(["--traces", str(tiny_dataset), "--out", str(md_path)]) == 0
+    line = gate_mod.render_census(gate_mod.dataset_census(tiny_dataset))
+    assert md_path.read_text().splitlines().count(line) == 2
+
+
+# --- final review: --sensitivity-traces must be the sensitivity dataset of --traces (A1-32) ------
+
+
+@pytest.fixture(scope="module")
+def own_mult_1(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """The tiny dataset's config with magnitude_far_mult = 1.0: in mode "own" the multiple is not
+    used, so its traces are the tiny dataset's bytes."""
+    d = tmp_path_factory.mktemp("own_mult_1")
+    generate(_tiny_config(magnitude_far_mult=1.0), d)
+    return d
+
+
+@pytest.fixture(scope="module")
+def far_mult_2(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    d = tmp_path_factory.mktemp("far_mult_2")
+    generate(_tiny_config(magnitude_mode="far", magnitude_far_mult=2.0), d)
+    return d
+
+
+@pytest.fixture(scope="module")
+def far_seed1_mult_1(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    d = tmp_path_factory.mktemp("far_seed1_mult_1")
+    generate(
+        _tiny_config(magnitude_mode="far", magnitude_far_mult=1.0).model_copy(update={"seed": 1}), d
+    )
+    return d
+
+
+@pytest.mark.parametrize(
+    ("traces", "sens", "why"),
+    [
+        ("far", "far_mult_2", "magnitude_far_mult = 2"),
+        ("far", "far", "magnitude_far_mult = 5"),
+        ("far", "far_seed1_mult_1", "apart from magnitude_far_mult"),
+        ("tiny", "own_mult_1", "the same traces"),
+        ("far", "no_manifest", "manifest.json"),
+    ],
+)
+def test_cli_refuses_a_sensitivity_dataset_that_is_not_one(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    traces: str,
+    sens: str,
+    why: str,
+) -> None:
+    def path(name: str) -> Path:
+        if name == "no_manifest":
+            return tmp_path
+        if name == "far":
+            return Path(request.getfixturevalue("far_pair")[0])
+        return Path(request.getfixturevalue({"tiny": "tiny_dataset"}.get(name, name)))
+
+    def no_replay(*a: object, **k: object) -> None:
+        raise AssertionError("a refused --sensitivity-traces must not replay anything")
+
+    monkeypatch.setattr(gate_mod, "gate_matrix", no_replay)
+    monkeypatch.setattr(gate_mod, "dataset_census", no_replay)
+    out = tmp_path / "gate.md"
+    args = ["--traces", str(path(traces)), "--sensitivity-traces", str(path(sens))]
+    with pytest.raises(SystemExit) as exc:
+        main([*args, "--out", str(out)])
+    assert exc.value.code == 2  # a usage error
+    err = capsys.readouterr().err
+    assert "--sensitivity-traces" in err and why in err, err
+    assert not out.exists()

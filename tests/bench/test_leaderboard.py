@@ -10,6 +10,7 @@ from typing import Any
 import orjson
 import pytest
 
+from agentfw.bench.gate import MagnitudeCensus, render_census
 from agentfw.bench.leaderboard import (
     ALLOW_ALL_CAVEAT,
     ORACLE_CAVEAT,
@@ -29,6 +30,13 @@ from agentfw.synth.generate import sw1_config
 from agentfw.synth.load import load_personas
 
 SHA = "a" * 64
+CENSUS = MagnitudeCensus(
+    gated_test_n=81,
+    by_persona={"lead-router-a": 17, "support-refunds-c": 22, "payouts-ops-a": 1},
+    share_strength_ge_10=0.9696969696969697,
+    median_strength=48.27679911482127,
+    n_spikes=264,
+)
 
 
 def _report(
@@ -360,6 +368,17 @@ def reports() -> dict[str, dict[str, Any]]:
     return _reports()
 
 
+SENS_SHA = "e" * 64
+
+
+def _sens(mag: tuple[int, int] = (51, 64)) -> dict[str, dict[str, Any]]:
+    """The four gate runs on a sensitivity dataset (another dataset sha than ``_reports``)."""
+    out = {name: {**rep, "gate": _gate(False, mag)} for name, rep in _reports().items()}
+    for rep in out.values():
+        rep["meta"] = {**rep["meta"], "dataset_sha": SENS_SHA}
+    return out
+
+
 def _protocol_lines(md: str) -> list[tuple[int, str]]:
     """(line number, protocol) of every table line that starts with a protocol label."""
     out = []
@@ -402,8 +421,7 @@ def test_gate_section_withholds_magnitude_without_the_sensitivity_rows(
     md = render_gate_section(reports)  # rule 4: the sensitivity companion is missing
     assert "withheld" in md
     assert "(77/78)" not in md and "(71/78)" not in md
-    sens = {name: {**rep, "gate": _gate(False, (51, 64))} for name, rep in _reports().items()}
-    md = render_gate_section(reports, sensitivity=sens)
+    md = render_gate_section(reports, sensitivity=_sens())
     assert "withheld" not in md
     assert "0.987 (77/78)" in md and "0.910 (71/78)" in md and "0.797 (51/64)" in md
     assert md.index("(77/78)") < md.index("(51/64)")  # companion rows after the gate rows
@@ -411,8 +429,7 @@ def test_gate_section_withholds_magnitude_without_the_sensitivity_rows(
 
 
 def test_gate_section_pre_a1_block_shows_the_pre_a1_runs(reports: dict[str, Any]) -> None:
-    sens = {name: {**rep, "gate": _gate(False, (51, 64))} for name, rep in _reports().items()}
-    md = render_gate_section(reports, sensitivity=sens)
+    md = render_gate_section(reports, sensitivity=_sens())
     # engine-pre-a1 is (73/78), engine-pre-a1-allow-all is (59/78) in the fixture.
     assert "0.936 (73/78)" in md and "0.756 (59/78)" in md
     assert (
@@ -511,14 +528,16 @@ def test_build_leaderboard_uses_sw1_config() -> None:
 def test_doc_header_states_the_gate_from_the_reports(
     review_pass: bool, allow_pass: bool, sentence: str
 ) -> None:
-    md = build_leaderboard_script._doc(["SECTION"], SHA, _reports(review_pass, allow_pass))
+    md = build_leaderboard_script._doc(
+        ["SECTION"], SHA, _reports(review_pass, allow_pass), census=CENSUS
+    )
     assert sentence in md
     assert "Tier-1 gate met" not in md and "Tier-1 gate is met" not in md
     assert "not met under either protocol" not in md  # the old hard-coded sentence
 
 
 def test_doc_header_names_the_dataset_sw1_and_auprc_caveat(reports: dict[str, Any]) -> None:
-    md = build_leaderboard_script._doc(["SECTION-A", "SECTION-B"], SHA, reports)
+    md = build_leaderboard_script._doc(["SECTION-A", "SECTION-B"], SHA, reports, census=CENSUS)
     sw1 = sw1_config()
     assert SHA[:12] in md
     assert f"magnitude_far_mult {sw1.magnitude_far_mult:g}" in md
@@ -542,7 +561,7 @@ def test_doc_header_names_the_dataset_sw1_and_auprc_caveat(reports: dict[str, An
 
 
 def test_doc_copies_the_sensitivity_rows_from_matrix_json(reports: dict[str, Any]) -> None:
-    md = build_leaderboard_script._doc([], SHA, reports)
+    md = build_leaderboard_script._doc([], SHA, reports, census=CENSUS)
     rows = [r for r in orjson.loads(MATRIX_JSON.read_bytes())["rows"] if r["dataset"] == "sens"]
     assert {(r["engine"], r["protocol"]) for r in rows} == {
         (e, p) for e in ("a1", "pre-a1") for p in ("review", "allow")
@@ -580,7 +599,7 @@ def test_doc_refuses_a_matrix_without_the_sensitivity_rows(
     bad = tmp_path / "matrix.json"
     bad.write_bytes(orjson.dumps(payload))
     with pytest.raises(ValueError, match="sensitivity"):
-        build_leaderboard_script._doc([], SHA, reports, matrix=bad)
+        build_leaderboard_script._doc([], SHA, reports, census=CENSUS, matrix=bad)
 
 
 class _NoJobs:
@@ -620,13 +639,22 @@ def test_main_feeds_the_gate_section_from_the_time_split(
                 rep["gate"] = gates[name]["gate"]
             p.write_bytes(orjson.dumps(rep))
     monkeypatch.setattr(mod, "_dataset", lambda d: SHA)
+    censused: list[Path] = []
+
+    def fake_census(traces_dir: Path) -> MagnitudeCensus:
+        censused.append(traces_dir)
+        return CENSUS
+
+    monkeypatch.setattr(mod, "dataset_census", fake_census)
     monkeypatch.setattr(mod, "ProcessPoolExecutor", _NoJobs)
     out = tmp_path / "leaderboard.md"
     argv = ["build_leaderboard.py", "--results", str(results), "--out", str(out)]
-    monkeypatch.setattr(sys, "argv", [*argv, "--reuse", "--n-boot", "0"])
+    monkeypatch.setattr(sys, "argv", [*argv, "--reuse", "--n-boot", "0", "--traces", "tr"])
     mod.main()
     md = out.read_text()
     assert "0.987 (77/78)" in md and "(11/78)" not in md
+    assert censused == [Path("tr")]  # the census is of the dataset the page reports
+    assert md.count(render_census(CENSUS)) == 2
     assert "split `time`" in md and "split `agent`" in md  # both leaderboard tables
 
 
@@ -656,7 +684,12 @@ def test_gate_section_reads_real_reports(tiny_dataset: Path, tmp_path: Path) -> 
         kw = {} if cfg is None else {"cfg": cfg}
         run(tiny_dataset, "engine", SplitSpec(), tmp_path / name, n_boot=0, outcomes=outcomes, **kw)  # type: ignore[arg-type]
         reports[name] = orjson.loads((tmp_path / name / "report.json").read_bytes())
-    md = render_gate_section(reports, sensitivity=reports)
+    # The same reports as the companion rows, under another dataset sha (one replay suffices).
+    sens = {
+        name: {**rep, "meta": {**rep["meta"], "dataset_sha": SENS_SHA}}
+        for name, rep in reports.items()
+    }
+    md = render_gate_section(reports, sensitivity=sens)
     assert [m for _, m in _protocol_lines(md)] == ["review", "allow"] * 4
     for rep in reports.values():
         c = rep["gate"]["cells"]["prereq_skip"]
@@ -675,10 +708,9 @@ def _companion_paragraph(md: str) -> str:
 
 
 def test_gate_section_names_its_own_companion_sources(reports: dict[str, Any]) -> None:
-    sens = {name: {**rep, "gate": _gate(False, (51, 64))} for name, rep in _reports().items()}
-    for rep in sens.values():
-        rep["meta"] = {**rep["meta"], "dataset_sha": "e" * 64}
-    md = render_gate_section(reports, sensitivity=sens, sensitivity_source="rows copied from `x`")
+    md = render_gate_section(
+        reports, sensitivity=_sens(), sensitivity_source="rows copied from `x`"
+    )
     para = _companion_paragraph(md)
     assert "CLI" not in para and "--sensitivity-traces" not in para
     assert "runs `engine-pre-a1` and `engine-pre-a1-allow-all`" in para
@@ -686,7 +718,45 @@ def test_gate_section_names_its_own_companion_sources(reports: dict[str, Any]) -
 
 
 def test_doc_companion_paragraph_names_matrix_json(reports: dict[str, Any]) -> None:
-    para = _companion_paragraph(build_leaderboard_script._doc([], SHA, reports))
+    para = _companion_paragraph(build_leaderboard_script._doc([], SHA, reports, census=CENSUS))
     assert "CLI" not in para
     assert "runs `engine-pre-a1` and `engine-pre-a1-allow-all`" in para
     assert "copied from `docs/decisions/evidence/a1-gate/matrix.json`" in para
+
+
+# --- final review: the magnitude census under the gate tables (spec A1.4, ruling A1-31) ----------
+
+
+def test_gate_section_prints_the_census_under_the_main_tables(reports: dict[str, Any]) -> None:
+    sens = _sens()
+    md = render_gate_section(reports, sensitivity=sens, census=CENSUS)
+    line = render_census(CENSUS)
+    assert md.count(line) == 2
+    assert md.rindex(line) < md.index("## Companion")
+    assert "Census of the magnitude_spike" not in render_gate_section(reports, sensitivity=sens)
+
+
+def test_doc_prints_the_census(reports: dict[str, Any]) -> None:
+    md = build_leaderboard_script._doc([], SHA, reports, census=CENSUS)
+    assert md.count(render_census(CENSUS)) == 2
+    assert "n 81 (warm test rows, bucket 10-100) by persona: support-refunds-c 22" in md
+
+
+def test_doc_refuses_gate_reports_of_another_dataset(reports: dict[str, Any]) -> None:
+    """The census is of the dataset ``sha``; the gate rows must be of that dataset too."""
+    with pytest.raises(ValueError, match="dataset"):
+        build_leaderboard_script._doc([], "f" * 64, reports, census=CENSUS)
+
+
+# --- final review: the companion rows are of another dataset (ruling A1-32 gate-1) ---------------
+
+
+@pytest.mark.parametrize("sens_sha", [SHA, SHA[:12]])  # matrix.json stores 12 characters
+def test_gate_section_refuses_sensitivity_rows_of_the_gate_dataset(
+    reports: dict[str, Any], sens_sha: str
+) -> None:
+    sens = _sens()
+    for rep in sens.values():
+        rep["meta"] = {**rep["meta"], "dataset_sha": sens_sha}
+    with pytest.raises(ValueError, match="sensitivity.*same dataset"):
+        render_gate_section(reports, sensitivity=sens)

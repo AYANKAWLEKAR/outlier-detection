@@ -20,9 +20,11 @@ replayed twice. The cell file keeps the gate CLI's ``results`` shape, so
 
 Benign-side shares: warm test rows labelled benign that are not ``benign_unusual`` controls; per
 row, the detector's highest numeric score; the share is (rows whose score >= 0.5) / (rows where
-the detector reported a score). Census: the ``magnitude_spike`` gate cell (warm test rows, bucket
-``"10-100"``) of the amended engine under the oracle-reviewer loop, and, over every spike of the
-dataset (labels.jsonl, one strength per attack id), the share with strength >= 10 and the median.
+the detector reported a score). Census (``agentfw.bench.gate.magnitude_census``, the function the
+gate CLI, the leaderboard and the acceptance test print): the ``magnitude_spike`` gate cell (warm
+test rows, bucket ``"10-100"``) of the amended engine under the oracle-reviewer loop, and, over
+every spike of the dataset (labels.jsonl, one strength per attack id), the share with strength
+>= 10 and the median.
 
 ``merge``: reads the cell files and each dataset's ``manifest.json`` and writes ``matrix.json``
 and ``matrix.md`` next to this file (``matrix.md`` via ``render_gate_matrix``; the sensitivity
@@ -33,16 +35,15 @@ and all four of seed 2 once any is there. ``latency``: writes that number (null:
 measurement, spec A1.8) and NOTE (how it was measured, or why it is null) and re-renders
 ``matrix.md``.
 
-This script imports two private helpers of ``agentfw.bench.metrics`` (``_bucket_of``,
-``_numeric_score``) and sits outside the gate's ruff and mypy scope (``docs`` is excluded);
+This script imports a private helper of ``agentfw.bench.metrics`` (``_numeric_score``) and sits outside the gate's ruff and mypy scope (``docs`` is excluded);
 ``tests/bench/test_a1_evidence.py`` imports it and renders the committed ``matrix.json`` with it,
-so a rename of either helper, or a ``GatePreview`` change that breaks ``_preview``, fails the gate.
+so a rename of that helper, or a ``GatePreview`` change that breaks ``_preview``, fails the gate.
 """  # noqa: E501 - the usage lines are kept whole
 
 from __future__ import annotations
 
+import dataclasses
 import math
-import statistics
 import sys
 from collections import defaultdict
 from collections.abc import Sequence
@@ -58,13 +59,13 @@ from agentfw.bench.gate import (
     ORIGINAL_CRITERION_LABEL,
     PRE_A1_ROW,
     load_gate_json,
+    magnitude_census,
     render_gate_matrix,
 )
 from agentfw.bench.metrics import (
     GATE_FAMILIES,
     GateCell,
     GatePreview,
-    _bucket_of,
     _numeric_score,
     gate_preview,
 )
@@ -143,28 +144,8 @@ def benign_shares(warm: Sequence[ScoreRow]) -> tuple[dict[str, float], dict[str,
 
 
 def census(warm: Sequence[ScoreRow], traces: Path) -> dict[str, Any]:
-    first: dict[str, ScoreRow] = {}
-    for r in sorted(warm, key=lambda r: (r.ts_unix_ms, r.envelope_id)):
-        if r.label == "attack" and r.attack_family == "magnitude_spike" and r.attack_id:
-            first.setdefault(r.attack_id, r)
-    bucket = GATE_FAMILIES["magnitude_spike"][0]
-    gated = [r for r in first.values() if _bucket_of("magnitude_spike", r.strength) == bucket]
-    by_persona: dict[str, int] = defaultdict(int)
-    for r in gated:
-        by_persona[r.agent_id] += 1
-    strength: dict[str, float] = {}
-    for line in (traces / "labels.jsonl").read_bytes().splitlines():
-        lab = orjson.loads(line)
-        if lab["attack_family"] == "magnitude_spike" and lab["strength"] is not None:
-            strength.setdefault(lab["attack_id"], float(lab["strength"]))
-    s = list(strength.values())
-    return {
-        "gated_test_n": len(gated),
-        "by_persona": dict(sorted(by_persona.items())),
-        "share_strength_ge_10": _share(sum(x >= 10.0 for x in s), len(s)),
-        "median_strength": statistics.median(s) if s else math.nan,
-        "n_spikes": len(s),
-    }
+    """The shared census (``agentfw.bench.gate.magnitude_census``) as matrix.json stores it."""
+    return dataclasses.asdict(magnitude_census(warm, traces))
 
 
 def cell(traces: Path, engine: str, protocol: str, out: Path) -> None:

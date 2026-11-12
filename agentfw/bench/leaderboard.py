@@ -26,7 +26,13 @@ from typing import Any
 import orjson
 from pydantic import BaseModel
 
-from agentfw.bench.gate import ENGINE_ROW, PRE_A1_ROW, preview_from_json, render_gate_matrix
+from agentfw.bench.gate import (
+    ENGINE_ROW,
+    PRE_A1_ROW,
+    MagnitudeCensus,
+    preview_from_json,
+    render_gate_matrix,
+)
 from agentfw.bench.metrics import GatePreview
 from agentfw.bench.replay import PROTOCOL_LABELS, OutcomeMode, protocol_label
 
@@ -251,8 +257,9 @@ def _family_md(lb: Leaderboard) -> list[str]:
 
 def _gate_rows(
     reports: Mapping[str, Mapping[str, Any]], what: str
-) -> tuple[dict[str, dict[OutcomeMode, GatePreview]], str]:
-    """The ``GATE_RUNS`` pairs of ``reports`` as gate rows, and their split kind; refuses a pair
+) -> tuple[dict[str, dict[OutcomeMode, GatePreview]], str, str]:
+    """The ``GATE_RUNS`` pairs of ``reports`` as gate rows, their dataset sha and their split
+    kind; refuses a pair
     missing a protocol, a run without a gate section or without ``meta.dataset_sha`` /
     ``meta.split.kind``, a run that is not an engine replay, a pair whose two runs recorded
     different engine configurations (``meta.detector_config.cfg``; spec A1.5: same engine
@@ -299,7 +306,8 @@ def _gate_rows(
         rows[row] = by_mode
     if len(seen) != 1:
         raise ValueError(f"{what}: the gate runs mix datasets or splits {sorted(seen)}")
-    return rows, seen.pop()[1]
+    sha, split = seen.pop()
+    return rows, sha, split
 
 
 def render_gate_section(
@@ -307,6 +315,7 @@ def render_gate_section(
     *,
     sensitivity: Mapping[str, Mapping[str, Any]] | None = None,
     sensitivity_source: str | None = None,
+    census: MagnitudeCensus | None = None,
 ) -> str:
     """The Tier-1 gate of the engine runs under both protocols, side by side (spec A1.5).
 
@@ -319,13 +328,23 @@ def render_gate_section(
     ``sensitivity`` holds the same runs on the sensitivity dataset (``magnitude_far_mult = 1.0``);
     without it every ``magnitude_spike`` cell is withheld (spec A1.5 rule 4). The intro names the
     companion rows' sources: the pre-A1 pair of :data:`GATE_RUNS` and ``sensitivity_source`` (where
-    the caller took ``sensitivity`` from, e.g. "rows copied from `matrix.json`"). Raises
+    the caller took ``sensitivity`` from, e.g. "rows copied from `matrix.json`"). ``census``
+    (:func:`agentfw.bench.gate.magnitude_census` of the dataset of ``reports``) is printed under
+    each main table (spec A1.4). Raises
     ``ValueError`` when either protocol of a pair is missing, a run has no gate section or no
     dataset / split in its meta, a run is not an engine replay, the two runs of a pair recorded
-    different engine configurations, or the runs of one mapping mix datasets or splits.
+    different engine configurations, the runs of one mapping mix datasets or splits, or the
+    ``sensitivity`` runs are of the dataset of ``reports`` (compared on 12 characters).
     """
-    results, split = _gate_rows(reports, "reports")
-    sens = None if sensitivity is None else _gate_rows(sensitivity, "sensitivity")[0]
+    results, sha, split = _gate_rows(reports, "reports")
+    sens = None
+    if sensitivity is not None:
+        sens, sens_sha, _ = _gate_rows(sensitivity, "sensitivity")
+        if sens_sha[:12] == sha[:12]:  # matrix.json keeps 12 characters of a sha
+            raise ValueError(
+                f"sensitivity: the companion runs are of the same dataset as the gate runs "
+                f"({sha[:12]}); the sensitivity dataset (magnitude_far_mult = 1.0) is another one"
+            )
     pre_review, pre_allow = GATE_RUNS[PRE_A1_ROW]
     source = (
         f"the engine before Amendment A1 on the same dataset (`{PRE_A1_ROW}`, the leaderboard runs "
@@ -335,7 +354,7 @@ def render_gate_section(
         + "), printed after the main blocks."
     )
     head, _, rest = render_gate_matrix(
-        results, sensitivity=sens, companion_source=source
+        results, sensitivity=sens, companion_source=source, census=census
     ).partition("\n\n")
     runs = "; ".join(
         f"`{row}`: runs `{review}` ({PROTOCOL_LABELS['review']}) and `{allow}` "

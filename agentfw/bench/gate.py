@@ -13,14 +13,22 @@ The CLI always replays the engine and the engine before Amendment A1 (the defaul
 :data:`PRE_A1_SWITCHES`) on ``--traces``; ``--pre-a1`` is kept for compatibility and changes
 nothing. ``--sensitivity-traces`` (a dataset generated with ``magnitude_far_mult = 1.0``) replays
 both engines on that dataset as the companion rows; without it every ``magnitude_spike`` cell is
-withheld. :func:`load_gate_json` reads a ``--json`` file back.
+withheld. The CLI refuses (usage error, exit 2) a ``--sensitivity-traces`` that is not the
+sensitivity dataset of ``--traces`` (:func:`sensitivity_refusal`). :func:`load_gate_json` reads a ``--json`` file back.
+
+:func:`magnitude_census` is the composition of the ``magnitude_spike`` gate cell that spec A1.4
+shows with every gate table (the gate evidence's census, plan Task 1.23): the CLI prints it from
+``--traces`` (:func:`dataset_census`) under each main table, the leaderboard from its dataset, the
+acceptance test in its summary, and ``docs/decisions/evidence/a1-gate/measure.py`` writes it.
 """  # noqa: E501 - the CLI usage line is kept whole
 
 from __future__ import annotations
 
 import argparse
 import math
-from collections.abc import Mapping, Sequence
+import statistics
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,22 +42,36 @@ from agentfw.bench.metrics import (
     GATE_SHARE,
     GateCell,
     GatePreview,
+    _bucket_of,
     gate_preview,
 )
-from agentfw.bench.replay import PROTOCOL_LABELS, OutcomeMode, SplitSpec, is_outcome_mode
+from agentfw.bench.replay import (
+    PROTOCOL_LABELS,
+    OutcomeMode,
+    ScoreRow,
+    SplitSpec,
+    is_outcome_mode,
+)
 from agentfw.bench.sweeps import PRE_A1_SWITCHES
 from agentfw.core.config import EngineConfig
+from agentfw.synth.generate import Manifest
 
 __all__ = [
     "CLI_COMPANION_SOURCE",
     "ENGINE_ROW",
     "ORIGINAL_CRITERION_LABEL",
     "PRE_A1_ROW",
+    "SENSITIVITY_FAR_MULT",
+    "MagnitudeCensus",
+    "dataset_census",
     "gate_matrix",
     "load_gate_json",
+    "magnitude_census",
     "main",
     "preview_from_json",
+    "render_census",
     "render_gate_matrix",
+    "sensitivity_refusal",
 ]
 
 #: The label printed with the top-1 share (spec A1.5 rule 3, A1.6).
@@ -98,6 +120,76 @@ def gate_matrix(
     return out
 
 
+@dataclass(frozen=True, slots=True)
+class MagnitudeCensus:
+    """The ``magnitude_spike`` composition shown with every gate table (spec A1.4).
+
+    ``gated_test_n`` / ``by_persona``: the attacks of the gate cell (warm test rows, bucket
+    ``"10-100"``; an attack's first warm test row in time order gives its persona and strength),
+    in total and per persona. ``share_strength_ge_10`` / ``median_strength`` / ``n_spikes``: over
+    every spike of the dataset (``labels.jsonl``, one strength per attack id). The field names
+    and values are those of ``matrix.json``'s ``census``.
+    """
+
+    gated_test_n: int
+    by_persona: dict[str, int]
+    share_strength_ge_10: float
+    median_strength: float
+    n_spikes: int
+
+
+def magnitude_census(rows: Iterable[ScoreRow], traces_dir: Path) -> MagnitudeCensus:
+    """The census of the dataset in ``traces_dir`` from replay ``rows`` of it (all rows, or the
+    warm test rows only: both give the same census)."""
+    first: dict[str, ScoreRow] = {}
+    warm = (r for r in rows if r.split == "test" and r.is_warm and not math.isnan(r.fused_score))
+    for r in sorted(warm, key=lambda r: (r.ts_unix_ms, r.envelope_id)):
+        if r.label == "attack" and r.attack_family == _MAGNITUDE and r.attack_id:
+            first.setdefault(r.attack_id, r)
+    bucket = GATE_FAMILIES[_MAGNITUDE][0]
+    by_persona: dict[str, int] = {}
+    for r in first.values():
+        if _bucket_of(_MAGNITUDE, r.strength) == bucket:
+            by_persona[r.agent_id] = by_persona.get(r.agent_id, 0) + 1
+    strength: dict[str, float] = {}
+    for line in (traces_dir / "labels.jsonl").read_bytes().splitlines():
+        lab = orjson.loads(line)
+        if lab["attack_family"] == _MAGNITUDE and lab["strength"] is not None:
+            strength.setdefault(lab["attack_id"], float(lab["strength"]))
+    s = list(strength.values())
+    return MagnitudeCensus(
+        gated_test_n=sum(by_persona.values()),
+        by_persona=dict(sorted(by_persona.items())),
+        share_strength_ge_10=sum(x >= 10.0 for x in s) / len(s) if s else math.nan,
+        median_strength=statistics.median(s) if s else math.nan,
+        n_spikes=len(s),
+    )
+
+
+def dataset_census(traces_dir: Path) -> MagnitudeCensus:
+    """:func:`magnitude_census` of a dataset directory without an engine replay.
+
+    The census reads labels, the split and the warm flags, which the replay derives from the data
+    alone (never from scores), so the rows of the cheapest detector (the ``random`` baseline, a
+    few seconds on SW1) give the census of every engine's replay of that dataset.
+    """
+    rows, _ = replay_detector(traces_dir, "random", SplitSpec(), None, "allow")
+    return magnitude_census(rows, traces_dir)
+
+
+def render_census(c: MagnitudeCensus) -> str:
+    """The census line printed under the gate tables (personas by count, then name)."""
+    persona = ", ".join(
+        f"{a} {n}" for a, n in sorted(c.by_persona.items(), key=lambda kv: (-kv[1], kv[0]))
+    )
+    return (
+        f"Census of the {_MAGNITUDE} gate cell (spec A1.4): n {c.gated_test_n} (warm test rows, "
+        f"bucket {GATE_FAMILIES[_MAGNITUDE][0]}) by persona: {persona or 'none'}; over all "
+        f"{c.n_spikes} spikes of the dataset, median strength {_num(c.median_strength, 1)} and "
+        f"share with strength >= 10 {_num(c.share_strength_ge_10, 3)}."
+    )
+
+
 def _num(x: float, nd: int) -> str:
     return "n/a" if math.isnan(x) else f"{x:.{nd}f}"
 
@@ -131,6 +223,7 @@ def _block(
     withheld: str | None,
     *,
     companion: bool,
+    note: str | None = None,
 ) -> list[str]:
     lines = [f"### {name}", "", "| " + " | ".join(head) + " |"]
     lines.append("|" + "|".join(["---"] * len(head)) + "|")
@@ -148,6 +241,8 @@ def _block(
         ]
         lines.append("| " + " | ".join(cells) + " |")
     lines.append("")
+    if note is not None:
+        lines += [note, ""]
     return lines
 
 
@@ -156,6 +251,7 @@ def render_gate_matrix(
     *,
     sensitivity: Mapping[str, Mapping[OutcomeMode, GatePreview]] | None = None,
     companion_source: str | None = None,
+    census: MagnitudeCensus | None = None,
 ) -> str:
     """Markdown: one block per named engine row, one line per protocol under its label verbatim.
 
@@ -176,6 +272,10 @@ def render_gate_matrix(
     ``companion_source`` ends the intro's sentence "The magnitude_spike cell is shown only with
     its two companion rows (spec A1.5 rule 4): ...": the caller names the two rows and where they
     come from (the CLI passes :data:`CLI_COMPANION_SOURCE`). ``None`` names the rows only.
+
+    ``census`` (:func:`magnitude_census` of the dataset of ``results``) is printed as
+    :func:`render_census` under each main table, whether or not the magnitude cells are shown
+    (it is the dataset's composition, not a result); the companion tables carry none.
     """
     _require_both(results)
     if sensitivity is not None:
@@ -234,7 +334,8 @@ def render_gate_matrix(
             "",
         ]
     for name, by_mode in results.items():
-        lines += _block(name, by_mode, head, withheld, companion=False)
+        note = None if census is None else render_census(census)
+        lines += _block(name, by_mode, head, withheld, companion=False, note=note)
     if sensitivity:  # an empty mapping holds no companion row: no empty companion section
         lines += [
             _COMPANION_HEADER,
@@ -303,6 +404,45 @@ def load_gate_json(path: Path) -> tuple[_Rows, _Rows | None]:
     return _rows_from(payload["results"]), None if sens is None else _rows_from(sens)
 
 
+#: The ``magnitude_far_mult`` of the sensitivity dataset (spec A1.4).
+SENSITIVITY_FAR_MULT = 1.0
+
+
+def sensitivity_refusal(traces_dir: Path, sensitivity_dir: Path) -> str | None:
+    """Why ``sensitivity_dir`` is not the sensitivity dataset of ``traces_dir`` (``None``: it is).
+
+    It is when both manifests load, its config has ``magnitude_far_mult = 1.0`` and equals the
+    ``traces_dir`` config apart from ``magnitude_far_mult``, and its traces differ (a mode
+    ``"own"`` config ignores the multiple, so its "sensitivity" dataset is the same bytes).
+    """
+    try:
+        main_m, sens_m = (
+            Manifest.model_validate_json((d / "manifest.json").read_bytes())
+            for d in (traces_dir, sensitivity_dir)
+        )
+    except (OSError, ValueError) as e:
+        return f"needs the manifest.json of both datasets ({type(e).__name__}: {e})"
+    mult = sens_m.config.magnitude_far_mult
+    if mult != SENSITIVITY_FAR_MULT:
+        return (
+            f"{sensitivity_dir} was generated with magnitude_far_mult = {mult:g}; the sensitivity "
+            f"dataset has magnitude_far_mult = {SENSITIVITY_FAR_MULT:g} (spec A1.4)"
+        )
+    same = sens_m.config.model_copy(update={"magnitude_far_mult": main_m.config.magnitude_far_mult})
+    if same != main_m.config:
+        return (
+            f"the config of {sensitivity_dir} differs from that of {traces_dir} apart from "
+            "magnitude_far_mult (the sensitivity dataset changes that field only)"
+        )
+    sha = main_m.files["traces.jsonl"]
+    if sens_m.files["traces.jsonl"] == sha:
+        return (
+            f"{sensitivity_dir} holds the same traces as {traces_dir} (sha {sha[:12]}): its "
+            "magnitude_far_mult changed nothing, so it is not a sensitivity dataset"
+        )
+    return None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m agentfw.bench.gate")
     p.add_argument("--traces", type=Path, required=True)
@@ -311,7 +451,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         help="the sensitivity dataset (magnitude_far_mult = 1.0): replays the engine and the "
         "pre-A1 engine on it as the companion rows of the magnitude_spike cell (spec A1.5 rule 4); "
-        "without it every magnitude_spike cell is withheld",
+        "without it every magnitude_spike cell is withheld. Refused unless its config is the "
+        "--traces config with magnitude_far_mult = 1.0 and its traces differ",
     )
     p.add_argument(
         "--pre-a1",
@@ -321,6 +462,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     p.add_argument("--out", type=Path, help="write the markdown table here")
     p.add_argument("--json", type=Path, help="write the results as JSON here")
     a = p.parse_args(argv)
+    if a.sensitivity_traces is not None:
+        why = sensitivity_refusal(a.traces, a.sensitivity_traces)
+        if why is not None:
+            p.error(f"--sensitivity-traces: {why}")
     engines = {ENGINE_ROW: EngineConfig(), PRE_A1_ROW: EngineConfig().replace(**PRE_A1_SWITCHES)}
     results = {name: gate_matrix(a.traces, cfg) for name, cfg in engines.items()}
     sensitivity = (
@@ -332,7 +477,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if a.sensitivity_traces is not None:
         head += f"Sensitivity dataset: `{a.sensitivity_traces}`\n\n"
     md = head + render_gate_matrix(
-        results, sensitivity=sensitivity, companion_source=CLI_COMPANION_SOURCE
+        results,
+        sensitivity=sensitivity,
+        companion_source=CLI_COMPANION_SOURCE,
+        census=dataset_census(a.traces),
     )
     print(md)
     if a.out is not None:

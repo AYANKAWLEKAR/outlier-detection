@@ -39,7 +39,12 @@ import orjson
 import pytest
 
 from agentfw.bench.dataset import load_dir
-from agentfw.bench.gate import ORIGINAL_CRITERION_LABEL
+from agentfw.bench.gate import (
+    ORIGINAL_CRITERION_LABEL,
+    MagnitudeCensus,
+    magnitude_census,
+    render_census,
+)
 from agentfw.bench.metrics import (
     RecallCell,
     among_reasons_share,
@@ -163,6 +168,15 @@ def tier1_reports(
     return out
 
 
+@pytest.fixture(scope="session")
+def tier1_census(
+    tier1_runs: dict[OutcomeMode, tuple[Path, Path]],
+    tier1_rows: dict[OutcomeMode, list[ScoreRow]],
+) -> MagnitudeCensus:
+    """The magnitude census of the SW1 dataset (spec A1.4), printed in every failure summary."""
+    return magnitude_census(tier1_rows["review"], tier1_runs["review"][0])
+
+
 def _warm_test(rows: list[ScoreRow]) -> list[ScoreRow]:
     return [r for r in rows if r.split == "test" and r.is_warm]
 
@@ -211,10 +225,12 @@ def _companions() -> list[str]:
     return out
 
 
-def _summary(tier1_rows: dict[OutcomeMode, list[ScoreRow]], failed: str) -> str:
+def _summary(
+    tier1_rows: dict[OutcomeMode, list[ScoreRow]], census: MagnitudeCensus, failed: str
+) -> str:
     """Failure message: the amended criterion's numbers under both protocols, each under its label
     verbatim, then benign and control FPR (spec A1.5 rules 1 and 3); the magnitude cell only with
-    its companions (rule 4)."""
+    its companions (rule 4); then the magnitude census of the dataset (spec A1.4)."""
     lines = [f"failed: {failed}"]
     for mode in PROTOCOLS:
         rows = tier1_rows[mode]
@@ -229,7 +245,7 @@ def _summary(tier1_rows: dict[OutcomeMode, list[ScoreRow]], failed: str) -> str:
             )
         b, ctl = benign_fpr(warm, "row"), control_fpr(warm, "row")
         lines.append(f"  benign FPR {b:.4f}; control FPR {ctl:.4f}")
-    return "\n".join([*lines, *_companions()])
+    return "\n".join([*lines, *_companions(), f"  {render_census(census)}"])
 
 
 _ALLOW_XFAIL = pytest.mark.xfail(
@@ -242,7 +258,11 @@ _ALLOW_XFAIL = pytest.mark.xfail(
 
 
 @pytest.mark.parametrize("mode", ["review", pytest.param("allow", marks=_ALLOW_XFAIL)])
-def test_tier1_exit(tier1_rows: dict[OutcomeMode, list[ScoreRow]], mode: OutcomeMode) -> None:
+def test_tier1_exit(
+    tier1_rows: dict[OutcomeMode, list[ScoreRow]],
+    tier1_census: MagnitudeCensus,
+    mode: OutcomeMode,
+) -> None:
     """Amended gate (spec A1.7), per protocol.
     "review" = oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic);
     "allow" = spec §5.2 allow-all."""
@@ -251,11 +271,11 @@ def test_tier1_exit(tier1_rows: dict[OutcomeMode, list[ScoreRow]], mode: Outcome
         rows = [r for r in warm_test if r.attack_family in (None, fam)]
         bucket = _bucket(fam)
         recall = recall_by_family(rows, "row", level="attack")[fam][bucket].recall
-        assert recall >= 0.90, _summary(tier1_rows, f"{mode} {fam} recall")
+        assert recall >= 0.90, _summary(tier1_rows, tier1_census, f"{mode} {fam} recall")
         among = among_reasons_share(rows, fam, det, "row", bucket=bucket)
-        assert among >= 0.90, _summary(tier1_rows, f"{mode} {fam} among")
+        assert among >= 0.90, _summary(tier1_rows, tier1_census, f"{mode} {fam} among")
     fpr = benign_fpr(warm_test, "row")
-    assert fpr <= 0.02, _summary(tier1_rows, f"{mode} benign FPR")
+    assert fpr <= 0.02, _summary(tier1_rows, tier1_census, f"{mode} benign FPR")
 
 
 @pytest.mark.parametrize("mode", PROTOCOLS)
@@ -269,10 +289,10 @@ def test_tier1_magnitude_cell_size(
 
 @pytest.mark.parametrize("mode", PROTOCOLS)
 def test_tier1_benign_fpr_guard(
-    tier1_rows: dict[OutcomeMode, list[ScoreRow]], mode: OutcomeMode
+    tier1_rows: dict[OutcomeMode, list[ScoreRow]], tier1_census: MagnitudeCensus, mode: OutcomeMode
 ) -> None:
     fpr = benign_fpr(_warm_test(tier1_rows[mode]), "row")
-    assert fpr <= 0.02, _summary(tier1_rows, f"{mode} benign FPR")
+    assert fpr <= 0.02, _summary(tier1_rows, tier1_census, f"{mode} benign FPR")
 
 
 @pytest.mark.parametrize("mode", PROTOCOLS)
@@ -309,19 +329,22 @@ def test_tier1_cells_match_report(
 
 
 def test_tier1_failure_summary_follows_a1_5(
+    tier1_runs: dict[OutcomeMode, tuple[Path, Path]],
     tier1_rows: dict[OutcomeMode, list[ScoreRow]],
+    tier1_census: MagnitudeCensus,
 ) -> None:
     """Every failure message (``_summary``) meets spec A1.5 rules 1, 3 and 4: both protocols in
     order, each under its label verbatim; per family recall (n/N), among share and top-1 share
     labelled as the original criterion; then benign FPR and control FPR; then the two
-    ``magnitude_spike`` companion rows of SW1's seed from matrix.json."""
+    ``magnitude_spike`` companion rows of SW1's seed from matrix.json; then the magnitude census
+    (spec A1.4)."""
     matrix = {
         (r["dataset"], r["engine"], r["protocol"], r["seed"]): r
         for r in orjson.loads(MATRIX.read_bytes())["rows"]
     }
     for key in [(d, e, m, SW1.seed) for d, e in COMPANIONS for m in PROTOCOLS]:
         assert key in matrix, f"matrix.json has no companion row {key}"
-    lines = _summary(tier1_rows, "probe").splitlines()
+    lines = _summary(tier1_rows, tier1_census, "probe").splitlines()
     assert lines[0] == "failed: probe"
     block = 1 + len(TARGETS) + 1
     for i, mode in enumerate(PROTOCOLS):
@@ -335,7 +358,13 @@ def test_tier1_failure_summary_follows_a1_5(
         warm = _warm_test(tier1_rows[mode])
         b, ctl = benign_fpr(warm, "row"), control_fpr(warm, "row")
         assert fpr == f"  benign FPR {b:.4f}; control FPR {ctl:.4f}", fpr
-    companions = lines[1 + len(PROTOCOLS) * block :]
+    *companions, census = lines[1 + len(PROTOCOLS) * block :]
+    # Spec A1.4: the magnitude census is reported with every gate result; its n is the gate
+    # cell's size under both protocols, and the census does not depend on the protocol's rows.
+    assert census == f"  {render_census(tier1_census)}", census
+    for mode in PROTOCOLS:
+        assert tier1_census.gated_test_n == _cell(tier1_rows[mode], "magnitude_spike").n_total
+        assert magnitude_census(tier1_rows[mode], tier1_runs[mode][0]) == tier1_census
     assert len(companions) == len(COMPANIONS)
     for line, (dataset, engine) in zip(companions, COMPANIONS, strict=True):
         assert f"seed {SW1.seed}, matrix.json): " in line, line
@@ -347,15 +376,19 @@ def test_tier1_failure_summary_follows_a1_5(
 
 @pytest.mark.parametrize("mode", PROTOCOLS)
 def test_tier1_no_regression(
-    tier1_rows: dict[OutcomeMode, list[ScoreRow]], mode: OutcomeMode
+    tier1_rows: dict[OutcomeMode, list[ScoreRow]], tier1_census: MagnitudeCensus, mode: OutcomeMode
 ) -> None:
     """The measured seed-0 numbers per protocol, minus a 0.1 tolerance, catch regressions."""
     warm_test = _warm_test(tier1_rows[mode])
     for fam, (recall, among) in MEASURED[mode].items():
         got_recall = _family_recall(warm_test, fam)
-        assert got_recall >= recall - TOLERANCE, _summary(tier1_rows, f"{mode} {fam} recall pin")
+        assert got_recall >= recall - TOLERANCE, _summary(
+            tier1_rows, tier1_census, f"{mode} {fam} recall pin"
+        )
         got_among = _among(tier1_rows[mode], fam)
-        assert got_among >= among - TOLERANCE, _summary(tier1_rows, f"{mode} {fam} among pin")
+        assert got_among >= among - TOLERANCE, _summary(
+            tier1_rows, tier1_census, f"{mode} {fam} among pin"
+        )
 
 
 def test_tier1_ablation_table(
@@ -399,3 +432,24 @@ def test_tier1_score_latency_p99(
     assert lat.size > 100_000
     p99 = float(np.percentile(lat, 99))
     assert p99 < P99_BUDGET_US, f"p99={p99:.1f} us"
+
+
+def test_tier1_dataset_is_the_measured_matrix_dataset(
+    tier1_reports: dict[OutcomeMode, dict[str, Any]],
+) -> None:
+    """The SW1 dataset replayed here is the one ``matrix.json`` measured (seed-0 traces sha, read
+    from ``matrix.json`` only): the pins above and every published number describe this data."""
+    want = {
+        r["dataset_sha"]
+        for r in orjson.loads(MATRIX.read_bytes())["rows"]
+        if (r["dataset"], r["seed"]) == ("sw1", SW1.seed)
+    }
+    assert len(want) == 1, want
+    for mode, rep in tier1_reports.items():
+        got = str(rep["meta"]["dataset_sha"])[:12]
+        assert {got} == want, (
+            f"the SW1 traces sha {got} ({mode} run) is not matrix.json's sw1 seed-{SW1.seed} "
+            f"dataset_sha {want.pop()}: the generator output changed, so matrix.json and the docs "
+            "(README, writeup, decision 008, leaderboard) must be re-measured with "
+            "docs/decisions/evidence/a1-gate/run.sh"
+        )
