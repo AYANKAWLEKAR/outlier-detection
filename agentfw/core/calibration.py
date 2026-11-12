@@ -61,8 +61,10 @@ class Calibrator:
         w = min(1.0, rec.n_scored / cfg.cal_blend_n)
         return w * q + (1.0 - w) * cfg.cal_theta0
 
-    def decide(self, agent: str, fused: float) -> Decision:
-        theta = self.threshold(agent)
+    def decide(self, agent: str, fused: float, theta: float | None = None) -> Decision:
+        """The §6.8 band of ``fused`` against ``theta`` (default: the agent's threshold)."""
+        if theta is None:
+            theta = self.threshold(agent)
         if fused >= theta:
             return Decision.BLOCK
         if fused >= theta - self.cfg.cal_delta:

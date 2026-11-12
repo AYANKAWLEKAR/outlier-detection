@@ -6,6 +6,8 @@ import dataclasses
 from typing import Any, Literal
 
 __all__ = [
+    "BR_MODES",
+    "BrMode",
     "CAL_CENSOR_MODES",
     "CalCensor",
     "Direction",
@@ -20,7 +22,9 @@ Direction = Literal["up", "both"]
 CalCensor = Literal["none", "drop", "winsorize"]
 VelCountStat = Literal["logz", "poisson"]
 ScoreModel = Literal["z", "tail"]
+BrMode = Literal["off", "score", "modulate"]
 CAL_CENSOR_MODES: tuple[CalCensor, ...] = ("none", "drop", "winsorize")
+BR_MODES: tuple[BrMode, ...] = ("off", "score", "modulate")
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -116,6 +120,13 @@ class EngineConfig:
     vital_spin_di: float = 0.1
     vital_w_stall: int = 6
     vital_stall_di: float = 0.3
+    # Blast radius (§6.9 lexical + structural, F3 annotation terms; Task 1.7, core.blast).
+    # "off": no b (``TrajectoryInfo.blast_radius`` None); "score": b on every reason and on
+    # ``TrajectoryInfo``; "modulate": also decide against ``θ_eff = θ · (1 − br_k · b)``.
+    # ``irreversible_b``: a write at or above this b is irreversible (F4's gate input).
+    br_mode: BrMode = "off"
+    br_k: float = 0.6
+    irreversible_b: float = 0.6
     # Fusion (§6.11)
     fusion_bonus: float = 0.15
     fusion_bonus_gate: float = 0.5

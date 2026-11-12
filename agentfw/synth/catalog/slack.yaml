@@ -1,5 +1,6 @@
 slack.post_message:
   kind: write
+  annotations: {read_only: false, destructive: false, idempotent: false, open_world: false}  # additive: a new message per call, inside the workspace
   args:
     channel: {type: categorical, vocab: [support-ops, sales-floor, outreach-log]}
     text: {type: freetext, len_dist: {family: lognormal, mu: 4.0, sigma: 0.6, min: 5}}
@@ -10,6 +11,7 @@ slack.post_message:
     produces_ids: [message.ts]
 slack.read_channel:
   kind: read
+  annotations: {read_only: true, destructive: false, idempotent: true, open_world: false}  # no side effect
   args:
     channel: {type: categorical, vocab: [support-ops, sales-floor, outreach-log]}
     limit: {type: numeric, shape: count, dist: {family: constant, value: 20}}

@@ -37,17 +37,28 @@ and accepts ``"vital"`` too (``KNOWN_DETECTORS``). Vital scores are never fused 
 runs over the v1 scores only, then the vital scores are appended to ``per_detector`` and their
 reasons (score > ``reason_min``, highest first) after the v1 reasons. So the fused score, the
 decision and every piece of state are the same with and without ``"vital"``.
+
+Trajectory (F3, Task 1.7): every result carries a ``TrajectoryInfo``: the regime (T-06: per-key
+history = the sequence detector's unigram count of the (agent, tool) >= ``mag_cold_n``; schemas =
+the tool's hint ``has_schema``), the blast radius ``b`` (``core.blast``; ``None`` while
+``br_mode="off"``), irreversibility and the threshold the decision used. ``br_mode="score"`` also
+sets ``Reason.blast_radius = b`` on every reason; ``"modulate"`` decides against
+``θ_eff = θ · (1 − br_k · b)``. ``DetectorResult.threshold``, the calibrator and every piece of
+state keep the agent's own θ, so modulation moves decisions only. ``b`` reads the sequence
+detector's kind records (write kind, item counts) and never writes, so ``score`` stays pure.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Mapping
 from time import perf_counter_ns
 from types import MappingProxyType
 
+from agentfw.core.blast import blast_radius, irreversible, regime_of
 from agentfw.core.calibration import Calibrator
-from agentfw.core.config import CAL_CENSOR_MODES, EngineConfig
+from agentfw.core.config import BR_MODES, CAL_CENSOR_MODES, EngineConfig
 from agentfw.core.detectors.base import SubDetector, signed_log1p, value_key
 from agentfw.core.detectors.magnitude import RESP_FIELD, MagnitudeDetector
 from agentfw.core.detectors.novelty import NoveltyDetector
@@ -60,6 +71,8 @@ from agentfw.core.envelope import (
     DetectorScore,
     FieldType,
     Outcome,
+    Reason,
+    TrajectoryInfo,
 )
 from agentfw.core.fusion import FusionResult, fuse
 from agentfw.core.hints import ToolHint
@@ -84,6 +97,13 @@ def _finite_y(v: object) -> float | None:
     """``signed_log1p(x)`` of a finite numeric value, else ``None`` (NaN/±inf/non-numbers)."""
     x = try_number(v)
     return signed_log1p(x) if x is not None and math.isfinite(x) else None
+
+
+def _with_b(reasons: tuple[Reason, ...], b: float | None) -> tuple[Reason, ...]:
+    """Every reason with ``blast_radius=b`` (unchanged while ``b`` is None)."""
+    if b is None:
+        return reasons
+    return tuple(dataclasses.replace(r, blast_radius=b) for r in reasons)
 
 
 class _CallTypes(TypeView):
@@ -114,6 +134,10 @@ class Engine:
             raise ValueError(f"unknown detectors {sorted(unknown)}; known: {known}")
         if cfg.cal_censor not in CAL_CENSOR_MODES:
             raise ValueError(f"unknown cal_censor {cfg.cal_censor!r}; known: {CAL_CENSOR_MODES}")
+        if cfg.br_mode not in BR_MODES:
+            raise ValueError(f"unknown br_mode {cfg.br_mode!r}; known: {BR_MODES}")
+        if not 0.0 <= cfg.br_k <= 1.0:  # keeps θ_eff >= 0
+            raise ValueError(f"br_k must be in [0, 1], got {cfg.br_k}")
         self.cfg = cfg
         self.store: StateStore = DictStore() if store is None else store
         self.enabled = frozenset(enabled)
@@ -130,6 +154,7 @@ class Engine:
             magnitude.has_ref if "magnitude" in self.enabled and cfg.mag_bool_numeric else None
         )
         sequence = SequenceDetector(self.store, cfg, hints)
+        self._sequence = sequence  # kind records and counts for the trajectory (read-only)
         built: dict[str, SubDetector] = {
             "magnitude": magnitude,
             "novelty": NoveltyDetector(self.store, cfg, self.priors, numeric_ref),
@@ -159,16 +184,18 @@ class Engine:
         per, fr = self._fuse(e, view)
         agent = e.agent_id
         theta = self.calibrator.threshold(agent)
-        decision = self.calibrator.decide(agent, fr.fused)
+        traj = self._trajectory(e, theta)
+        decision = self.calibrator.decide(agent, fr.fused, traj.threshold_eff)
         self._cache = (e.envelope_id, fr.fused, theta)
         return DetectorResult(
             fused_score=fr.fused,
             per_detector=per,
-            reasons=fr.reasons,
+            reasons=_with_b(fr.reasons, traj.blast_radius),
             latency_us=(perf_counter_ns() - t0) / 1000.0,
             threshold=theta,
             decision=decision,
             field_types=view.types,
+            trajectory=traj,
         )
 
     def update(self, e: ActionEnvelope, outcome: Outcome) -> None:
@@ -210,6 +237,21 @@ class Engine:
         return self.store.nbytes()
 
     # -- internals ------------------------------------------------------------------------------
+
+    def _trajectory(self, e: ActionEnvelope, theta: float) -> TrajectoryInfo:
+        cfg, seq = self.cfg, self._sequence
+        agent, tool = e.agent_id, e.tool_id
+        hint = self.hints.get(tool)
+        has_schema = hint is not None and hint.has_schema
+        regime = regime_of(has_schema, seq.n_tool(agent, tool), cfg.mag_cold_n)
+        if cfg.br_mode == "off":
+            return TrajectoryInfo(regime, None, irreversible(None, hint, False), theta)
+        is_write = seq.is_write(agent, tool)
+        b = blast_radius(e, hint, is_write, seq.has_item_count(agent, tool))
+        theta_eff = theta * (1.0 - cfg.br_k * b) if cfg.br_mode == "modulate" else theta
+        return TrajectoryInfo(
+            regime, b, irreversible(b, hint, is_write, cfg.irreversible_b), theta_eff
+        )
 
     def _view(self, e: ActionEnvelope) -> _CallTypes:
         base = TypeView(self.inference, e.agent_id, e.tool_id)

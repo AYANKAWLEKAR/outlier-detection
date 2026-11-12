@@ -139,7 +139,9 @@ def test_benign_dataset_sessions_are_all_benign(benign_rows: list[ScoreRow]) -> 
 
 
 # Measured at Task 1.6 (T-30): 12 of 200 sessions (6.00%) on this dataset, all LOOP, all
-# sales-ops-a; full benign SW1 3.64% (1,538 / 42,289). The bar stays 1%.
+# sales-ops-a; full benign SW1 3.64% (1,538 / 42,289). The bar stays 1%. This test replays
+# without schemas (no hints). With the dataset's schemas.jsonl auto-loaded (Task 1.7, T-30/T-32)
+# this set is also 12/200; benign SW1 rises to 3.86% (1,631 / 42,289).
 @pytest.mark.xfail(
     strict=True,
     raises=AssertionError,

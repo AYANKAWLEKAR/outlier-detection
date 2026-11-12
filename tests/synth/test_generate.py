@@ -77,7 +77,7 @@ def test_manifest_hashes_and_counts(tmp_path: Path) -> None:
     m = generate(cfg(), tmp_path)
     for name, digest in m.files.items():
         assert hashlib.sha256((tmp_path / name).read_bytes()).hexdigest() == digest
-    assert set(m.files) == {"traces.jsonl", "labels.jsonl"}
+    assert set(m.files) == {"traces.jsonl", "labels.jsonl", "schemas.jsonl"}  # F3 (Task 1.7)
     traces = _read(tmp_path / "traces.jsonl")
     assert m.counts["envelopes"] == len(traces) > 0
     assert m.counts["sessions"] == len({t["session_id"] for t in traces})

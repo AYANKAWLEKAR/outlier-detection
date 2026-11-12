@@ -1,5 +1,6 @@
 stripe.retrieve_charge:
   kind: read
+  annotations: {read_only: true, destructive: false, idempotent: true, open_world: false}  # no side effect
   args:
     charge_id: {type: id, prefix: "ch_", source: external}
   produces: [charge.id, charge.amount, charge.customer]
@@ -11,6 +12,7 @@ stripe.retrieve_charge:
     produces_ids: [charge.id, charge.customer]
 stripe.list_charges:
   kind: read
+  annotations: {read_only: true, destructive: false, idempotent: true, open_world: false}  # no side effect
   args:
     customer_id: {type: id, prefix: "cus_", source: external}
     limit: {type: numeric, shape: count, dist: {family: constant, value: 10}}
@@ -22,6 +24,7 @@ stripe.list_charges:
     produces_ids: [charge.ids]
 stripe.create_refund:
   kind: write
+  annotations: {read_only: false, destructive: true, idempotent: false, open_world: true}  # moves money back to the customer's card
   args:
     charge_id: {type: id, prefix: "ch_", source: stripe.retrieve_charge.id}
     amount:
@@ -42,6 +45,7 @@ stripe.create_refund:
     produces_ids: [refund.id]
 stripe.retrieve_customer:
   kind: read
+  annotations: {read_only: true, destructive: false, idempotent: true, open_world: false}  # no side effect
   args:
     customer_id: {type: id, prefix: "cus_", source: stripe.retrieve_charge.customer}
   produces: [customer.id, customer.email]
@@ -52,6 +56,7 @@ stripe.retrieve_customer:
     produces_ids: [customer.id]
 stripe.create_payout:
   kind: write
+  annotations: {read_only: false, destructive: true, idempotent: false, open_world: true}  # moves money to an external bank account
   args:
     amount:
       type: numeric

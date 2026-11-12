@@ -90,8 +90,14 @@ A1_DEFAULTS: dict[str, object] = {
 }
 
 
-# Task 1.4 trajectory switches (T-03): off by default.
-TRAJECTORY_SWITCH_DEFAULTS: dict[str, object] = {"flow_ledger": False}
+# Trajectory switches (T-03): off by default. Task 1.4: flow_ledger; Task 1.7: blast radius
+# (br_k and irreversible_b are the §6.9 / F3 constants, read only when br_mode is not "off").
+TRAJECTORY_SWITCH_DEFAULTS: dict[str, object] = {
+    "flow_ledger": False,
+    "br_mode": "off",
+    "br_k": 0.6,
+    "irreversible_b": 0.6,
+}
 
 # Task 1.5 vital-signs constants (feature spec F2; the detector itself is opt-in via ``enabled``).
 VITAL_DEFAULTS: dict[str, object] = {

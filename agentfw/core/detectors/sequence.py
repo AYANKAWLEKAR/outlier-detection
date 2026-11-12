@@ -271,6 +271,16 @@ class SequenceDetector:
         rec = self._store.get(key_kind(agent, tool))
         return isinstance(rec, ToolKindRecord) and rec.has_id_arg and not rec.has_item_count
 
+    def has_item_count(self, agent: str, tool: str) -> bool:
+        """Has this (agent, tool) ever returned a response ``item_count``? Read-only."""
+        rec = self._store.get(key_kind(agent, tool))
+        return isinstance(rec, ToolKindRecord) and rec.has_item_count
+
+    def n_tool(self, agent: str, tool: str) -> int:
+        """Learned observations of ``tool`` for ``agent`` (the unigram count); 0 if none."""
+        rec = self._trans(agent)
+        return 0 if rec is None else rec.c0.get(tool, 0)
+
     def usual_producer(self, agent: str, tool: str, path: str) -> str | None:
         """Commonest producer tool of this (agent, tool, path)'s ids; ties by name. Read-only."""
         rec = self._store.get(key_flow(agent, tool, path))

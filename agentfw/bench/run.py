@@ -4,7 +4,8 @@
 protocol (``--outcomes``) defaults to the benchmark protocol, the oracle-reviewer approval loop
 (``BENCH_OUTCOMES``, user decision 2026-11-10, decision 008); ``--outcomes allow`` is spec §5.2
 allow-all. Baselines and the ablation table use the same protocol as the run; the report records
-it in ``extras.outcomes`` and labels it in its header.
+it in ``extras.outcomes`` and labels it in its header. An engine detector gets the dataset's
+``schemas.jsonl`` (when present) as hints (F3; ``registry.make_bench_detector``).
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from agentfw.bench.ablation import run_ablation
 from agentfw.bench.dataset import load_dir
 from agentfw.bench.metrics import BOOTSTRAP_N, calibration_rows, compute_all, gate_preview
 from agentfw.bench.protocol import BatchFit
-from agentfw.bench.registry import make_detector
+from agentfw.bench.registry import make_bench_detector
 from agentfw.bench.replay import (
     BENCH_OUTCOMES,
     OUTCOME_MODES,
@@ -64,7 +65,7 @@ def run(
     ``extras.outcomes``.
     """
     raws, labels, manifest = load_dir(traces_dir)
-    det = make_detector(detector, **detector_kw)
+    det = make_bench_detector(detector, traces_dir, **detector_kw)
     seed = manifest.config.seed
     sample_ids: set[str] | None = None
     extras: dict[str, object] = {"outcomes": outcomes}

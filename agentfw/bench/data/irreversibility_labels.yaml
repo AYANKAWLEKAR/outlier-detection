@@ -1,0 +1,49 @@
+# Hand-labelled irreversibility of every synth catalog tool (F3 acceptance, spec §6.9).
+# 0 = read, 1 = reversible write, 2 = costly to reverse,
+# 3 = irreversible (money moved, message sent, record deleted).
+# Labels are judgments of the real-world API's semantics, written before blast radius was
+# computed; never tuned to the formula. One reason comment per tool.
+
+# Mail
+# delivered to (possibly external) inboxes; there is no recall
+mail.send_email: 3
+
+# Salesforce
+# returns records for a query; no side effect
+salesforce.run_soql: 0
+# fetches one record; no side effect
+salesforce.get_record: 0
+# one field on one record; the old value can be written back (field history keeps it)
+salesforce.update_record: 1
+# overwrites a field on many records at once; undoing needs every prior value
+salesforce.mass_update: 2
+# creates a task that can simply be deleted
+salesforce.create_task: 1
+
+# Slack
+# posted to a channel and pushed to members; deleting it does not unsend it
+slack.post_message: 3
+# reads recent messages; no side effect
+slack.read_channel: 0
+
+# Stripe
+# fetches one charge; no side effect
+stripe.retrieve_charge: 0
+# lists a customer's charges; no side effect
+stripe.list_charges: 0
+# fetches one customer; no side effect
+stripe.retrieve_customer: 0
+# money returned to the card; a refund cannot be cancelled once it succeeds
+stripe.create_refund: 3
+# money moved to an external bank account
+stripe.create_payout: 3
+
+# Zendesk
+# fetches one ticket; no side effect
+zendesk.get_ticket: 0
+# lists tickets by status; no side effect
+zendesk.list_tickets: 0
+# comments cannot be deleted (only redacted) and a public one emails the requester
+zendesk.add_comment: 2
+# the status can be set back (a solved ticket can be reopened until it closes)
+zendesk.update_status: 1

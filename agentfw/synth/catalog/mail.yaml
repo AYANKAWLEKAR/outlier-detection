@@ -1,5 +1,6 @@
 mail.send_email:
   kind: write
+  annotations: {read_only: false, destructive: false, idempotent: false, open_world: true}  # additive, but reaches outside recipients
   args:
     to:
       type: list_of_email

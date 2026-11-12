@@ -37,12 +37,17 @@ __all__ = [
     "RawCall",
     "Reason",
     "RecentCall",
+    "Regime",
     "ResponseMeta",
     "Scalar",
+    "TrajectoryInfo",
     "Verdict",
 ]
 
 Scalar = str | int | float | bool | None
+#: What a decision was based on (F3, T-06): per-key history (>= ``mag_cold_n`` observations of the
+#: (agent, tool)) and/or a captured tool schema.
+Regime = Literal["history+schemas", "history_only", "schemas_only", "bare"]
 
 
 class FieldType(StrEnum):
@@ -242,6 +247,18 @@ class Reason:
 
 
 @dataclass(slots=True, frozen=True)
+class TrajectoryInfo:
+    """Trajectory facts the engine attaches to every result (F3; later tasks append fields with
+    defaults). ``blast_radius`` is ``None`` while ``br_mode="off"``; ``threshold_eff`` is the
+    threshold the decision used (the agent's own unless ``br_mode="modulate"``)."""
+
+    regime: Regime
+    blast_radius: float | None
+    irreversible: bool
+    threshold_eff: float
+
+
+@dataclass(slots=True, frozen=True)
 class DetectorResult:
     fused_score: float
     per_detector: tuple[DetectorScore, ...]
@@ -250,6 +267,7 @@ class DetectorResult:
     threshold: float | None = None
     decision: Decision | None = None
     field_types: Mapping[str, FieldType] = field(default_factory=dict)
+    trajectory: TrajectoryInfo | None = None  # always set by the engine
 
 
 @dataclass(slots=True, frozen=True)

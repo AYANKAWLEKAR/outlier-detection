@@ -2,8 +2,10 @@
 
 Output files (all deterministic for a given config; the manifest carries no timestamps):
 ``traces.jsonl`` (``RawCall`` per line, sorted by ``(ts, session_id, seq_no)``), ``labels.jsonl``
-(one ``Label`` per envelope, same order) and ``manifest.json`` (config, sha256 per file, counts).
-Paths in the config are stored exactly as given.
+(one ``Label`` per envelope, same order), ``schemas.jsonl`` (one ``core.schemas`` row per catalog
+tool, sorted by tool id: a JSON Schema derived from the ``ArgSpec`` types, the catalog's MCP
+annotations, ``captured_at`` = ``start_ms``, the generation epoch) and ``manifest.json`` (config,
+sha256 per file, counts). Paths in the config are stored exactly as given.
 """
 
 from __future__ import annotations
@@ -18,7 +20,9 @@ import numpy as np
 import orjson
 from pydantic import BaseModel, Field, ValidationError
 
-from agentfw.core.envelope import Label, RawCall
+from agentfw.core.envelope import JsonValue, Label, RawCall
+from agentfw.core.hints import ToolAnnotations
+from agentfw.core.schemas import ToolSchema
 from agentfw.synth.attacks import ATTACKS, AttackContext, inject
 from agentfw.synth.dists import IdPool
 from agentfw.synth.load import (
@@ -31,9 +35,17 @@ from agentfw.synth.load import (
     validate_world,
 )
 from agentfw.synth.sampler import sample_persona_tagged, stable_hash
-from agentfw.synth.schema import Catalog, Persona
+from agentfw.synth.schema import ArgSpec, Catalog, Persona, ToolSpec
 
-__all__ = ["GenerateConfig", "Manifest", "generate", "main", "sw1_config", "topup_rng"]
+__all__ = [
+    "GenerateConfig",
+    "Manifest",
+    "generate",
+    "main",
+    "sw1_config",
+    "tool_schemas",
+    "topup_rng",
+]
 
 
 class GenerateConfig(BaseModel):
@@ -133,6 +145,50 @@ def _inject_attacks(
     return out, {lab.envelope_id: lab for lab in labels}, stats
 
 
+_STRING: dict[str, JsonValue] = {"type": "string"}
+_EMAIL: dict[str, JsonValue] = {"type": "string", "format": "email"}
+
+
+def _arg_schema(a: ArgSpec) -> dict[str, JsonValue]:
+    """JSON Schema of one argument, from its ``ArgSpec`` type."""
+    match a.type:
+        case "numeric":
+            return {"type": "number"}
+        case "bool":
+            return {"type": "boolean"}
+        case "categorical":
+            vocab: list[JsonValue] = list(a.vocab) if a.vocab else []
+            return {"type": "string", "enum": vocab} if vocab else dict(_STRING)
+        case "email":
+            return dict(_EMAIL)
+        case "list_of_id":
+            return {"type": "array", "items": dict(_STRING)}
+        case "list_of_email":
+            return {"type": "array", "items": dict(_EMAIL)}
+        case "freetext_map":
+            return {"type": "object", "additionalProperties": dict(_STRING)}
+        case _:  # id, freetext
+            return dict(_STRING)
+
+
+def _input_schema(spec: ToolSpec) -> dict[str, JsonValue]:
+    props: dict[str, JsonValue] = {n: _arg_schema(a) for n, a in sorted(spec.args.items())}
+    return {"type": "object", "properties": props}
+
+
+def tool_schemas(catalog: Catalog, captured_at: int) -> list[ToolSchema]:
+    """One captured schema per catalog tool, sorted by tool id (F3)."""
+    return [
+        ToolSchema.capture(
+            tool,
+            _input_schema(spec),
+            ToolAnnotations() if spec.annotations is None else spec.annotations.to_core(),
+            captured_at,
+        )
+        for tool, spec in sorted(catalog.items())
+    ]
+
+
 def _jsonl(rows: list[dict[str, object]]) -> bytes:
     return b"".join(orjson.dumps(r, option=orjson.OPT_SORT_KEYS) + b"\n" for r in rows)
 
@@ -180,6 +236,7 @@ def generate(cfg: GenerateConfig, out_dir: Path) -> Manifest:
     blobs = {
         "traces.jsonl": _jsonl([c.model_dump(mode="json") for c in raws]),
         "labels.jsonl": _jsonl([lab.model_dump(mode="json") for lab in labels]),
+        "schemas.jsonl": _jsonl([s.to_row() for s in tool_schemas(catalog, cfg.start_ms)]),
     }
     for name, data in blobs.items():
         (out_dir / name).write_bytes(data)
