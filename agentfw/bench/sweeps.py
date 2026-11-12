@@ -5,9 +5,11 @@ and summarises each run with :func:`sweep_metrics`, all on **warm test** rows:
 
 * ``auprc``, ``fpr95_per_agent`` and the ``per_agent_recall`` it was achieved at;
 * the Tier-1 gate preview at the engine's **live** per-agent thresholds (``"row"``):
-  ``recall:{family}`` (attack level, gate bucket), ``share:{family}`` (top-reason share of the
-  targeted detector), ``n:{family}``, ``benign_fpr``, ``control_fpr``, ``gate_min_recall``,
-  ``gate_pass``; every :data:`GATE_FAMILIES` family gets keys (NaN / 0 when absent);
+  ``recall:{family}`` (attack level, gate bucket), ``among:{family}`` (among-the-reasons share
+  of the targeted detector, gate bucket, spec A1.6), ``share:{family}`` (top-reason share, the
+  original spec §9 criterion), ``n:{family}``, ``benign_fpr``, ``control_fpr``,
+  ``gate_min_recall``, ``gate_pass`` (the amended criterion, spec A1.7, under the run's one
+  protocol); every :data:`GATE_FAMILIES` family gets keys (NaN / 0 when absent);
 * ``offcal_*``: the same gate at an *offline* reference calibration (each agent's exact
   ``1 - cal_alpha`` quantile of its warm **train** benign scores) -- a diagnostic that separates
   detector quality from the streaming calibrator; not a deployable number;
@@ -164,6 +166,7 @@ def _gate_keys(prefix: str, rows: Sequence[ScoreRow], thresholds: Thresholds) ->
     for fam in GATE_FAMILIES:
         cell = g.cells.get(fam)
         out[f"{prefix}recall:{fam}"] = math.nan if cell is None else cell.recall
+        out[f"{prefix}among:{fam}"] = math.nan if cell is None else cell.among_reasons_share
         out[f"{prefix}share:{fam}"] = math.nan if cell is None else cell.top_reason_share
         out[f"{prefix}n:{fam}"] = 0.0 if cell is None else float(cell.n_total)
     return out
@@ -528,10 +531,14 @@ def _fmt(x: object, nd: int = 3) -> str:
 
 
 def gate_table(rows: Sequence[tuple[str, Mapping[str, float]]], *, offcal: bool = True) -> str:
-    """Markdown table: one line per setting with the Tier-1 gate preview."""
+    """Markdown table: one line per setting with the Tier-1 gate preview.
+
+    Per family: attack recall (among-the-reasons share; top-1 share, the original spec §9
+    criterion). ``pass`` is the amended criterion under that setting's one protocol.
+    """
     fams = list(GATE_FAMILIES)
     head = ["setting", "AUPRC", "FPR95 pa (recall)", "benign FPR", "control FPR"]
-    head += [f"{f} {GATE_FAMILIES[f][0]} rec (share)" for f in fams]
+    head += [f"{f} {GATE_FAMILIES[f][0]} rec (among; top-1)" for f in fams]
     head += ["min rec", "pass"]
     if offcal:
         head += ["offcal min rec", "offcal benign FPR", "offcal control FPR"]
@@ -545,7 +552,8 @@ def gate_table(rows: Sequence[tuple[str, Mapping[str, float]]], *, offcal: bool 
             _fmt(m["control_fpr"]),
         ]
         cells += [
-            f"{_fmt(m[f'recall:{f}'])} ({_fmt(m[f'share:{f}'], 2)}) n={int(m[f'n:{f}'])}"
+            f"{_fmt(m[f'recall:{f}'])} ({_fmt(m[f'among:{f}'], 2)}; {_fmt(m[f'share:{f}'], 2)}) "
+            f"n={int(m[f'n:{f}'])}"
             for f in fams
         ]
         cells += [_fmt(m["gate_min_recall"]), "yes" if m["gate_pass"] else "no"]

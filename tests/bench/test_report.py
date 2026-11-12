@@ -7,8 +7,9 @@ from pathlib import Path
 import orjson
 import pytest
 
-from agentfw.bench.replay import SplitSpec
-from agentfw.bench.report import build_report, render_markdown, update_readme
+from agentfw.bench.metrics import GATE_FAMILIES, GateCell, GatePreview, compute_all
+from agentfw.bench.replay import PROTOCOL_LABELS, ScoreRow, SplitSpec
+from agentfw.bench.report import RunMeta, build_report, render_markdown, update_readme
 from agentfw.bench.run import run
 
 TOP_KEYS = {
@@ -149,3 +150,96 @@ def test_cli_end_to_end_update_readme(
     mask = re.compile(r"p50 [\d.]+ us, p99 [\d.]+ us")
     assert mask.sub("", (tmp_path / "README.md").read_text()) == mask.sub("", first)
     assert (tmp_path / "o" / "report.json").is_file()
+
+
+# --- gate section: one protocol, amended criterion (spec A1.5 to A1.7) ---------------------------
+
+GATE_HEADER = (
+    "| Family | Bucket | Detector | Attack recall | Among-the-reasons share "
+    "| Top-1 share (original spec §9 criterion) |"
+)
+SECTION_END = (
+    "amended criterion under {label}: {verdict} (one protocol only; this is not the Tier-1 gate "
+    "result, see the dual-protocol table)"
+)
+
+
+def _gate(*, passed: bool) -> GatePreview:
+    cells = {
+        fam: GateCell(bucket, det, 1.0, 10, 10, 0.3 if fam == "velocity_burst" else 1.0, 1.0)
+        for fam, (bucket, det) in GATE_FAMILIES.items()
+    }
+    if not passed:
+        cells["exfil_volume"] = GateCell("all", "magnitude", 1.0, 9, 9, 0.5, 8 / 9)
+    return GatePreview(
+        cells=cells,
+        benign_fpr=0.01 if passed else 0.03,
+        control_fpr=0.0,
+        min_recall=1.0,
+        passed=passed,
+        missing=(),
+        failures=() if passed else ("among:exfil_volume", "benign_fpr"),
+    )
+
+
+def _gate_report_md(gate: GatePreview, outcomes: str) -> str:
+    rows = [
+        ScoreRow(
+            envelope_id=f"e{i}", session_id="s", agent_id="A", tool_id="t", ts_unix_ms=i,
+            split="test", fused_score=0.1 * i, per_detector_json="[]",
+            label="attack" if i == 1 else "benign", attack_family="prereq_skip" if i == 1 else None,
+            attack_id="a" if i == 1 else None, injection_level=None, strength=None, step=None,
+            control_type=None, is_warm=True, n_key_obs=100, latency_us=1.0, threshold=0.5,
+        )
+        for i in (1, 2)
+    ]  # fmt: skip
+    m = compute_all(rows, warm_only=False, n_boot=0)
+    meta = RunMeta(
+        git_sha="x",
+        seed=0,
+        dataset_sha="d",
+        detector="engine",
+        detector_config={},
+        split=SplitSpec(),
+        created_unix=0,
+    )
+    return render_markdown(build_report(m, m, meta, {"outcomes": outcomes}, gate=gate))
+
+
+def _gate_section(md: str) -> list[str]:
+    start = md.index("#### Tier-1 gate preview")
+    end = md.index("\n#### ", start + 1)
+    return [ln for ln in md[start:end].splitlines()[1:] if ln.strip()]
+
+
+def test_gate_section_shows_both_shares_and_the_protocol() -> None:
+    md = _gate_report_md(_gate(passed=True), "review")
+    sec = _gate_section(md)
+    assert sec[0] == f"Protocol: {PROTOCOL_LABELS['review']}."
+    assert GATE_HEADER in sec
+    vel = next(ln for ln in sec if ln.startswith("| velocity_burst |"))
+    assert vel == "| velocity_burst | all | velocity | 1.000 (10/10) | 1.000 | 0.300 |"
+
+
+def test_gate_section_never_prints_bare_gate_pass() -> None:
+    for outcomes, passed in [
+        ("review", True),
+        ("allow", True),
+        ("review", False),
+        ("allow", False),
+    ]:
+        md = _gate_report_md(_gate(passed=passed), outcomes)
+        sec = _gate_section(md)
+        label = PROTOCOL_LABELS[outcomes]  # type: ignore[index]
+        assert sec[-1] == SECTION_END.format(label=label, verdict="PASS" if passed else "FAIL")
+        assert "gate PASS" not in md
+        if not passed:
+            assert "Failures: among:exfil_volume, benign_fpr." in sec
+
+
+def test_run_report_ends_the_gate_section_with_the_amended_line(out_dir: Path) -> None:
+    md = (out_dir / "report.md").read_text()
+    end = _gate_section(md)[-1]
+    label = PROTOCOL_LABELS["review"]  # run's default protocol (BENCH_OUTCOMES)
+    assert end in {SECTION_END.format(label=label, verdict=v) for v in ("PASS", "FAIL")}
+    assert "gate PASS" not in md

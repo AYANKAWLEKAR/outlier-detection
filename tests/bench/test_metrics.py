@@ -14,7 +14,12 @@ from numpy.typing import NDArray
 from sklearn.metrics import average_precision_score
 
 from agentfw.bench.metrics import (
+    GATE_BENIGN_FPR,
+    GATE_FAMILIES,
+    GATE_REASON_MIN,
+    GATE_SHARE,
     STRENGTH_BUCKETS,
+    among_reasons_share,
     auprc,
     benign_fpr,
     bootstrap_ci,
@@ -23,12 +28,14 @@ from agentfw.bench.metrics import (
     control_fpr,
     drift_delay,
     fpr_at_recall,
+    gate_preview,
     latency_summary,
     per_agent_fpr_at_recall,
     recall_by_family,
     top_reason_share,
 )
 from agentfw.bench.replay import ScoreRow
+from agentfw.core.config import EngineConfig
 
 _ids = itertools.count()
 
@@ -250,6 +257,163 @@ def test_top_reason_share_skips_null_and_non_numeric_scores() -> None:
     ]
     assert top_reason_share(rows, "magnitude_spike", "c", 0.5) == 0.5
     assert top_reason_share(rows, "magnitude_spike", "a", 0.5) == 0.0
+
+
+# --- among-the-reasons share (spec A1.6, D-027) ---------------------------------------------------
+
+
+def _ra(aid: str, fused: float, *pairs: tuple[str, float], **kw: Any) -> ScoreRow:
+    """An attack row with live threshold 0.9 (``"row"``) and the given per-detector scores."""
+    kw.setdefault("attack_family", "velocity_burst")
+    kw.setdefault("threshold", 0.9)
+    return _atk(fused, attack_id=aid, per_detector_json=_per(*pairs), **kw)
+
+
+def test_among_reasons_counts_a_targeted_reason_on_any_flagged_row() -> None:
+    rows = [
+        _ra("A1", 0.95, ("sequence", 0.95), ("velocity", 0.31)),  # flagged, velocity a reason
+        _ra("A2", 0.95, ("sequence", 0.95), ("velocity", 0.30)),  # 0.30 is not > reason_min
+        _ra("A3", 0.50, ("velocity", 0.50)),  # the reason sits only on an unflagged row
+        _ra("A3", 0.95, ("sequence", 0.95)),
+        _ra("A4", 0.10, ("velocity", 0.10)),  # not detected
+        _ra("B1", 0.95, ("velocity", 0.95), attack_family="novel_target"),  # other family
+    ]
+    assert among_reasons_share(rows, "velocity_burst", "velocity", "row") == pytest.approx(1 / 3)
+    assert top_reason_share(rows, "velocity_burst", "velocity", "row") == 0.0
+    # reason_min is the strict lower bound: lowering it admits A2's 0.30.
+    got = among_reasons_share(rows, "velocity_burst", "velocity", "row", reason_min=0.2)
+    assert got == pytest.approx(2 / 3)
+
+
+def test_among_reasons_respects_the_gate_bucket() -> None:
+    # magnitude spikes with strength 5 (attributed) and 20 (not attributed), both detected
+    rows = [
+        _ra("M5", 0.95, ("magnitude", 0.95), attack_family="magnitude_spike", strength=5.0),
+        _ra("M20", 0.95, ("sequence", 0.95), ("magnitude", 0.2),
+            attack_family="magnitude_spike", strength=20.0),
+    ]  # fmt: skip
+    assert among_reasons_share(rows, "magnitude_spike", "magnitude", "row", bucket="10-100") == 0.0
+    assert among_reasons_share(rows, "magnitude_spike", "magnitude", "row", bucket="3-10") == 1.0
+    assert among_reasons_share(rows, "magnitude_spike", "magnitude", "row") == 0.5
+
+
+def test_among_reasons_takes_family_and_strength_from_the_first_row() -> None:
+    rows = [  # same attack: the later row's strength (20) must not move it into 10-100
+        _ra("M", 0.95, ("magnitude", 0.95), attack_family="magnitude_spike", strength=5.0,
+            ts_unix_ms=1),
+        _ra("M", 0.95, ("magnitude", 0.95), attack_family="magnitude_spike", strength=20.0,
+            ts_unix_ms=2),
+    ]  # fmt: skip
+    assert math.isnan(
+        among_reasons_share(rows, "magnitude_spike", "magnitude", "row", bucket="10-100")
+    )
+    assert among_reasons_share(rows, "magnitude_spike", "magnitude", "row", bucket="3-10") == 1.0
+
+
+def test_among_reasons_nan_without_detection() -> None:
+    rows = [
+        _ra("A1", 0.10, ("velocity", 0.95)),  # targeted reason but never flagged
+        _ra("A2", math.nan, ("velocity", 0.95), threshold=0.0),  # unscored rows are excluded
+    ]
+    assert math.isnan(among_reasons_share(rows, "velocity_burst", "velocity", "row"))
+    assert math.isnan(among_reasons_share([], "velocity_burst", "velocity", "row"))
+    assert math.isnan(among_reasons_share(rows, "novel_target", "novelty", "row"))
+
+
+def test_among_reasons_skips_null_and_non_numeric_scores() -> None:
+    bad = (
+        '[{"detector": "velocity", "score": null}, {"detector": "velocity", "score": "0.9"}, '
+        '{"detector": "velocity", "score": true}, {"detector": "velocity"}]'
+    )
+    rows = [
+        _atk(0.95, attack_id="A1", attack_family="velocity_burst", threshold=0.9,
+             per_detector_json=bad),
+        _ra("A2", 0.95, ("velocity", 0.9)),
+    ]  # fmt: skip
+    assert among_reasons_share(rows, "velocity_burst", "velocity", "row") == 0.5
+
+
+def test_gate_reason_min_matches_engine_config() -> None:
+    assert GATE_REASON_MIN == EngineConfig().reason_min == 0.3
+    assert (GATE_SHARE, GATE_BENIGN_FPR) == (0.90, 0.02)
+
+
+# --- gate_preview: the amended criterion (spec A1.7) --------------------------------------------
+
+
+def _gate_atk(family: str, *pairs: tuple[str, float], fused: float = 0.9) -> ScoreRow:
+    return _atk(
+        fused,
+        attack_id=f"{family}-{next(_ids)}",
+        attack_family=family,
+        strength=20.0 if family == "magnitude_spike" else None,
+        threshold=0.5,
+        per_detector_json=_per(*pairs),
+    )
+
+
+def _gate_rows(
+    n_benign: int = 100, n_flagged: int = 1, **families: list[ScoreRow]
+) -> list[ScoreRow]:
+    """One attributed, detected attack per gated family (unless replaced) plus benign rows."""
+    rows: list[ScoreRow] = []
+    for fam, (_, det) in GATE_FAMILIES.items():
+        rows += families.get(fam, [_gate_atk(fam, (det, 0.9))])
+    rows += [
+        _row(fused_score=0.9 if i < n_flagged else 0.1, threshold=0.5) for i in range(n_benign)
+    ]
+    return rows
+
+
+def test_gate_preview_passed_is_the_amended_criterion() -> None:
+    g = gate_preview(_gate_rows())
+    assert g.passed is True and g.failures == () and g.missing == ()
+    assert all(c.among_reasons_share == 1.0 for c in g.cells.values())
+
+    exfil = [_gate_atk("exfil_volume", ("magnitude", 0.9)) for _ in range(8)]
+    exfil.append(_gate_atk("exfil_volume", ("sequence", 0.95), ("magnitude", 0.3)))
+    g = gate_preview(_gate_rows(exfil_volume=exfil))
+    assert g.cells["exfil_volume"].recall == 1.0
+    assert g.cells["exfil_volume"].among_reasons_share == pytest.approx(8 / 9)
+    assert g.passed is False and g.failures == ("among:exfil_volume",)
+
+    g = gate_preview(_gate_rows(n_flagged=3))
+    assert g.benign_fpr == pytest.approx(0.03)
+    assert g.passed is False and g.failures == ("benign_fpr",)
+
+    vel = [_gate_atk("velocity_burst", ("velocity", 0.9)) for _ in range(3)]
+    vel += [_gate_atk("velocity_burst", ("sequence", 0.95), ("velocity", 0.5)) for _ in range(7)]
+    g = gate_preview(_gate_rows(velocity_burst=vel))
+    assert g.passed is True  # top-1 is reported, not gated
+    assert g.cells["velocity_burst"].top_reason_share == pytest.approx(0.3)
+    assert g.cells["velocity_burst"].among_reasons_share == 1.0
+
+
+def test_gate_preview_thresholds_are_inclusive() -> None:
+    vel = [_gate_atk("velocity_burst", ("velocity", 0.9)) for _ in range(9)]
+    vel.append(_gate_atk("velocity_burst", ("sequence", 0.9)))  # among = 0.90 exactly
+    nov = [_gate_atk("novel_target", ("novelty", 0.9)) for _ in range(9)]
+    nov.append(_gate_atk("novel_target", ("novelty", 0.9), fused=0.1))  # recall = 0.90 exactly
+    g = gate_preview(_gate_rows(n_flagged=2, velocity_burst=vel, novel_target=nov))  # FPR 0.02
+    assert g.cells["velocity_burst"].among_reasons_share == pytest.approx(0.9)
+    assert g.cells["novel_target"].recall == pytest.approx(0.9)
+    assert g.benign_fpr == pytest.approx(0.02)
+    assert g.passed is True and g.failures == ()
+
+
+def test_gate_preview_nan_benign_fpr_and_nan_share_fail() -> None:
+    undetected = [_gate_atk("novel_target", ("novelty", 0.9), fused=0.1)]
+    g = gate_preview(_gate_rows(n_benign=0, novel_target=undetected))
+    assert math.isnan(g.benign_fpr)
+    assert math.isnan(g.cells["novel_target"].among_reasons_share)
+    assert g.passed is False
+    assert g.failures == ("recall:novel_target", "among:novel_target", "benign_fpr")
+
+
+def test_gate_preview_lists_missing_families_as_failures() -> None:
+    g = gate_preview(_gate_rows(prereq_skip=[]))
+    assert g.missing == ("prereq_skip",)
+    assert g.passed is False and g.failures == ("missing:prereq_skip",)
 
 
 # --- cold start, drift, latency -----------------------------------------------------------------

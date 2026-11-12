@@ -68,6 +68,7 @@ def test_sweep_returns_full_cartesian_grid_and_applies_params(tiny_dataset: Path
             assert key in r.metrics
         for fam in ("magnitude_spike", "prereq_skip", "novel_target"):
             assert f"recall:{fam}" in r.metrics and f"share:{fam}" in r.metrics
+            assert f"among:{fam}" in r.metrics and f"offcal_among:{fam}" in r.metrics
     # The parameter really reaches the engine: a lower z0 scores magnitude higher, so AUPRC moves.
     assert len({round(r.metrics["auprc"], 12) for r in rows}) > 1
 
@@ -161,6 +162,7 @@ def test_gate_preview_uses_gate_bucket_warm_test_rows_and_live_thresholds() -> N
     assert (cell.n_detected, cell.n_total) == (1, 2)
     assert cell.recall == pytest.approx(0.5)
     assert cell.top_reason_share == pytest.approx(1.0)
+    assert cell.among_reasons_share == pytest.approx(1.0)
     assert set(g.cells) == {"magnitude_spike"}  # absent families get no cell ...
     assert "prereq_skip" in g.missing  # ... and are listed as missing
     assert g.benign_fpr == pytest.approx(1 / 3)
@@ -184,15 +186,45 @@ def test_gate_preview_excludes_slow_drift() -> None:
     assert g.passed is False
 
 
+def _det_json(detector: str, score: float) -> str:
+    return f'[{{"detector":"{detector}","field":null,"score":{score},"evidence":{{}}}}]'
+
+
 def test_gate_preview_passes_only_with_every_gated_family_present() -> None:
     rows = [
         _row(i, label="attack", attack_family=fam, attack_id=fam, fused_score=0.9,
-             strength=20.0 if fam == "magnitude_spike" else None)
-        for i, fam in enumerate(GATE_FAMILIES)
+             strength=20.0 if fam == "magnitude_spike" else None,
+             per_detector_json=_det_json(det, 0.9))
+        for i, (fam, (_, det)) in enumerate(GATE_FAMILIES.items())
     ]  # fmt: skip
+    rows.append(_row(len(rows), fused_score=0.1))  # one unflagged benign row: benign FPR 0
     g = gate_preview(rows)
-    assert g.missing == ()
+    assert g.missing == () and g.failures == ()
+    assert g.benign_fpr == 0.0
     assert g.passed is True
+    g = gate_preview(rows[1:])
+    assert g.missing == ("magnitude_spike",)
+    assert g.passed is False
+
+
+def test_gate_keys_and_gate_table_show_among_beside_top1() -> None:
+    from agentfw.bench.sweeps import _gate_keys, gate_table
+
+    rows = [
+        # velocity_burst detected; velocity is a reason (0.5 > 0.3) but not the top-1 detector.
+        _row(1, label="attack", attack_family="velocity_burst", attack_id="v", fused_score=0.9,
+             per_detector_json='[{"detector":"sequence","score":0.95},'
+             '{"detector":"velocity","score":0.5}]'),
+        _row(2, fused_score=0.1),
+    ]  # fmt: skip
+    keys = _gate_keys("", rows, "row")
+    assert keys["among:velocity_burst"] == 1.0
+    assert keys["share:velocity_burst"] == 0.0
+    assert math.isnan(keys["among:prereq_skip"])
+    m = {**keys, "auprc": 0.5, "fpr95_per_agent": 0.1, "per_agent_recall": 0.95}
+    md = gate_table([("x", m)], offcal=False)
+    assert "velocity_burst all rec (among; top-1)" in md
+    assert "1.000 (1.00; 0.00) n=1" in md
 
 
 # --- report sections ------------------------------------------------------------------------------

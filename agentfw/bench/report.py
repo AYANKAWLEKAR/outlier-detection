@@ -17,7 +17,13 @@ from typing import Any
 from pydantic import BaseModel
 
 from agentfw.bench.ablation import AblationRow
-from agentfw.bench.metrics import GATE_RECALL, GatePreview, Metrics
+from agentfw.bench.metrics import (
+    GATE_BENIGN_FPR,
+    GATE_RECALL,
+    GATE_SHARE,
+    GatePreview,
+    Metrics,
+)
 from agentfw.bench.replay import SplitSpec, protocol_label
 
 __all__ = [
@@ -229,7 +235,7 @@ def render_markdown(report: Mapping[str, object]) -> str:
         f"Control (benign-unusual) FPR: {_f(ctrl['all'])} all, {_f(ctrl['warm'])} warm.",
         "",
     ]
-    lines += _gate_md(report.get("gate"))
+    lines += _gate_md(report.get("gate"), _dict(report["extras"]).get("outcomes"))
     lines += _ablations_md(report.get("ablations"))
 
     lines += [
@@ -278,17 +284,36 @@ def _protocol_md(outcomes: object) -> list[str]:
     return [f"Protocol: {protocol_label(outcomes)}.", ""]
 
 
-def _gate_md(gate: object) -> list[str]:
+def _gate_md(gate: object, outcomes: object) -> list[str]:
+    """The run's gate section: one protocol only, so it never states the Tier-1 gate result.
+
+    Headed with the protocol's label and ended with the amended criterion's verdict under that
+    label (spec A1.5); it never prints the bare words "gate PASS".
+    """
     lines = ["#### Tier-1 gate preview", ""]
     if not isinstance(gate, dict):
         return [*lines, "Not computed for this run.", ""]
+    label = protocol_label(outcomes)
     lines += [
-        f"Warm test rows, live per-agent thresholds, attack level; gate = recall >= "
-        f"{GATE_RECALL:g} per family (slow_drift excluded). Share = top-reason share of the "
-        "targeted detector among detected attacks.",
+        f"Protocol: {label}.",
         "",
-        _row(["Family", "Bucket", "Detector", "Attack recall", "Top-reason share"]),
-        _sep(5),
+        "Warm test rows, live per-agent thresholds, attack level (slow_drift excluded). Amended "
+        f"criterion (spec A1.7): per family attack recall >= {GATE_RECALL:g} and among-the-reasons "
+        f"share >= {GATE_SHARE:g}, benign FPR <= {GATE_BENIGN_FPR:g}. Among-the-reasons share = "
+        "detected attacks with the targeted detector among the reasons of a flagged row. Top-1 "
+        "share is reported beside it and not gated.",
+        "",
+        _row(
+            [
+                "Family",
+                "Bucket",
+                "Detector",
+                "Attack recall",
+                "Among-the-reasons share",
+                "Top-1 share (original spec §9 criterion)",
+            ]
+        ),
+        _sep(6),
     ]
     for fam, c in sorted(_dict(gate["cells"]).items()):
         lines.append(
@@ -298,18 +323,27 @@ def _gate_md(gate: object) -> list[str]:
                     c["bucket"],
                     c["detector"],
                     f"{_f(c['recall'])} ({c['n_detected']}/{c['n_total']})",
+                    _f(c["among_reasons_share"]),
                     _f(c["top_reason_share"]),
                 ]
             )
         )
     lines += [
         "",
-        f"Benign FPR {_f(gate['benign_fpr'], 4)}, control FPR {_f(gate['control_fpr'])}; "
-        f"min recall {_f(gate['min_recall'])}: gate {'PASS' if gate['passed'] else 'FAIL'}.",
+        f"Benign FPR {_f(gate['benign_fpr'], 4)}, control FPR {_f(gate['control_fpr'])}, "
+        f"min recall {_f(gate['min_recall'])}.",
         "",
     ]
     if gate.get("missing"):
         lines += [f"Missing gated families (gate cannot pass): {', '.join(gate['missing'])}.", ""]
+    if gate.get("failures"):
+        lines += [f"Failures: {', '.join(gate['failures'])}.", ""]
+    verdict = "PASS" if gate["passed"] else "FAIL"
+    lines += [
+        f"amended criterion under {label}: {verdict} (one protocol only; this is not the Tier-1 "
+        "gate result, see the dual-protocol table)",
+        "",
+    ]
     return lines
 
 

@@ -35,8 +35,11 @@ from agentfw.bench.replay import ScoreRow
 __all__ = [
     "BOOTSTRAP_N",
     "COLD_START_BUCKETS",
+    "GATE_BENIGN_FPR",
     "GATE_FAMILIES",
+    "GATE_REASON_MIN",
     "GATE_RECALL",
+    "GATE_SHARE",
     "RECALL_TARGET",
     "STRENGTH_BUCKETS",
     "BootstrapCI",
@@ -48,6 +51,7 @@ __all__ = [
     "PerAgentResult",
     "RecallCell",
     "Thresholds",
+    "among_reasons_share",
     "auprc",
     "benign_fpr",
     "bootstrap_ci",
@@ -99,7 +103,14 @@ GATE_FAMILIES: dict[str, tuple[str, str]] = {
     "novel_target": ("all", "novelty"),
     "velocity_burst": ("all", "velocity"),
 }
+#: Amended Tier-1 criterion (spec A1.7): per gated family attack-level recall >= GATE_RECALL and
+#: among-the-reasons share >= GATE_SHARE; benign FPR <= GATE_BENIGN_FPR.
 GATE_RECALL = 0.90
+GATE_SHARE = 0.90
+GATE_BENIGN_FPR = 0.02
+#: A per-detector score counts as a reason when it is > this (spec §6.7, A1.6). Equal to
+#: ``EngineConfig().reason_min`` (pinned by a test); a constant so the bench reads no engine config.
+GATE_REASON_MIN = 0.3
 
 Thresholds = float | Mapping[str, float] | Literal["row"]
 BreakdownMode = Literal["per_agent", "row"]
@@ -148,7 +159,8 @@ class GateCell:
     recall: float
     n_detected: int
     n_total: int
-    top_reason_share: float
+    top_reason_share: float  # original spec §9 criterion: family-wide, reported, not gated
+    among_reasons_share: float  # spec A1.6: in the gate bucket, gated
 
 
 @dataclass(slots=True, frozen=True)
@@ -159,6 +171,9 @@ class GatePreview:
     min_recall: float
     passed: bool
     missing: tuple[str, ...] = ()  # gated families with no attack in the gate population
+    # Why ``passed`` is False: "missing:{family}", "recall:{family}", "among:{family}",
+    # "benign_fpr" (families in GATE_FAMILIES order); empty exactly when ``passed``.
+    failures: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -351,17 +366,34 @@ def recall_by_family(
     }
 
 
+def _numeric_score(item: Mapping[str, object]) -> float | None:
+    """An item's ``score`` as a float; ``None`` for null / non-numeric / bool / NaN."""
+    score = item.get("score")
+    if isinstance(score, bool) or not isinstance(score, int | float) or math.isnan(score):
+        return None
+    return float(score)
+
+
 def _top_detector(per_detector_json: str) -> str | None:
     """Detector with the highest numeric score; null / non-numeric / NaN scores are skipped."""
     best: str | None = None
     best_score = -math.inf
     for item in orjson.loads(per_detector_json):  # first in list order wins ties
-        score = item.get("score")
-        if isinstance(score, bool) or not isinstance(score, int | float) or math.isnan(score):
+        score = _numeric_score(item)
+        if score is None:
             continue
         if best is None or score > best_score:
-            best, best_score = str(item.get("detector")), float(score)
+            best, best_score = str(item.get("detector")), score
     return best
+
+
+def _has_reason(per_detector_json: str, detector: str, reason_min: float) -> bool:
+    """Some item of ``detector`` has a numeric score ``> reason_min`` (a §6.7 reason)."""
+    for item in orjson.loads(per_detector_json):
+        score = _numeric_score(item)
+        if item.get("detector") == detector and score is not None and score > reason_min:
+            return True
+    return False
 
 
 def top_reason_share(
@@ -384,6 +416,39 @@ def top_reason_share(
         detected += 1
         rep = max(flagged, key=lambda r: r.fused_score)  # max() keeps the first maximum
         hits += _top_detector(rep.per_detector_json) == detector
+    return _rate(hits, detected)
+
+
+def among_reasons_share(
+    rows: Sequence[ScoreRow],
+    family: str,
+    detector: str,
+    thresholds: Thresholds,
+    *,
+    bucket: str = "all",
+    reason_min: float = GATE_REASON_MIN,
+) -> float:
+    """Among-the-reasons share of ``detector`` for ``family`` attacks in ``bucket`` (spec A1.6).
+
+    Attack level: an ``attack_id`` belongs to the family and strength bucket of its first row by
+    ``(ts_unix_ms, envelope_id)`` (``bucket="all"`` keeps every strength). It is *detected* when
+    one of its rows is flagged and *attributed* when one of its **flagged** rows carries a
+    ``detector`` score ``> reason_min`` (null / non-numeric scores never count). Returns
+    attributed / detected; NaN when no attack of the family in the bucket was detected.
+    """
+    hits = 0
+    detected = 0
+    for g in _attacks(rows).values():
+        first = g[0]
+        if (first.attack_family or "unknown") != family:
+            continue
+        if bucket != "all" and _bucket_of(family, first.strength) != bucket:
+            continue
+        flagged = [r for r in g if _flag(r, thresholds)]
+        if not flagged:
+            continue
+        detected += 1
+        hits += any(_has_reason(r.per_detector_json, detector, reason_min) for r in flagged)
     return _rate(hits, detected)
 
 
@@ -442,37 +507,48 @@ def latency_summary(rows: Sequence[ScoreRow]) -> tuple[float, float]:
 
 
 def gate_preview(rows: Sequence[ScoreRow], thresholds: Thresholds = "row") -> GatePreview:
-    """Tier-1 exit-gate preview on **warm test** rows (spec §9, D-008, D-009).
+    """Tier-1 exit gate on **warm test** rows, amended criterion (spec A1.7; D-008, D-009, D-027).
 
-    For every :data:`GATE_FAMILIES` family present: attack-level recall in its gate bucket and the
-    :func:`top_reason_share` of its targeted detector (over all detected attacks of the family);
+    For every :data:`GATE_FAMILIES` family present: attack-level recall in its gate bucket, the
+    :func:`among_reasons_share` of its targeted detector in the same bucket, and the
+    :func:`top_reason_share` (original spec §9 criterion, family-wide, reported but not gated);
     plus benign and control FPR on the same rows. Thresholds default to ``"row"``, the engine's
     live per-agent thresholds. Gated families with no attack in that population are listed in
-    ``missing``; ``passed`` means none is missing and every one reaches :data:`GATE_RECALL`.
-    ``min_recall`` is over the present families (NaN when none is). The top-reason share is
-    reported but is not part of ``passed``.
+    ``missing``. ``passed`` means no family is missing, every recall >= :data:`GATE_RECALL`, every
+    among-the-reasons share >= :data:`GATE_SHARE` and benign FPR <= :data:`GATE_BENIGN_FPR`; a
+    NaN share or a NaN benign FPR (no benign row) fails. ``failures`` names every unmet condition.
+    ``min_recall`` is over the present families (NaN when none is).
     """
     warm = [r for r in _valid(rows) if r.split == "test" and r.is_warm]
     by_family = recall_by_family(warm, thresholds, "attack")
     cells: dict[str, GateCell] = {}
+    failures: list[str] = []
     for family, (bucket, detector) in GATE_FAMILIES.items():
         cell = by_family.get(family, {}).get(bucket)
         if cell is None or cell.n_total == 0:
+            failures.append(f"missing:{family}")
             continue
-        share = top_reason_share(warm, family, detector, thresholds)
+        top1 = top_reason_share(warm, family, detector, thresholds)
+        among = among_reasons_share(warm, family, detector, thresholds, bucket=bucket)
         cells[family] = GateCell(
-            bucket, detector, cell.recall, cell.n_detected, cell.n_total, share
+            bucket, detector, cell.recall, cell.n_detected, cell.n_total, top1, among
         )
+        if not cell.recall >= GATE_RECALL - _EPS:
+            failures.append(f"recall:{family}")
+        if not among >= GATE_SHARE - _EPS:  # NaN fails
+            failures.append(f"among:{family}")
+    fpr = benign_fpr(warm, thresholds)
+    if not fpr <= GATE_BENIGN_FPR + _EPS:  # NaN fails
+        failures.append("benign_fpr")
     recalls = [c.recall for c in cells.values()]
-    min_recall = min(recalls) if recalls else math.nan
-    missing = tuple(f for f in GATE_FAMILIES if f not in cells)
     return GatePreview(
         cells=cells,
-        benign_fpr=benign_fpr(warm, thresholds),
+        benign_fpr=fpr,
         control_fpr=control_fpr(warm, thresholds),
-        min_recall=min_recall,
-        passed=not missing and min_recall >= GATE_RECALL - _EPS,
-        missing=missing,
+        min_recall=min(recalls) if recalls else math.nan,
+        passed=not failures,
+        missing=tuple(f for f in GATE_FAMILIES if f not in cells),
+        failures=tuple(failures),
     )
 
 
