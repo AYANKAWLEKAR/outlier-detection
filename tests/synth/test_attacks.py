@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import copy
 import math
-from collections.abc import Callable, Mapping
-from dataclasses import replace
+import re
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -869,7 +870,7 @@ def test_inject_stats_is_keyword_only_and_optional(world: World) -> None:
         return shared
 
     with pytest.raises(TypeError):
-        inject({PERSONA: sessions}, cfg, np.random.default_rng(11), factory, {})  # type: ignore[call-arg]
+        inject({PERSONA: sessions}, cfg, np.random.default_rng(11), factory, {})  # type: ignore[call-arg, arg-type]
     a = inject({PERSONA: sessions}, cfg, np.random.default_rng(11), factory)
     stats: dict[str, int] = {"stale": 7}
     b = inject({PERSONA: sessions}, cfg, np.random.default_rng(11), factory, stats=stats)
@@ -974,3 +975,349 @@ def test_far_bounds_are_each_personas_own_over_all_its_sessions(world: World) ->
         assert len(news[a]) == 40 and min(news[a]) >= own[a], a
     assert min(news[PERSONA]) < 1.5 * own[PERSONA]  # the range starts AT the persona's own bound
     assert max(news[other]) <= 20.0 * M_MAX < own[PERSONA]
+
+
+# --- magnitude top-up pass (Amendment A1.4) -------------------------------------------------------
+
+
+class _CountingRng:
+    """A real stream that records which draws were made on it."""
+
+    def __init__(self, seed: int) -> None:
+        self.rng = np.random.default_rng(seed)
+        self.draws: list[str] = []
+
+    def random(self) -> float:
+        self.draws.append("random")
+        return float(self.rng.random())
+
+    def integers(self, n: int) -> int:
+        self.draws.append("integers")
+        return int(self.rng.integers(n))
+
+    def uniform(self, low: float, high: float) -> float:
+        self.draws.append("uniform")
+        return float(self.rng.uniform(low, high))
+
+
+def _as_rng(r: _CountingRng) -> np.random.Generator:
+    return cast(np.random.Generator, r)
+
+
+def _is_topup_id(attack_id: str | None) -> bool:
+    return attack_id is not None and re.fullmatch(r"atk-.+-m\d{5}", attack_id) is not None
+
+
+WARM = 5
+# In mode "far" the refund bound is 5 x 250 = 1250 (the sampled p99 is 250, above the declared
+# 186.4): 12.5 x 100 just reaches it, 12.49 and 1.0 cannot, and a refund of 0 is no candidate.
+TOPUP_AMOUNTS = [100.0] * WARM + [100.0, 1.0, 250.0, 0.0, 12.5, 12.49] * 12
+
+
+@dataclass
+class _Run:
+    out: dict[str, list[list[RawCall]]]
+    labels: list[Label]
+    stats: dict[str, int]
+    attack_state: object  # the attack stream's state after the run
+    topup: _CountingRng
+    sessions: list[list[RawCall]]
+
+    def refund(self, i: int) -> float:
+        return _f(next(c for c in self.out[PERSONA][i] if c.tool_id == REFUND[0]).args["amount"])
+
+    def session_index(self) -> dict[str, int]:
+        return {c.envelope_id: i for i, s in enumerate(self.sessions) for c in s}
+
+
+def _topup_run(world: World, rate: float, **kw: object) -> _Run:
+    """The schedule over ``TOPUP_AMOUNTS`` refund sessions: a first pass of spikes and controls,
+    then the top-up at ``rate`` on a counting stream."""
+    sessions = refund_sessions(world, TOPUP_AMOUNTS)
+    before = copy.deepcopy(sessions)
+    base: dict[str, object] = {
+        "attack_rate": 0.25,
+        "control_rate": 0.4,
+        "warmup_sessions": WARM,
+        "families": [SPIKE_FAMILY, "benign_unusual"],
+        "magnitude_mode": "far",
+        "magnitude_topup_rate": rate,
+    }
+    cfg = _cfg(**{**base, **kw})
+    shared = far_ctx(world, None)
+    seen: list[AttackContext] = []
+
+    def factory(agent: str, aid: str, ps: object, idx: int) -> AttackContext:
+        ctx = replace(shared, attack_id=aid)
+        seen.append(ctx)
+        return ctx
+
+    rng, counting, stats = np.random.default_rng(11), _CountingRng(5), {"stale": 7}
+    out, labels = inject(
+        {PERSONA: sessions}, cfg, rng, factory, topup_rng=_as_rng(counting), stats=stats
+    )
+    assert sessions == before  # inputs are never mutated
+    assert all(c.far is None for c in seen)  # nor are the factory's contexts
+    assert stats.pop("stale") == 7
+    return _Run(out, labels, stats, rng.bit_generator.state, counting, sessions)
+
+
+def test_topup_rejects_missing_stream(world: World) -> None:
+    sessions = {PERSONA: refund_sessions(world, [100.0] * 4)}
+    calls: list[str] = []
+
+    def factory(agent: str, aid: str, ps: object, idx: int) -> AttackContext:
+        calls.append(aid)
+        return far_ctx(world, None)
+
+    for families in ([SPIKE_FAMILY], ["novel_target"], []):
+        cfg = _cfg(families=families, warmup_sessions=0, magnitude_topup_rate=0.5)
+        rng = np.random.default_rng(11)
+        state = rng.bit_generator.state
+        with pytest.raises(ValueError, match="topup_rng"):
+            inject(sessions, cfg, rng, factory)
+        with pytest.raises(ValueError, match="topup_rng"):
+            inject(sessions, cfg, rng, factory, topup_rng=None, stats={})
+        # refused before any work: no context was asked for and nothing was drawn
+        assert not calls and rng.bit_generator.state == state
+    # the stream is keyword-only, and a zero rate needs none
+    cfg = _cfg(families=[SPIKE_FAMILY], warmup_sessions=0, magnitude_topup_rate=0.5)
+    with pytest.raises(TypeError):
+        inject(sessions, cfg, np.random.default_rng(11), factory, np.random.default_rng(5))  # type: ignore[call-arg]
+    zero = _cfg(families=[SPIKE_FAMILY], warmup_sessions=0)
+    assert zero.magnitude_topup_rate == 0.0
+    inject(sessions, zero, np.random.default_rng(11), factory)
+
+
+def test_topup_draws_once_per_eligible_untouched_session(world: World) -> None:
+    for mode, usable_from in (("far", 12.5), ("own", 0.01)):
+        first = _topup_run(world, 0.0, magnitude_mode=mode)
+        assert first.topup.draws == []  # rate 0: the pass does not run
+        assert first.stats["magnitude_topup"] == 0 and first.stats["magnitude_first_pass"] >= 5
+        assert not any(_is_topup_id(lab.attack_id) for lab in first.labels)
+        index = first.session_index()
+        touched = {index[lab.envelope_id] for lab in first.labels}  # attacked or control-injected
+        assert {lab.control_type for lab in first.labels} == {None, "benign_unusual"}
+        eligible = [
+            i
+            for i, amount in enumerate(TOPUP_AMOUNTS)
+            if i >= WARM and i not in touched and amount >= usable_from
+        ]
+        skipped = [i for i in range(WARM, len(TOPUP_AMOUNTS)) if i not in eligible]
+        # untouched sessions the pass must skip without a draw: in mode "own" only a refund of 0
+        # has no candidate (one session in six), in mode "far" also 1.0 and 12.49
+        no_cand = set(skipped) - touched
+        assert len(eligible) >= 10 and len(no_cand) >= (10 if mode == "far" else 5)
+        if mode == "far":
+            assert first.stats["magnitude_dropped"] >= 1  # dropped spikes stay benign, untouched
+
+        full = _topup_run(world, 1.0, magnitude_mode=mode)
+        # one draw per eligible session, then the spike's two draws on the same stream; a touched
+        # session and one with no (feasible) candidate cost no draw at all
+        assert full.topup.draws == ["random", "integers", "uniform"] * len(eligible)
+        tops = [lab for lab in full.labels if _is_topup_id(lab.attack_id)]
+        assert [index[lab.envelope_id] for lab in tops] == eligible
+        assert [lab.attack_id for lab in tops] == [
+            f"atk-{PERSONA}-m{k:05d}" for k in range(len(eligible))
+        ]
+        assert all(lab.attack_family == SPIKE_FAMILY and lab.label == "attack" for lab in tops)
+
+        half = _topup_run(world, 0.5, magnitude_mode=mode)
+        picked = [index[lab.envelope_id] for lab in half.labels if _is_topup_id(lab.attack_id)]
+        assert half.topup.draws.count("random") == len(eligible)
+        assert half.topup.draws.count("integers") == half.topup.draws.count("uniform")
+        assert half.topup.draws.count("integers") == len(picked)
+        assert 0 < len(picked) < len(eligible) and set(picked) < set(eligible)
+        # the same stream replayed: u < rate picks the session, and its spike draws come next
+        replay, want = np.random.default_rng(5), []
+        for i in eligible:
+            if replay.random() < 0.5:
+                replay.integers(1)
+                replay.uniform(np.log(M_MIN), np.log(M_MAX))
+                want.append(i)
+        assert picked == want
+
+        for run, topped in ((full, eligible), (half, picked)):
+            # the first pass is untouched: same labels first, same draws on the attack stream
+            assert run.labels[: len(first.labels)] == first.labels
+            assert len(run.labels) == len(first.labels) + len(topped)
+            assert run.attack_state == first.attack_state
+            assert run.stats == {**first.stats, "magnitude_topup": len(topped)}
+            for i in range(len(TOPUP_AMOUNTS)):
+                if i not in topped:
+                    assert run.out[PERSONA][i] == first.out[PERSONA][i]
+                elif mode == "far":
+                    assert run.refund(i) >= 1250.0  # a far spike, like the first pass's
+                else:
+                    assert 3.0 <= run.refund(i) / TOPUP_AMOUNTS[i] <= 100.0 + 1e-9
+        if mode == "own":  # all candidates count: a refund of 1.0 is topped up, far below 1250
+            assert any(TOPUP_AMOUNTS[i] == 1.0 and full.refund(i) <= 100.0 for i in eligible)
+
+
+def test_topup_skips_the_later_sessions_of_a_multi_session_attack(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A stand-in multi-session attack that takes its session and the next three WITHOUT changing or
+    # labelling the later ones: the top-up must still leave all four alone.
+    taken: list[int] = []
+
+    def four_sessions(
+        session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+    ) -> AttackResult:
+        i = ctx.session_index
+        taken.extend(range(i, i + 4))
+        lab = Label(
+            envelope_id=session[0].envelope_id,
+            label="attack",
+            attack_family="slow_drift",
+            attack_id=ctx.attack_id,
+        )
+        return AttackResult(session, [lab], [list(s) for s in ctx.persona_sessions[i + 1 : i + 4]])
+
+    monkeypatch.setitem(ATTACKS, "slow_drift", four_sessions)
+    sessions = refund_sessions(world, [100.0] * 80)
+    cfg = _cfg(
+        attack_rate=0.1,
+        warmup_sessions=WARM,
+        families=["slow_drift", SPIKE_FAMILY],
+        magnitude_mode="far",
+        magnitude_topup_rate=1.0,
+    )
+
+    def factory(agent: str, aid: str, ps: Sequence[list[RawCall]], idx: int) -> AttackContext:
+        return replace(far_ctx(world, None), attack_id=aid, persona_sessions=ps, session_index=idx)
+
+    counting, stats = _CountingRng(5), dict[str, int]()
+    out, labels = inject(
+        {PERSONA: sessions},
+        cfg,
+        np.random.default_rng(3),
+        factory,
+        topup_rng=_as_rng(counting),
+        stats=stats,
+    )
+    index = {c.envelope_id: i for i, s in enumerate(sessions) for c in s}
+    assert len(taken) >= 8 and len(set(taken)) == len(taken)
+    spiked = {index[lab.envelope_id] for lab in labels if lab.attack_family == SPIKE_FAMILY}
+    topped = {index[lab.envelope_id] for lab in labels if _is_topup_id(lab.attack_id)}
+    first_spikes = spiked - topped
+    assert first_spikes and not first_spikes & set(taken)
+    # every post-warm-up session is feasible here, so the top-up takes exactly the untouched ones
+    assert topped == set(range(WARM, 80)) - set(taken) - first_spikes
+    assert stats["magnitude_topup"] == len(topped) == counting.draws.count("random")
+    for i in taken:
+        assert out[PERSONA][i] == sessions[i]
+
+
+def test_topup_visits_personas_in_sorted_order_on_one_stream(world: World) -> None:
+    # Two personas, handed over in reverse order: the pass walks them sorted, drawing from the one
+    # stream as it goes, and numbers each persona's top-ups from 0.
+    other = "support-refunds-c"
+    n = 40
+    sessions = {
+        other: refund_sessions(world, [100.0] * n, agent=other),
+        PERSONA: refund_sessions(world, [100.0] * n),
+    }
+    assert list(sessions) == [other, PERSONA] and sorted(sessions) == [PERSONA, other]
+
+    def factory(agent: str, aid: str, ps: object, idx: int) -> AttackContext:
+        return replace(far_ctx(world, None, agent), attack_id=aid)
+
+    cfg = _cfg(
+        attack_rate=0.0, warmup_sessions=WARM, families=[SPIKE_FAMILY], magnitude_topup_rate=0.5
+    )
+    stats: dict[str, int] = {}
+    out, labels = inject(
+        sessions,
+        cfg,
+        np.random.default_rng(11),
+        factory,
+        topup_rng=np.random.default_rng(5),
+        stats=stats,
+    )
+    replay = np.random.default_rng(5)
+    want: list[tuple[str, int]] = []
+    for agent in (PERSONA, other):
+        for i in range(WARM, n):
+            if replay.random() < 0.5:
+                replay.integers(1)
+                replay.uniform(np.log(M_MIN), np.log(M_MAX))
+                want.append((agent, i))
+    index = {c.envelope_id: (a, i) for a in sessions for i, s in enumerate(sessions[a]) for c in s}
+    assert [index[lab.envelope_id] for lab in labels] == want
+    for agent in sessions:
+        ids = [lab.attack_id for lab in labels if index[lab.envelope_id][0] == agent]
+        assert len(ids) >= 8 and ids == [f"atk-{agent}-m{k:05d}" for k in range(len(ids))]
+    assert stats == {
+        "magnitude_first_pass": 0,
+        "magnitude_dropped": 0,
+        "magnitude_topup": len(want),
+    }
+    assert list(out) == sorted(sessions)
+
+
+def test_topup_runs_only_with_the_spike_family(world: World) -> None:
+    sessions = {PERSONA: refund_sessions(world, [100.0] * 30)}
+
+    def factory(agent: str, aid: str, ps: object, idx: int) -> AttackContext:
+        return replace(far_ctx(world, None), attack_id=aid)
+
+    for families in (["novel_target"], ["benign_unusual"], []):
+        results = []
+        for rate in (0.0, 1.0):
+            cfg = _cfg(
+                attack_rate=0.2,
+                control_rate=0.3,
+                warmup_sessions=WARM,
+                families=families,
+                magnitude_topup_rate=rate,
+            )
+            counting, stats = _CountingRng(5), dict[str, int]()
+            res = inject(
+                sessions,
+                cfg,
+                np.random.default_rng(11),
+                factory,
+                topup_rng=_as_rng(counting),
+                stats=stats,
+            )
+            assert counting.draws == []
+            assert stats == {
+                "magnitude_first_pass": 0,
+                "magnitude_dropped": 0,
+                "magnitude_topup": 0,
+            }
+            results.append(res)
+        assert results[0] == results[1]
+
+
+def test_topup_spikes_only_what_the_first_pass_could_spike(world: World) -> None:
+    # outreach-a has no write tool with a money/count field: the first pass never picks
+    # magnitude_spike for it, whatever its sessions hold, and neither does the top-up.
+    agent = "outreach-a"
+    assert not eligible(SPIKE_FAMILY, world.persona(agent), world.catalog)
+    sessions = {agent: refund_sessions(world, [100.0] * 20, agent=agent)}
+    assert applicable(SPIKE_FAMILY, sessions[agent][0], far_ctx(world, None, agent))
+
+    def factory(agent: str, aid: str, ps: object, idx: int) -> AttackContext:
+        return replace(far_ctx(world, None, agent), attack_id=aid)
+
+    for mode in ("own", "far"):
+        cfg = _cfg(
+            attack_rate=1.0,
+            warmup_sessions=0,
+            families=[SPIKE_FAMILY],
+            magnitude_mode=mode,
+            magnitude_topup_rate=1.0,
+        )
+        counting, stats = _CountingRng(5), dict[str, int]()
+        out, labels = inject(
+            sessions,
+            cfg,
+            np.random.default_rng(11),
+            factory,
+            topup_rng=_as_rng(counting),
+            stats=stats,
+        )
+        assert out == sessions and not labels and counting.draws == []
+        assert stats == {"magnitude_first_pass": 0, "magnitude_dropped": 0, "magnitude_topup": 0}

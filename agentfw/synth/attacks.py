@@ -37,9 +37,11 @@ numeric arg named ``amount``/``count``/``qty``/``total``.
 the value at or beyond the field's far bound, ``magnitude_far_mult`` x the persona's own benign
 p99 (``far_bounds``; 5 x p99 is the level of the benign-labelled control). A session where no
 candidate can get there within ``M_MAX`` stays benign, consumes its attack id and is counted.
+``magnitude_topup_rate > 0`` (A1.4): after the first pass, a magnitude-only top-up pass spikes
+untouched post-warm-up sessions on its own stream (``topup_rng``), ids ``atk-{agent}-m{k:05d}``.
 
-``inject`` draws only from the attack RNG it is handed, so persona streams, and therefore every
-non-attacked session, are unaffected by the attack rate.
+``inject`` draws only from the attack RNG it is handed (and, for the top-up, the top-up RNG), so
+persona streams, and therefore every non-attacked session, are unaffected by the attack rate.
 """
 
 from __future__ import annotations
@@ -130,9 +132,10 @@ class AttackResult:
 
 AttackFn = Callable[[list[RawCall], np.random.Generator, AttackContext], AttackResult | None]
 # ``(agent_id, attack_id, persona_sessions, session_index) -> context``. ``inject`` calls it once
-# per attack or control it tries. In mode "far" with ``magnitude_spike`` enabled it also calls it
-# once per persona before that persona's first session, with ``attack_id=""`` and index 0, only
-# to read the persona and catalog: a factory must not count on one call per attack.
+# per attack or control it tries. With ``magnitude_spike`` enabled in mode "far" or with a top-up
+# rate it also calls it once per persona before that persona's first session, with
+# ``attack_id=""`` and index 0, only to read the persona and catalog: a factory must not count on
+# one call per attack.
 CtxFactory = Callable[[str, str, Sequence[list[RawCall]], int], AttackContext]
 
 
@@ -845,6 +848,7 @@ def inject(
     rng: np.random.Generator,
     ctx_factory: CtxFactory,
     *,
+    topup_rng: np.random.Generator | None = None,
     stats: dict[str, int] | None = None,
 ) -> tuple[dict[str, list[list[RawCall]]], list[Label]]:
     """Attack persona sessions with probability ``cfg.attack_rate`` (after warmup), and inject
@@ -866,27 +870,49 @@ def inject(
     taken it, so the attack stream makes the draws it makes in mode "own" and every other attack
     and control is unchanged. Only that case is a dropped spike; a ``None`` from any other family
     or mode (none returns one once ``applicable`` found a candidate) falls through to the control.
-    ``stats``, when given, receives ``magnitude_first_pass`` (spikes injected),
-    ``magnitude_dropped`` (those left benign) and ``magnitude_topup`` (0).
+    ``cfg.magnitude_topup_rate > 0`` (A1.4) with ``magnitude_spike`` enabled: once the first pass
+    is complete, a second, magnitude-only pass on ``topup_rng`` (its own stream, required then;
+    ``ValueError`` before any work when it is missing): personas in sorted order, sessions in time
+    order from ``warmup_sessions``. A session the first pass took (attacked, consumed by a
+    multi-session attack, or given a control) is skipped, and so is one with no spike candidate
+    (in mode "far": no feasible one), both WITHOUT a draw; every other session costs one
+    ``topup_rng.random()`` and, below the rate, gets a ``magnitude_spike`` built on that same
+    stream, attack id ``atk-{agent}-m{k:05d}`` (``k`` counts the persona's top-ups from 0). The
+    first pass's draws, labels and sessions are exactly those it makes without the top-up.
+
+    ``stats``, when given, receives ``magnitude_first_pass`` (spikes injected by the first pass),
+    ``magnitude_dropped`` (first-pass spikes left benign) and ``magnitude_topup`` (spikes injected
+    by the top-up).
     """
+    if cfg.magnitude_topup_rate > 0 and topup_rng is None:
+        raise ValueError("magnitude_topup_rate > 0 needs its own RNG stream: pass topup_rng")
     families = list(dict.fromkeys(cfg.families))
     unknown = sorted(set(families) - set(ATTACKS))
     if unknown:
         raise ValueError(f"unknown attack family: {unknown}")
     controls = CONTROL in families
     attack_fams = [f for f in families if f != CONTROL]
-    far_spikes = cfg.magnitude_mode == "far" and "magnitude_spike" in attack_fams
+    spikes_on = "magnitude_spike" in attack_fams
+    far_spikes = cfg.magnitude_mode == "far" and spikes_on
+    topup = topup_rng if spikes_on and cfg.magnitude_topup_rate > 0 else None
     out: dict[str, list[list[RawCall]]] = {}
     labels: list[Label] = []
     n_dropped = 0
+    # Per persona, for the top-up: the context it scans with (persona, catalog, far bounds) and
+    # the session indices the first pass took.
+    scans: dict[str, AttackContext] = {}
+    taken: dict[str, set[int]] = {}
     for agent in sorted(sessions_by_persona):
         sessions = list(sessions_by_persona[agent])
         far: dict[tuple[str, str], float] | None = None
-        if far_spikes:  # from the untouched sessions, before any injection
+        if far_spikes or topup is not None:
             base = ctx_factory(agent, "", sessions, 0)
-            far = far_bounds(
-                sessions_by_persona[agent], base.persona, base.catalog, cfg.magnitude_far_mult
-            )
+            if far_spikes:  # from the untouched sessions, before any injection
+                far = far_bounds(
+                    sessions_by_persona[agent], base.persona, base.catalog, cfg.magnitude_far_mult
+                )
+            scans[agent] = replace(base, far=far)  # a new context: the factory's may be shared
+        hit = taken.setdefault(agent, set())
         n_attacks = n_controls = 0
         idx = cfg.warmup_sessions
         while idx < len(sessions):
@@ -915,6 +941,7 @@ def inject(
                             sessions[idx + j] = extra
                         labels += res.labels
                         n_attacks += 1
+                        hit.update(range(idx, idx + 1 + len(res.extra_sessions)))
                         idx += 1 + len(res.extra_sessions)
                         continue
                     if far_spikes and family == "magnitude_spike":
@@ -935,11 +962,55 @@ def inject(
                         sessions[idx] = res.session
                         labels += res.labels
                         n_controls += 1
+                        hit.add(idx)
             idx += 1
         out[agent] = sessions
+    n_first = len({lab.attack_id for lab in labels if lab.attack_family == "magnitude_spike"})
+    n_topup = 0
+    if topup is not None:
+        topped = _magnitude_topup(out, cfg, topup, ctx_factory, scans, taken)
+        n_topup = len({lab.attack_id for lab in topped})
+        labels += topped
     if stats is not None:
-        spikes = {lab.attack_id for lab in labels if lab.attack_family == "magnitude_spike"}
         stats.update(
-            magnitude_first_pass=len(spikes), magnitude_dropped=n_dropped, magnitude_topup=0
+            magnitude_first_pass=n_first, magnitude_dropped=n_dropped, magnitude_topup=n_topup
         )
     return out, labels
+
+
+def _magnitude_topup(
+    out: dict[str, list[list[RawCall]]],
+    cfg: GenerateConfig,
+    rng: np.random.Generator,
+    ctx_factory: CtxFactory,
+    scans: Mapping[str, AttackContext],
+    taken: Mapping[str, set[int]],
+) -> list[Label]:
+    """The top-up pass of ``inject`` (A1.4), run after the first pass on ``out`` in place; returns
+    its labels. ``scans[agent]`` carries the persona's far bounds (``None`` in mode "own") and
+    ``taken[agent]`` the session indices the first pass took."""
+    labels: list[Label] = []
+    for agent in sorted(out):
+        sessions, scan = out[agent], scans[agent]
+        if not eligible("magnitude_spike", scan.persona, scan.catalog):
+            continue  # the first pass never spikes this persona; nor does the top-up
+        k = 0
+        for idx in range(cfg.warmup_sessions, len(sessions)):
+            if idx in taken[agent]:
+                continue
+            usable = (
+                _magnitude_cands(sessions[idx], scan)
+                if scan.far is None
+                else _far_feasible(sessions[idx], scan)
+            )
+            if not usable:
+                continue  # no draw: only eligible sessions consume the top-up stream
+            if rng.random() >= cfg.magnitude_topup_rate:
+                continue
+            ctx = ctx_factory(agent, f"atk-{agent}-m{k:05d}", sessions, idx)
+            res = magnitude_spike(sessions[idx], rng, replace(ctx, far=scan.far))
+            assert res is not None  # a usable candidate exists, so the spike lands
+            sessions[idx] = res.session
+            labels += res.labels
+            k += 1
+    return labels

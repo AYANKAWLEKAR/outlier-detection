@@ -19,7 +19,7 @@ import orjson
 from pydantic import BaseModel, Field, ValidationError
 
 from agentfw.core.envelope import Label, RawCall
-from agentfw.synth.attacks import AttackContext, inject
+from agentfw.synth.attacks import ATTACKS, AttackContext, inject
 from agentfw.synth.dists import IdPool
 from agentfw.synth.load import (
     CATALOG_DIR,
@@ -33,7 +33,7 @@ from agentfw.synth.load import (
 from agentfw.synth.sampler import sample_persona_tagged, stable_hash
 from agentfw.synth.schema import Catalog, Persona
 
-__all__ = ["GenerateConfig", "Manifest", "generate", "main"]
+__all__ = ["GenerateConfig", "Manifest", "generate", "main", "sw1_config", "topup_rng"]
 
 
 class GenerateConfig(BaseModel):
@@ -54,6 +54,9 @@ class GenerateConfig(BaseModel):
     # (``attacks.far_bounds``); 5.0 = ``attacks.CONTROL_P99_MULT``, the benign-labelled control.
     magnitude_mode: Literal["own", "far"] = "own"
     magnitude_far_mult: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    # Amendment A1.4: per eligible untouched post-warm-up session, the chance of a second-pass
+    # ``magnitude_spike`` on its own stream (``topup_rng``). Fixed by the spec; never tuned.
+    magnitude_topup_rate: float = Field(default=0.0, ge=0.0, le=1.0)
 
 
 class Manifest(BaseModel):
@@ -73,6 +76,27 @@ def _split_cap(total: int | None, n: int) -> list[int | None]:
 def attack_rng(seed: int) -> np.random.Generator:
     """Attack stream, independent of every persona stream (Task 0.7 draws from it)."""
     return np.random.default_rng([seed, stable_hash("attacks")])
+
+
+def topup_rng(seed: int) -> np.random.Generator:
+    """The magnitude top-up stream (A1.4), independent of the attack and persona streams."""
+    return np.random.default_rng([seed, stable_hash("attacks:magnitude_topup")])
+
+
+def sw1_config(seed: int = 0) -> GenerateConfig:
+    """SW1, the benchmark dataset (A1.4): all 20 personas, 90 days, every family, far-mode spikes
+    and a top-up at the attack rate. The single source of truth for its config."""
+    return GenerateConfig(
+        seed=seed,
+        personas_dir=PERSONAS_DIR,
+        tasks_dir=TASKS_DIR,
+        catalog_dir=CATALOG_DIR,
+        days=90,
+        families=sorted(ATTACKS),
+        attack_rate=0.015,
+        magnitude_mode="far",
+        magnitude_topup_rate=0.015,
+    )
 
 
 def _inject_attacks(
@@ -98,7 +122,14 @@ def _inject_attacks(
         }
         return AttackContext(catalog, p, pools, attack_id, persona_sessions, idx)
 
-    out, labels = inject(by_persona, cfg, attack_rng(cfg.seed), ctx_factory, stats=stats)
+    out, labels = inject(
+        by_persona,
+        cfg,
+        attack_rng(cfg.seed),
+        ctx_factory,
+        topup_rng=topup_rng(cfg.seed),
+        stats=stats,
+    )
     return out, {lab.envelope_id: lab for lab in labels}, stats
 
 
@@ -152,6 +183,16 @@ def generate(cfg: GenerateConfig, out_dir: Path) -> Manifest:
     }
     for name, data in blobs.items():
         (out_dir / name).write_bytes(data)
+    census: dict[str, int] = {}
+    if cfg.magnitude_mode == "far" or cfg.magnitude_topup_rate > 0:  # dropped: never silent
+        strong = {
+            lab.attack_id
+            for lab in labels
+            if lab.attack_family == "magnitude_spike"
+            and lab.strength is not None
+            and lab.strength >= 10.0
+        }
+        census = {**magnitude, "magnitude_strength_ge_10": len(strong)}
     manifest = Manifest(
         config=cfg,
         files={n: hashlib.sha256(d).hexdigest() for n, d in blobs.items()},
@@ -159,7 +200,7 @@ def generate(cfg: GenerateConfig, out_dir: Path) -> Manifest:
             "sessions": len(sessions),
             "envelopes": len(raws),
             "attacks": len({lab.attack_id for lab in labels if lab.attack_id is not None}),
-            **(magnitude if cfg.magnitude_mode == "far" else {}),  # dropped spikes: never silent
+            **census,
         },
     )
     (out_dir / "manifest.json").write_bytes(
@@ -188,6 +229,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument(
         "--magnitude-far-mult", type=float, default=fields["magnitude_far_mult"].default
     )
+    ap.add_argument(
+        "--magnitude-topup-rate", type=float, default=fields["magnitude_topup_rate"].default
+    )
     a = ap.parse_args(argv)
     try:
         cfg = GenerateConfig(
@@ -200,6 +244,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             families=a.families,
             magnitude_mode=a.magnitude_mode,
             magnitude_far_mult=a.magnitude_far_mult,
+            magnitude_topup_rate=a.magnitude_topup_rate,
         )
     except ValidationError as e:  # a usage error (exit 2), not a traceback
         ap.error("; ".join(f"{'.'.join(map(str, x['loc']))}: {x['msg']}" for x in e.errors()))
