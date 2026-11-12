@@ -141,6 +141,17 @@ class EngineConfig:
     sess_idle_ms: int = 1_800_000
     sess_sweep_every: int = 4096
     prov_unresolved_weight: float = 0.125
+    # Provisional flags (F6, Task 2.2; core.trajectory.provisional). With ``provisional`` (it also
+    # opens the session gate, T-34) a reversible call the bands would block is allowed with flag
+    # ``PROVISIONAL`` and stays open for ``prov_ttl`` later calls of its session: consumed
+    # (validated) or repeated benignly (absorbed), else ``UNRESOLVED``. From the
+    # ``prov_min_calls``-th call on, unresolved mass above ``prov_budget`` of the session's scored
+    # mass raises ``OFF_TRACK`` once. Irreversibility then always uses the blast radius, also
+    # under ``br_mode="off"`` (T-35).
+    provisional: bool = False
+    prov_ttl: int = 3
+    prov_budget: float = 0.25
+    prov_min_calls: int = 8
     # Fusion (§6.11)
     fusion_bonus: float = 0.15
     fusion_bonus_gate: float = 0.5

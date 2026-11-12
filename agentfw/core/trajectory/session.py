@@ -4,8 +4,10 @@ arXiv:2610.12375 (§1 S4, §6.3) argues that an aggregate score's meaning drifts
 length, so session-level decisions should come from the share of recent steps that raised a
 severe per-step flag. This module keeps that share. One ``SessionRecord`` per session id (store
 key ``sess:<session_id>``, kind ``sess``) holds the last ``session_window`` calls as
-``(seq_no, sorted flag names)``, the session's call count and the timestamp of its latest call;
-later tasks add the verdict and the provisional ledger with defaults.
+``(seq_no, sorted flag names)``, the session's call count and the timestamp of its latest call,
+and the provisional lifecycle state of F6 (``core.trajectory.provisional``): the open
+``exploration`` entries, the session's scored ``total_mass``, its ``unresolved_mass`` and whether
+``OFF_TRACK`` is currently raised. Later tasks add the verdict with defaults.
 
 ``density`` (T-09) = Σ over the window's calls of that call's *highest* flag weight
 (``flag_weight``), divided by ``session_window``, so it stays in [0, 1] and a call raising two
@@ -22,6 +24,7 @@ the store, and ``reset`` zeroes it.
 
 from __future__ import annotations
 
+import dataclasses
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Self
@@ -30,6 +33,7 @@ from agentfw.core.config import EngineConfig
 from agentfw.core.envelope import ActionEnvelope
 from agentfw.core.state import StateStore, key_sess, register_record
 from agentfw.core.trajectory.flags import Flag, flag_weight
+from agentfw.core.trajectory.provisional import ProvEntry
 
 __all__ = ["SessionBook", "SessionRecord"]
 
@@ -43,6 +47,18 @@ class SessionRecord:
     window: list[tuple[int, list[str]]] = field(default_factory=list)  # (seq_no, sorted names)
     verdict: str = "ok"
     halted: bool = False
+    exploration: list[ProvEntry] = field(default_factory=list)
+    total_mass: float = 0.0
+    unresolved_mass: float = 0.0
+    off_track_raised: bool = False
+
+    def copy(self) -> SessionRecord:
+        """An independent copy (``ProvEntry`` is frozen, so copying the lists suffices)."""
+        return dataclasses.replace(
+            self,
+            window=[(seq, list(names)) for seq, names in self.window],
+            exploration=list(self.exploration),
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -51,6 +67,10 @@ class SessionRecord:
             "window": [[seq, list(names)] for seq, names in self.window],
             "verdict": self.verdict,
             "halted": self.halted,
+            "exploration": [p.to_dict() for p in self.exploration],
+            "total_mass": self.total_mass,
+            "unresolved_mass": self.unresolved_mass,
+            "off_track_raised": self.off_track_raised,
         }
 
     @classmethod
@@ -61,6 +81,10 @@ class SessionRecord:
             [(int(seq), [str(n) for n in names]) for seq, names in d["window"]],
             str(d["verdict"]),
             bool(d["halted"]),
+            [ProvEntry.from_dict(p) for p in d.get("exploration", ())],
+            float(d.get("total_mass", 0.0)),
+            float(d.get("unresolved_mass", 0.0)),
+            bool(d.get("off_track_raised", False)),
         )
 
 
@@ -91,12 +115,17 @@ class SessionBook:
         total = sum(self._top(names) for _, names in prior) + self._top(flags)
         return total / w
 
-    def record(self, e: ActionEnvelope, flags: Iterable[Flag]) -> None:
-        key = key_sess(e.session_id)
+    def ensure(self, session_id: str) -> SessionRecord:
+        """The session's stored record, created (and stored) when absent. ``update`` only."""
+        key = key_sess(session_id)
         rec = self._store.get(key)
         if not isinstance(rec, SessionRecord):
             rec = SessionRecord()
             self._store.put(key, rec)
+        return rec
+
+    def record(self, e: ActionEnvelope, flags: Iterable[Flag]) -> None:
+        rec = self.ensure(e.session_id)
         rec.window.append((e.seq_no, sorted(f.value for f in flags)))
         del rec.window[: max(0, len(rec.window) - self._cfg.session_window)]
         rec.last_ts = max(rec.last_ts, e.ts_unix_ms) if rec.n_calls else e.ts_unix_ms

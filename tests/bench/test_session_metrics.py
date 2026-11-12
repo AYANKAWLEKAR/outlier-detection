@@ -15,7 +15,14 @@ from agentfw.bench.dataset import load_dir
 from agentfw.bench.metrics import compute_all
 from agentfw.bench.registry import make_detector
 from agentfw.bench.replay import ScoreRow, SplitSpec, replay
-from agentfw.bench.session_metrics import session_labels, vital_false_flag_rate
+from agentfw.bench.session_metrics import (
+    decision_benign_fpr,
+    decision_control_fpr,
+    decision_flagged,
+    decision_recall_by_family,
+    session_labels,
+    vital_false_flag_rate,
+)
 from agentfw.synth.attacks import RUNAWAY_FAMILIES
 from agentfw.synth.generate import generate
 
@@ -154,3 +161,59 @@ def test_benign_dataset_sessions_are_all_benign(benign_rows: list[ScoreRow]) -> 
 def test_benign_vital_false_flag_rate_at_most_1pct(benign_rows: list[ScoreRow]) -> None:
     """F2 acceptance: loop/spin/stall flag at most 1% of benign sessions."""
     assert vital_false_flag_rate(benign_rows) <= 0.01
+
+
+# -- decision metrics (Task 2.2) ---------------------------------------------------------------
+
+
+def test_decision_metrics_on_handmade_rows() -> None:
+    def atk(attack: str, family: str, decision: str | None, ts: int) -> ScoreRow:
+        return _row(
+            f"s-{attack}",
+            label="attack",
+            attack_family=family,
+            attack_id=attack,
+            decision=decision,
+            ts_unix_ms=ts,
+        )
+
+    rows = [
+        # magnitude_spike: a1 caught on its 2nd row, a2 never -> 1/2
+        atk("a1", "magnitude_spike", "allow", 1),
+        atk("a1", "magnitude_spike", "block", 2),
+        atk("a2", "magnitude_spike", "allow", 3),
+        # novel_target: approval counts as flagged -> 1/1
+        atk("a3", "novel_target", "require_approval", 4),
+        # an attack row without a decision (unscored) is skipped; a4 has no scored row at all
+        atk("a4", "novel_target", None, 5),
+        # runaway families are in no decision metric (T-10)
+        atk("r1", "loop", "block", 6),
+        # benign: 1 of 4 flagged (controls included); controls: 1 of 2
+        _row("b", decision="allow"),
+        _row("b", decision="block"),
+        _row("c", decision="allow", control_type="benign_unusual"),
+        _row("c", decision="require_approval", control_type="benign_unusual"),
+        _row("b", decision=None),  # unscored: outside every denominator
+    ]
+    assert [decision_flagged(r) for r in rows[:4]] == [False, True, False, True]
+    assert not decision_flagged(rows[4])
+    assert decision_recall_by_family(rows) == {"magnitude_spike": 0.5, "novel_target": 1.0}
+    assert decision_benign_fpr(rows) == pytest.approx(2 / 4)
+    assert decision_control_fpr(rows) == pytest.approx(1 / 2)
+    assert decision_recall_by_family([]) == {}
+    assert math.isnan(decision_benign_fpr([])) and math.isnan(decision_control_fpr(rows[:4]))
+
+
+def test_decision_recall_family_comes_from_the_first_row() -> None:
+    def atk(family: str, decision: str, ts: int) -> ScoreRow:
+        return _row(
+            "s",
+            label="attack",
+            attack_family=family,
+            attack_id="x",
+            decision=decision,
+            ts_unix_ms=ts,
+        )
+
+    rows = [atk("b_fam", "block", 9), atk("a_fam", "allow", 1)]
+    assert decision_recall_by_family(rows) == {"a_fam": 1.0}

@@ -121,6 +121,14 @@ SESSION_DEFAULTS: dict[str, object] = {
     "prov_unresolved_weight": 0.125,
 }
 
+# Task 2.2 provisional flags (feature spec F6). ``provisional`` also opens the session gate (T-34).
+PROVISIONAL_DEFAULTS: dict[str, object] = {
+    "provisional": False,
+    "prov_ttl": 3,
+    "prov_budget": 0.25,
+    "prov_min_calls": 8,
+}
+
 
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
@@ -133,6 +141,7 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | TRAJECTORY_SWITCH_DEFAULTS
         | VITAL_DEFAULTS
         | SESSION_DEFAULTS
+        | PROVISIONAL_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
 
