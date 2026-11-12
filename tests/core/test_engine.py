@@ -10,11 +10,12 @@ import numpy as np
 import orjson
 import pytest
 
-from agentfw.bench.ci_regress import ci_dataset, golden_rows
+from agentfw.bench.ci_regress import CI_OUTCOMES, ci_dataset, golden_rows
 from agentfw.bench.metrics import compute_all
 from agentfw.bench.protocol import Detector
 from agentfw.bench.registry import DETECTORS, make_detector
 from agentfw.bench.replay import ScoreRow, SplitSpec, canonical_hash, replay
+from agentfw.bench.sweeps import PRE_A1_SWITCHES
 from agentfw.core.config import EngineConfig
 from agentfw.core.detectors.base import squash
 from agentfw.core.detectors.magnitude import RESP_FIELD
@@ -456,6 +457,19 @@ def test_golden_engine_spec_allow() -> None:
     golden = (ROOT / "tests/golden/engine-spec-allow.sha256").read_text().strip()
     assert golden == "c4042bc466f20af46d092a86e77f58d38d2ebf0caa976338f0b8da54ef3a0abd"
     assert canonical_hash(_ci_rows("engine-spec-allow")) == golden
+
+
+#: The engine before Amendment A1 (``EngineConfig().replace(**PRE_A1_SWITCHES)``) on the CI dataset
+#: under ``CI_OUTCOMES``: ``tests/golden/engine.sha256`` before Task 1.21 made the A1 scoring the
+#: default (commit ac37e76, f6573c610106 -> 2223582ecd50; ruling A1-32 core-2).
+PRE_A1_ENGINE_GOLDEN = "f6573c610106169ca1e50f5156f5634ff2856de5bf9558b031fc452d3869e2af"
+
+
+def test_golden_engine_pre_a1() -> None:
+    """The pre-A1 row of every gate table replays the pre-amendment engine bit for bit."""
+    det = make_detector("engine", cfg=EngineConfig().replace(**PRE_A1_SWITCHES))
+    rows = replay(*ci_dataset(), det, SplitSpec(), outcomes=CI_OUTCOMES)
+    assert canonical_hash(rows) == PRE_A1_ENGINE_GOLDEN
 
 
 def test_engine_replay_strict_mode_no_leak() -> None:
