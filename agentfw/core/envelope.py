@@ -13,6 +13,7 @@ from pydantic import (
     Field,
     JsonValue,
     SerializerFunctionWrapHandler,
+    field_validator,
     model_serializer,
     model_validator,
 )
@@ -72,6 +73,23 @@ class ResponseMeta(BaseModel):
     bytes: int | None = None
     error: bool = False
     ids: tuple[str, ...] = Field(default=(), max_length=256)
+    # MinHash signature of the response text (core.fingerprint); omitted while None so existing
+    # traces and manifest hashes keep their bytes.
+    fp: tuple[int, ...] | None = None
+
+    @field_validator("fp")
+    @classmethod
+    def _check_fp(cls, v: tuple[int, ...] | None) -> tuple[int, ...] | None:
+        if v is not None and (len(v) != 64 or any(not 0 <= x < (1 << 61) - 1 for x in v)):
+            raise ValueError("fp must be None or 64 ints in [0, 2**61 - 1)")
+        return v
+
+    @model_serializer(mode="wrap")
+    def _omit_none_fp(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        out: dict[str, Any] = handler(self)
+        if self.fp is None:
+            out.pop("fp", None)
+        return out
 
 
 class RawCall(BaseModel):

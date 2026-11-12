@@ -28,6 +28,8 @@ def test_normalizer_files_exist_and_hash_is_cwd_independent(tmp_path: Path) -> N
         "agentfw/core/normalize.py",
         "agentfw/core/patterns.py",
         "agentfw/core/detectors/base.py",
+        "agentfw/core/fingerprint.py",
+        "agentfw/core/ledger.py",
     )
     here = normalizer_hash()
     out = subprocess.run(

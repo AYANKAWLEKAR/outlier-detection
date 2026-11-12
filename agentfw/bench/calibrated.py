@@ -34,6 +34,8 @@ NORMALIZER_FILES: tuple[str, ...] = (
     "agentfw/core/normalize.py",
     "agentfw/core/patterns.py",
     "agentfw/core/detectors/base.py",
+    "agentfw/core/fingerprint.py",
+    "agentfw/core/ledger.py",
 )
 CALIBRATED_PATH = Path(__file__).with_name("calibrated.json")
 _ROOT = Path(agentfw.__file__).resolve().parent.parent
