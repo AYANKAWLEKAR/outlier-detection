@@ -987,6 +987,35 @@ def test_non_finite_in_a_bool_field_scores_one_under_a1() -> None:
     assert mag.evidence["type_violation"] == "bool"
 
 
+@pytest.mark.parametrize(
+    ("history", "n"),
+    [([True] * 60, 0), ([1] * 25, 15)],  # no magnitude record; 15 < mag_cold_n numbers, no prior
+    ids=["no_record", "cold"],
+)
+def test_non_finite_in_a_bool_field_scores_one_without_a_usable_reference_under_a1(
+    history: list[Any], n: int
+) -> None:
+    """Ruling A1-13 holds where magnitude has no usable reference: the non-finite check runs
+    before any cold or prior logic, so ``inf`` still scores exactly 1.0 (novelty never scores it,
+    ``contradicts_bool(inf)`` is False) and an ALLOWED one is never pushed."""
+    eng, tr = _qty_engine(history, A1)
+    key = key_mag("a", "shop.order", "qty")
+    rec = eng.store.get(key)
+    before = None if rec is None else orjson.dumps(rec.to_dict())
+    assert (before is None) == (n == 0)
+    e = _qty_env(tr, len(history), math.inf)
+    res = eng.score(e)
+    assert res.field_types["qty"] is FieldType.BOOL
+    (mag,) = _qty_scores(res)
+    assert mag.detector == "magnitude" and mag.score == 1.0
+    assert mag.evidence["non_finite"] and mag.evidence["type_violation"] == "bool"
+    assert mag.evidence["n"] == n and mag.evidence["prior_used"] is False
+    assert res.fused_score > 0.999
+    eng.update(e, Outcome.ALLOWED)
+    rec = eng.store.get(key)
+    assert (None if rec is None else orjson.dumps(rec.to_dict())) == before
+
+
 def test_pinned_non_finite_float_in_a_bool_field_is_scored_by_no_detector_pre_a1() -> None:
     """PINS the pre-amendment behaviour, ``mag_bool_numeric=False``. ``contradicts_bool`` wants a
     finite value from a float or a string, so ``inf``, ``-inf``, ``"1e999"`` (JSON 1e999) and NaN
