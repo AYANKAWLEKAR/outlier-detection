@@ -183,6 +183,18 @@ SMALL_OWN_FILES = {
 }
 
 
+def _strip_trace_fields(lines: list[bytes]) -> str:
+    """sha256 of the trace lines minus ``task_ids`` and ``response_meta.fp``, as written."""
+    out = bytearray()
+    for ln in lines:
+        row = orjson.loads(ln)
+        row.pop("task_ids", None)
+        if row.get("response_meta"):
+            row["response_meta"].pop("fp", None)
+        out += orjson.dumps(row, option=orjson.OPT_SORT_KEYS) + b"\n"
+    return hashlib.sha256(bytes(out)).hexdigest()
+
+
 def small_cfg(**kw: object) -> GenerateConfig:
     base: dict[str, object] = {
         "days": 40,
@@ -406,7 +418,14 @@ def test_default_generator_is_unchanged(trio: Trio, tmp_path: Path) -> None:
     assert c.magnitude_mode == "own" and c.magnitude_far_mult == CONTROL_P99_MULT == 5.0
     m = trio.own.manifest
     assert set(m.counts) == {"sessions", "envelopes", "attacks"}
-    assert m.files == SMALL_OWN_FILES
+    # Task 1.3 added ``task_ids`` (a session's first call) and ``response_meta.fp`` to traces.
+    # Stripped of those two fields and re-serialized as the generator writes them, mode "own"
+    # still reproduces the pre-A1 bytes; the real file differs, so the fields cannot silently go.
+    assert m.files["labels.jsonl"] == SMALL_OWN_FILES["labels.jsonl"]
+    assert _strip_trace_fields(trio.own.trace_lines) == SMALL_OWN_FILES["traces.jsonl"]
+    assert m.files["traces.jsonl"] != SMALL_OWN_FILES["traces.jsonl"]
+    assert any(b'"task_ids"' in ln for ln in trio.own.trace_lines)
+    assert any(b'"fp"' in ln for ln in trio.own.trace_lines)
     # mode "own" never reads the multiple
     tiny = {"days": 5, "attack_rate": 0.5, "families": [SPIKE, "benign_unusual"]}
     a = generate(cfg(**tiny), tmp_path / "a")
