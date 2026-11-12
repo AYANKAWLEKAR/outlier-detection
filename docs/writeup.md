@@ -1,8 +1,11 @@
 # Agent Action Firewall: engine v1 on a synthetic benchmark
 
 Status: Tier 2 build complete; **Tier-2 exit not reached** (the live sandbox dataset v1 has not
-been built) and **Tier-1 gate not met under the spec protocol** (decision 008). Every number on
-this page comes from the **synthetic benchmark (SW1)**, not from real or live agent traffic.
+been built). **Tier 1** (spec Amendment A1, criterion A1.7): the amended criterion passes under the
+oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) and fails under
+spec §5.2 allow-all, on SW1 seeds 0, 1 and 2. Which protocol's result closes Tier 1 is the user's
+open decision (D-028; decision 008). Every number on this page comes from the **synthetic benchmark
+(SW1)**, not from real or live agent traffic.
 
 ## 1. Problem
 
@@ -12,7 +15,7 @@ signature or schema checks do not catch them. The engine scores each call by how
 for *this* agent, using only the agent's own history and a pooled prior across agents, and flags
 calls above a per-agent threshold. It needs no labels and learns online.
 
-## 2. Method: the engine, stage by stage (spec §6)
+## 2. Method: the engine, stage by stage (spec §6, Amendment A1)
 
 Each tool call (`RawCall`) passes through these stages in order. Every stage scores before it
 updates, and a blocked or denied call never updates a baseline.
@@ -25,30 +28,47 @@ updates, and a blocked or denied call never updates a baseline.
    is scored on the next call (§2.3, D-004).
 2. **Type inference (§6.2).** Per (agent, tool, path): numeric, bool, id, freetext or
    categorical, sticky over 100 observations, `unknown` below 10.
-3. **Magnitude (§6.3).** Robust z of `sign(x)·log1p(|x|)` against P² quartiles, squashed with
-   `σ((|z| − 3)/0.75)`; one-sided for money and count fields. Cold keys (n < 30) score against
-   the pooled cross-agent prior with the IQR inflated 1.5× (§6.10).
-4. **Velocity (§6.4).** Robust z of the current 10-minute call count (and money sum) against the
-   history of active-minute window counts.
+3. **Magnitude (§6.3, A1.2, A1.3).** Values are taken on the scale `sign(x)·log1p(|x|)`. The
+   score is a tail probability: the distance to the P² median, divided by a one-sided robust
+   scale (the larger of the quartile and the 5 %/95 % marker spreads), gives a normal tail `p`,
+   and `s = 0.005 / (0.005 + 0.995·p)` (`tail_prior` = `cal_alpha`, D-023). A benign value at the
+   field's 99.5th percentile scores about 0.5. ×100 the median scores close to 1 on every SW1
+   field; ×10 scores close to 1 only on narrow fields (log-sd up to about 0.6) and 0.575 on the
+   widest SW1 field (log-sd 0.86). Money and count fields are one-sided. Cold keys (n < 30) score
+   against the pooled cross-agent prior with the scale inflated 1.5× (§6.10). Numbers in a
+   BOOL-typed field are learned and scored too (D-024).
+4. **Velocity (§6.4, A1.1).** The current 10-minute call count `c` is scored by how unlikely it
+   is at the key's normal rate (the median active-minute window count, D-022): a Poisson
+   upper-tail deviate, divided by the key's over-dispersion, squashed with `σ((z − 3)/0.75)`. The
+   money-sum signal keeps the robust log z.
 5. **Novelty (§6.5).** An unseen categorical or id value scores
-   `(1 − p_unseen) · min(1, n/200)`, with Good–Turing `p_unseen`; derived domains and prefixes
-   have their own keys.
+   `(1 − p_unseen) · min(1, n/50)`, with Good–Turing `p_unseen`; derived domains and prefixes
+   have their own keys (`novelty_full_n = 50` by user decision, decision 008).
 6. **Sequence (§6.6).** The maximum of three signals: transition surprise (k = 2 back-off,
-   entropy-scaled), a mined prerequisite missing from `prior_tools`, and an id flow break (a write
-   to an id the session never saw, weighted by how often this arg's ids normally flow).
+   entropy-scaled), a mined prerequisite missing from `prior_tools` (graded by the mined rate,
+   decision 008), and an id flow break (a write to an id the session never saw, weighted by how
+   often this arg's ids normally flow).
 7. **Fusion v1 (§6.7).** `top1 + 0.15·[top2 > 0.5]`, clipped to 1. Every detector score above
    0.3 becomes a reason.
 8. **Calibration (§6.8).** Per-agent threshold `θ = q_{0.995}` of the agent's allowed fused
    scores (P² tail), blended with θ0 = 0.6 for the first 500 scores. Decision bands: block at
    ≥ θ, require approval in [θ − 0.1, θ).
 
-All constants are the spec's values (`agentfw/core/config.py::EngineConfig`). p99 score latency
-on warm keys is under 200 µs in pure Python (Tier-1 perf test).
+All constants live in `agentfw/core/config.py::EngineConfig`. The spec's original formulas stay
+selectable (`SPEC_SWITCHES`; the engine before Amendment A1 is `PRE_A1_SWITCHES`). The Tier-1 perf
+test asserts p99 < 200 µs per score on warm keys. After Amendment A1, `Engine.score` p99 was not
+measured on an idle machine; runs under load stayed below the budget.
 
-## 3. Benchmark protocol (spec §5)
+## 3. Benchmark protocol (spec §5, Amendment A1.5)
 
-- **Replay (§5.2).** Envelopes in time order; score, then `update(outcome=ALLOWED)` for every
-  call. The harness measures detection, not enforcement, so nothing is ever blocked during replay.
+- **Replay (§5.2).** Envelopes in time order; score, then `update` with the call's outcome. The
+  benchmark protocol (user decision 2026-11-10, decision 008) is the **oracle-reviewer approval
+  loop (labels act as a perfect human reviewer → optimistic)**: an unflagged call is ALLOWED, and
+  a flagged call is APPROVED if benign and DENIED if an attack, so nothing learns an attack the
+  engine flagged. The spec's own protocol, **spec §5.2 allow-all**, allows and learns every call.
+- **The Tier-1 gate is always evaluated under both protocols** on the same dataset and engine, and
+  the two results are always shown together, each under its label (spec A1.5, D-028). A result
+  under one protocol alone is never the gate result.
 - **Splits (§5.3).** By time (first 70 % train, last 30 % test; the detector keeps learning
   online through the test period) and by agent (70 % of personas train, 30 % held out). The two
   are separate tables and are never averaged.
@@ -58,11 +78,18 @@ on warm keys is under 200 µs in pure Python (Tier-1 perf test).
   number is the leaderboard metric, and it is always shown with the recall it achieved. The
   headline uses warm envelopes (≥ 30 prior observations of the agent-tool key). 95 % CIs come from
   a 1,000-sample bootstrap over sessions.
+- **Gate criterion (A1.6, A1.7).** At the engine's live per-agent thresholds on warm test rows,
+  per gated family (`slow_drift` excluded; `magnitude_spike` with strength 10 to 100): attack-level
+  recall ≥ 0.90, and the targeted detector among the reasons (score > 0.3) of a flagged row in
+  ≥ 0.90 of detected attacks; benign FPR ≤ 2 %. The top-1 share (the targeted detector is the top
+  reason) is the original spec §9 criterion; it is still printed beside the new share and is not
+  gated.
 - **Baselines (§5.5).** `random`; `static_threshold` (per-field train p99 bound plus a train
   allowlist of categorical values, no sequence); `isolation_forest` (batch fit on the train split
   only: it is not an online learner and cannot extrapolate above its train range);
   `llm_judge` (a frontier model scoring the last 8 envelopes of the session, on a stratified
-  2,000-envelope sample).
+  2,000-envelope sample). The baselines do not learn online, so the protocol does not change their
+  scores.
 
 **What the per-agent FPR@95 operating point is not.** It is fixed after the fact using the test
 labels: it asks "how many benign calls would be flagged if the thresholds were set just low
@@ -73,205 +100,240 @@ FPR 0.5 %), and their recall is the Tier-1 gate (§6 below).
 
 | dataset | status | what it is |
 |---|---|---|
-| **SW1** (synthetic) | used for every number here | Generator seed 0, all 20 personas, 90 days, all 8 attack families, attack rate 0.015: 42,289 sessions, 174,878 envelopes, 599 attacks. Dataset sha256 `e7b3bc2a2f20…` (traces.jsonl). Rebuilt from a clean checkout by `scripts/build_leaderboard.py`. |
+| **SW1** (synthetic) | used for every number here | `sw1_config(0)` (spec A1.4): generator seed 0, all 20 personas, 90 days, all 8 attack families, attack rate 0.015, magnitude spikes in mode "far" plus a magnitude-only top-up pass at rate 0.015. 42,289 sessions, 174,878 envelopes, 808 attacks, of which 264 are magnitude spikes (53 first pass, 2 dropped, 211 top-up). Dataset sha256 `a455b10c705d…` (traces.jsonl). Rebuilt from a clean checkout by `scripts/build_leaderboard.py`. Seeds 1 (`e783c301bf21`) and 2 (`62645fcfd0b8`) and the sensitivity dataset (seed 0 with `magnitude_far_mult = 1.0`, `3fc612ce1fdb`) are used for the gate evidence only. The SW1 before Amendment A1 (`e7b3bc2a2f20`, 599 attacks) is superseded; its numbers are not compared with these. |
 | **sandbox dataset v1** | **not built** | LLM agents (one model) running ~70 task templates against sandboxed Stripe test mode, a Salesforce Developer org, a Slack sandbox channel, a local Zendesk-like server and Mailhog, with prompt- and action-level injections. Minimums: 20 agents, 2,000 sessions, 40,000 actions, 600 attacks. The README's "How to build dataset/v1" gives the commands; they call a paid LLM and live sandbox APIs and are run by hand. |
 
-The eight families are `magnitude_spike` (m log-uniform on [3, 100]), `scope_blowup`,
-`exfil_volume`, `prereq_skip`, `novel_target`, `velocity_burst`, `slow_drift`, and the
-`benign_unusual` control set (benign but unusual calls, used for the control FPR).
+The eight families are `magnitude_spike`, `scope_blowup`, `exfil_volume`, `prereq_skip`,
+`novel_target`, `velocity_burst`, `slow_drift`, and the `benign_unusual` control set (benign but
+unusual calls, used for the control FPR). A `magnitude_spike` multiplies a money or count field of
+a write call by `m`, log-uniform on [3, 100]. On SW1 the draw is conditioned on landing at or
+beyond 5 × the persona's own benign p99 of the field (D-025), the level the generator labels benign
+in its control; a session with no such candidate stays benign and is counted. A top-up pass adds
+spikes so the gate cell holds at least 50 attacks (81 on seed 0; D-026). `Label.strength` is still
+the realized multiplier, and the gate bucket is still 10 to 100 (D-009); 97 % of the seed-0 spikes
+now have strength ≥ 10 (median 48.3).
 
-## 5. Results on SW1 (spec protocol, default engine)
+## 5. Results on SW1
 
 The full leaderboard, both splits and the per-family tables, is
 [docs/leaderboard.md](leaderboard.md). Every row there is the **synthetic benchmark (SW1)**, full
-test split, spec protocol. Warm test rows; 95 % CIs from 1,000 session-bootstrap samples.
+test split. Warm test rows; 95 % CIs from 1,000 session-bootstrap samples. Each engine row names
+its protocol. AUPRC and other dataset-wide numbers are not comparable with the SW1 before
+Amendment A1: the attack mix changed (magnitude spikes are about a third of the attacks; spec A1.5
+rule 5).
 
-**By time** (53,011 warm test envelopes, 2,062 attack envelopes):
+**By time** (53,011 warm test envelopes, 2,127 attack envelopes):
 
-| detector | AUPRC [95 % CI] | FPR@95 per-agent [95 % CI] (recall achieved) | FPR@95 global |
-|---|---|---|---|
-| engine | 0.576 [0.480, 0.658] | 0.563 [0.497, 0.583] (0.950) | 0.536 |
-| isolation_forest (batch) | 0.055 [0.042, 0.074] | 0.865 [0.636, 0.925] (0.972) | 1.000 |
-| random | 0.040 [0.031, 0.050] | 0.943 [0.935, 0.958] (0.950) | 0.944 |
-| static_threshold (batch) | 0.048 [0.035, 0.066] | 0.950 [0.794, 0.990] (0.975) | 1.000 |
-| llm_judge | not run (requires a live judge model) | | |
+| detector | protocol | AUPRC [95 % CI] | FPR@95 per-agent [95 % CI] (recall achieved) | FPR@95 global |
+|---|---|---|---|---|
+| engine | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.779 [0.727, 0.820] | 0.490 [0.405, 0.557] (0.950) | 0.546 |
+| engine | spec §5.2 allow-all | 0.736 [0.680, 0.782] | 0.542 [0.528, 0.605] (0.950) | 0.587 |
+| engine before A1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.677 [0.594, 0.748] | 0.456 [0.344, 0.536] (0.950) | 0.423 |
+| engine before A1 | spec §5.2 allow-all | 0.627 [0.536, 0.704] | 0.555 [0.496, 0.584] (0.951) | 0.537 |
+| isolation_forest (batch) | (no online learning) | 0.060 [0.047, 0.080] | 0.862 [0.644, 0.925] (0.972) | 1.000 |
+| random | (no online learning) | 0.041 [0.033, 0.051] | 0.943 [0.936, 0.958] (0.950) | 0.944 |
+| static_threshold (batch) | (no online learning) | 0.051 [0.037, 0.068] | 0.957 [0.786, 0.997] (0.976) | 1.000 |
+| llm_judge | | not run (requires a live judge model) | | |
 
-**By agent** (6 held-out personas; 43,562 warm test envelopes, 1,611 attack envelopes):
+**By agent** (6 held-out personas; 43,562 warm test envelopes, 1,701 attack envelopes):
 
-| detector | AUPRC [95 % CI] | FPR@95 per-agent [95 % CI] (recall achieved) | FPR@95 global |
-|---|---|---|---|
-| engine | 0.615 [0.504, 0.693] | 0.704 [0.661, 0.735] (0.950) | 0.704 |
-| random | 0.036 [0.027, 0.046] | 0.948 [0.937, 0.960] (0.950) | 0.948 |
-| static_threshold (batch) | 0.057 [0.037, 0.083] | 1.000 [1.000, 1.000] (1.000) | 1.000 |
-| isolation_forest (batch) | 0.048 [0.037, 0.063] | 1.000 [0.587, 1.000] (1.000) | 1.000 |
-| llm_judge | not run (requires a live judge model) | | |
+| detector | protocol | AUPRC [95 % CI] | FPR@95 per-agent [95 % CI] (recall achieved) | FPR@95 global |
+|---|---|---|---|---|
+| engine | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.737 [0.655, 0.790] | 0.726 [0.675, 0.787] (0.950) | 0.726 |
+| engine | spec §5.2 allow-all | 0.687 [0.596, 0.749] | 0.673 [0.645, 0.709] (0.950) | 0.673 |
+| engine before A1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.720 [0.636, 0.779] | 0.689 [0.645, 0.819] (0.950) | 0.689 |
+| engine before A1 | spec §5.2 allow-all | 0.671 [0.577, 0.739] | 0.679 [0.662, 0.736] (0.950) | 0.679 |
+| random | (no online learning) | 0.038 [0.029, 0.049] | 0.948 [0.938, 0.960] (0.950) | 0.948 |
+| static_threshold (batch) | (no online learning) | 0.064 [0.043, 0.090] | 1.000 [1.000, 1.000] (1.000) | 1.000 |
+| isolation_forest (batch) | (no online learning) | 0.054 [0.042, 0.068] | 1.000 [0.581, 1.000] (1.000) | 1.000 |
+| llm_judge | | not run (requires a live judge model) | | |
 
 How to read these numbers:
 
-- **The engine ranks attacks far better than the baselines** (AUPRC 0.58 against 0.040–0.055 by
-  time; prevalence is 3.9 % of warm test envelopes, which is roughly what random scores).
-  The baselines' AUPRCs (0.036–0.057 across both splits, random included) have overlapping CIs:
-  `static_threshold` and `isolation_forest` barely beat random. The
-  engine's AUPRC CI is wide ([0.48, 0.66]): the bootstrap resamples sessions, and 50 velocity
-  bursts carry 1,699 of the 2,062 attack envelopes.
+- **The engine ranks attacks far better than the baselines** (AUPRC 0.74–0.78 against
+  0.041–0.060 by time; prevalence is 4.0 % of warm test envelopes, which is roughly what random
+  scores). `static_threshold` and `isolation_forest` barely beat random, and their CIs overlap
+  with it. The engine's AUPRC CI is wide: the bootstrap resamples sessions, and 50 velocity
+  bursts carry 1,699 of the 2,127 attack envelopes.
 - **Baselines reach 95 % recall only by flagging nearly everything.** `static_threshold` and
   `isolation_forest` scores have large tied groups (discrete bounds; clipped or zero scores), so
-  their recall jumps past 0.95 (0.972–1.000) and their FPR@95 is 0.87–1.00; by agent both flag
-  every benign call. Isolation forest is a batch
-  fit on the train split and cannot score extrapolation above the train range, which the spec
-  reports as its caveat.
-- **No detector is usable at 95 % envelope recall.** The engine's per-agent FPR@95 of 0.563 means
-  flagging more than half of benign calls. The metric is dominated by `velocity_burst` (1,699 of
-  the 2,062 attack envelopes). Attack-level recall at that operating point is 0.895–1.000 per
-  family (leaderboard per-family table), but that is bought with the same
-  56 % FPR and is not the gate.
-- **At the engine's own live thresholds** (target FPR 0.5 %) benign FPR is 0.39 % by time and
-  0.73 % by agent; family recall is in §6.
+  their recall jumps past 0.95 (0.972–1.000) and their FPR@95 is 0.86–1.00; by agent both flag
+  every benign call. Isolation forest is a batch fit on the train split and cannot score
+  extrapolation above the train range, which the spec reports as its caveat.
+- **No detector is usable at 95 % envelope recall.** The engine's per-agent FPR@95 of 0.490 means
+  flagging about half of benign calls. The metric is dominated by `velocity_burst`. Attack-level
+  recall at that operating point is 1.000 for every engine row and family (leaderboard per-family
+  table), but that is bought with the same FPR and is not the gate.
+- **At the engine's own live thresholds** (target FPR 0.5 %) benign FPR by time is 0.58 % under
+  the oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) and
+  0.14 % under spec §5.2 allow-all; family recall is in §6.
 - **By agent.** Held-out personas have no train-split scores of their own, so the leaderboard's
-  per-agent thresholds fall back to the pooled train ECDF; this raises FPR@95 to 0.704. The engine
-  itself still learns each held-out agent online during the test period, so the by-agent split
-  tests the pooled priors only for the first observations of each key. At live thresholds the
-  by-agent gate cells are: magnitude_spike (m ≥ 10) 0.450 (9/20), scope_blowup 0.842 (16/19),
-  exfil_volume 0.800 (8/10), prereq_skip 0.929 (13/14), novel_target 0.194 (7/36),
-  velocity_burst 0.944 (34/36); benign FPR 0.73 %, control FPR 5.8 %.
-- **Drift and cold start (by time, per-agent operating point).** All 11 `slow_drift` attacks are
-  caught, with a median delay of 3 sessions and p90 of 8. Every warm test envelope has ≥ 30 key
-  observations by construction; the 230 envelopes with 30–100 observations show recall 0.982 at
-  FPR 0.560, no worse than the rest.
-- **Latency.** The Tier-1 perf test pins p99 < 200 µs per score on warm keys. The latencies in
-  these leaderboard runs (engine p99 ≈ 1.7 ms) were measured with four replays and the test suite
-  running in parallel and are not a latency result.
+  per-agent thresholds fall back to the pooled train ECDF; this raises FPR@95 to 0.67–0.73. The
+  engine itself still learns each held-out agent online during the test period, so the by-agent
+  split tests the pooled priors only for the first observations of each key. The gate is
+  evaluated by time only.
+- **Drift and cold start (oracle-reviewer run, by time, per-agent operating point).** All 11
+  `slow_drift` attacks are caught, with a median delay of 3 sessions and p90 of 7. Every warm test
+  envelope has ≥ 30 key observations by construction; the 230 envelopes with 30–100 observations
+  show recall 0.929 at FPR 0.529 (0.951 at 0.484 for the rest).
+- **Latency.** The latencies in these leaderboard runs (engine p99 about 0.3 ms in the
+  oracle-reviewer run) were measured with four replays running in parallel and are not a latency
+  result.
 
-## 6. Tier-1 status (honest)
+## 6. Tier-1 status
 
-**The Tier-1 gate is not met under the spec protocol.** The gate (spec §9, D-008/D-009) asks for
-attack-level recall ≥ 0.90 per family for the targeted detector, at the engine's *live* per-agent
-thresholds, on warm test rows, with benign FPR ≤ 2 %.
+The criterion is the amended one (spec A1.7, §3 above). Amended engine on SW1 seeds 0, 1 and 2,
+copied from `docs/decisions/evidence/a1-gate/matrix.md` (Task 1.23; every number is a cell of
+`matrix.json`). Cells: recall (n/N); among-the-reasons share; top-1 share (original spec §9
+criterion). Each row is the result under one protocol; the two rows of a seed are read together,
+and neither alone is the Tier-1 gate result.
 
-Default engine, spec protocol (allow-all replay), SW1 seed 0, from this leaderboard's engine run
-(identical to the Tier-1 acceptance run):
+| seed | Protocol | magnitude_spike 10-100 | scope_blowup | exfil_volume | prereq_skip | novel_target | velocity_burst | benign FPR | control FPR | amended criterion |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 1.000 (81/81); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 1.00; 0.84 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 1.000 (50/50); 1.00; 0.40 | 0.0058 | 0.035 | PASS |
+| 0 | spec §5.2 allow-all | 0.938 (76/81); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 0.579 (11/19); 1.00; 1.00 | 0.533 (8/15); 1.00; 1.00 | 0.163 (8/49); 1.00; 1.00 | 0.800 (40/50); 1.00; 0.40 | 0.0014 | 0.007 | FAIL: recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+| 1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 1.000 (85/85); 1.00; 1.00 | 1.000 (24/24); 1.00; 1.00 | 1.000 (29/29); 1.00; 0.79 | 1.000 (18/18); 1.00; 1.00 | 1.000 (36/36); 1.00; 1.00 | 0.981 (51/52); 1.00; 0.24 | 0.0062 | 0.028 | PASS |
+| 1 | spec §5.2 allow-all | 0.824 (70/85); 1.00; 0.97 | 1.000 (24/24); 1.00; 1.00 | 0.655 (19/29); 1.00; 1.00 | 0.667 (12/18); 1.00; 1.00 | 0.222 (8/36); 1.00; 1.00 | 0.808 (42/52); 1.00; 0.31 | 0.0023 | 0.013 | FAIL: recall:magnitude_spike, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+| 2 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 1.000 (85/85); 1.00; 0.99 | 1.000 (13/13); 1.00; 1.00 | 1.000 (38/38); 0.95; 0.82 | 1.000 (13/13); 1.00; 1.00 | 1.000 (38/38); 1.00; 1.00 | 1.000 (44/44); 1.00; 0.43 | 0.0050 | 0.050 | PASS |
+| 2 | spec §5.2 allow-all | 0.965 (82/85); 1.00; 0.93 | 1.000 (13/13); 1.00; 1.00 | 0.711 (27/38); 1.00; 0.96 | 0.846 (11/13); 1.00; 1.00 | 0.211 (8/38); 1.00; 1.00 | 0.682 (30/44); 1.00; 0.37 | 0.0018 | 0.031 | FAIL: recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
 
-| family (gate bucket) | targeted detector | attack recall at live thresholds | top-reason share |
-|---|---|---|---|
-| exfil_volume | magnitude | 0.579 (11/19) | 0.727 |
-| magnitude_spike (m ∈ [10, 100]) | magnitude | 0.538 (7/13) | 1.000 |
-| novel_target | novelty | 0.388 (19/49) | 1.000 |
-| prereq_skip | sequence | 0.933 (14/15) | 1.000 |
-| scope_blowup | magnitude | 1.000 (13/13) | 0.846 |
-| velocity_burst | velocity | 0.700 (35/50) | 0.257 |
+On all three seeds the amended criterion passes under the oracle-reviewer approval loop (labels
+act as a perfect human reviewer → optimistic) and fails under spec §5.2 allow-all. Which
+protocol's result closes Tier 1 is the user's open decision (D-028). The original spec §9 criterion
+(top-1 share ≥ 0.90) fails under both protocols: velocity_burst's top-1 share is 0.24 to 0.43.
+The Tier-2 exit is not reached.
 
-Benign FPR 0.39 %, control FPR 6.2 %, minimum family recall 0.388: **gate FAIL**. Only prereq_skip
-and scope_blowup pass. `tests/acceptance/test_tier1_exit.py::test_tier1_exit` encodes the gate as a
-strict xfail; it will fail loudly (XPASS) if the gate ever starts to hold.
+**Companion rows (spec A1.5 rule 4).** The `magnitude_spike` cell is shown with the engine before
+Amendment A1 on the same data and both engines on the sensitivity dataset (spikes just outside
+the benign p99; seed 0 only). The sensitivity rows are not gate results.
 
-**Root causes (decision 008).** Of 121 misses on seeds 0 and 1:
+| dataset | engine | Protocol | magnitude_spike 10-100 | scope_blowup | exfil_volume | prereq_skip | novel_target | velocity_burst | benign FPR | control FPR | amended criterion |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| SW1 seed 0 (`a455b10c705d`) | pre-A1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.975 (79/81); 1.00; 0.99 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 0.89; 0.58 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 0.880 (44/50); 1.00; 0.30 | 0.0092 | 0.134 | FAIL: among:exfil_volume, recall:velocity_burst |
+| SW1 seed 0 (`a455b10c705d`) | pre-A1 | spec §5.2 allow-all | 0.753 (61/81); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 0.474 (9/19); 1.00; 1.00 | 0.667 (10/15); 1.00; 1.00 | 0.469 (23/49); 1.00; 1.00 | 0.680 (34/50); 1.00; 0.29 | 0.0025 | 0.060 | FAIL: recall:magnitude_spike, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+| SW1 seed 1 (`e783c301bf21`) | pre-A1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.988 (84/85); 1.00; 0.98 | 1.000 (24/24); 1.00; 1.00 | 0.966 (28/29); 1.00; 0.64 | 1.000 (18/18); 1.00; 1.00 | 1.000 (36/36); 1.00; 1.00 | 0.962 (50/52); 1.00; 0.22 | 0.0087 | 0.087 | PASS |
+| SW1 seed 1 (`e783c301bf21`) | pre-A1 | spec §5.2 allow-all | 0.788 (67/85); 1.00; 0.94 | 0.792 (19/24); 1.00; 1.00 | 0.586 (17/29); 1.00; 1.00 | 0.667 (12/18); 1.00; 1.00 | 0.444 (16/36); 1.00; 1.00 | 0.635 (33/52); 1.00; 0.15 | 0.0030 | 0.049 | FAIL: recall:magnitude_spike, recall:scope_blowup, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+| SW1 seed 2 (`62645fcfd0b8`) | pre-A1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.953 (81/85); 1.00; 0.98 | 1.000 (13/13); 1.00; 1.00 | 0.895 (34/38); 0.88; 0.65 | 1.000 (13/13); 1.00; 1.00 | 1.000 (38/38); 1.00; 1.00 | 0.864 (38/44); 1.00; 0.29 | 0.0089 | 0.108 | FAIL: recall:exfil_volume, among:exfil_volume, recall:velocity_burst |
+| SW1 seed 2 (`62645fcfd0b8`) | pre-A1 | spec §5.2 allow-all | 0.800 (68/85); 1.00; 0.97 | 0.615 (8/13); 1.00; 1.00 | 0.500 (19/38); 0.95; 0.95 | 0.846 (11/13); 1.00; 1.00 | 0.474 (18/38); 1.00; 1.00 | 0.591 (26/44); 1.00; 0.27 | 0.0025 | 0.062 | FAIL: recall:magnitude_spike, recall:scope_blowup, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+| sensitivity seed 0 (`3fc612ce1fdb`) | amended (A1) | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.797 (51/64); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 1.00; 0.84 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 1.000 (50/50); 1.00; 0.40 | 0.0060 | 0.035 | companion row (spec A1.5 rule 4), not a gate result |
+| sensitivity seed 0 (`3fc612ce1fdb`) | amended (A1) | spec §5.2 allow-all | 0.656 (42/64); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 0.632 (12/19); 1.00; 1.00 | 0.533 (8/15); 1.00; 1.00 | 0.163 (8/49); 1.00; 1.00 | 0.800 (40/50); 1.00; 0.38 | 0.0014 | 0.012 | companion row (spec A1.5 rule 4), not a gate result |
+| sensitivity seed 0 (`3fc612ce1fdb`) | pre-A1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.688 (44/64); 1.00; 0.96 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 0.84; 0.58 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 0.880 (44/50); 1.00; 0.30 | 0.0090 | 0.134 | companion row (spec A1.5 rule 4), not a gate result |
+| sensitivity seed 0 (`3fc612ce1fdb`) | pre-A1 | spec §5.2 allow-all | 0.578 (37/64); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 0.474 (9/19); 1.00; 1.00 | 0.667 (10/15); 1.00; 1.00 | 0.469 (23/49); 1.00; 1.00 | 0.680 (34/50); 1.00; 0.26 | 0.0024 | 0.062 | companion row (spec A1.5 rule 4), not a gate result |
 
-- **91: the allow-all replay teaches the engine its own attacks.** The spec replay allows every
-  call, so each agent's calibrator learns the attack rows into its benign tail (on some agents
-  0.7–13 % of rows are attacks: velocity duplicates, scope and novelty hits near 1.0). 16–17 of
-  20 agents end with θ ≥ 0.999, and only fused scores of about 1.0 are flagged. Detector state
-  learns attacks too (an exfil read's inflated item counts end up in the baseline).
-- **21: detector or design limits.** Magnitude spikes of ×12–×24 that are only z ≈ 3.1–3.2 on a
-  wide-spread field squash to 0.55–0.58; velocity bursts of 21–41 calls on an agent whose window
-  median is 3 score 0.60–0.89; the novelty ramp `min(1, n/200)` discounts stable vocabularies with
-  81–178 observations.
-- **6: label semantics** (the exfil response signal is carried by the call after the read; the
-  generator now labels it, per §2.3).
-- **3: not anomalous** (the "attack" value is inside the persona's own benign p99.5).
+- **On seed 1 the engine before Amendment A1 also passes the amended criterion under the
+  oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic).** It fails
+  on seeds 0 and 2 (velocity_burst 0.880 (44/50) and 0.864 (38/44); exfil_volume's among-the-reasons
+  share 0.89 and 0.88), and under spec §5.2 allow-all on all three.
+- Under the oracle-reviewer loop the pre-A1 engine already catches 0.975 (79/81), 0.988 (84/85) and
+  0.953 (81/85) of the far spikes. The magnitude cell under that protocol is decided by the
+  generator correction more than by the scoring change.
+- On the sensitivity dataset neither engine reaches 0.90 in the magnitude cell under either
+  protocol.
+- The control FPR under the oracle-reviewer loop falls from 0.134 / 0.087 / 0.108 (pre-A1) to
+  0.035 / 0.028 / 0.050. The drop comes from the velocity change: flat keys no longer over-score
+  windows of 3 to 6 calls. Seed 2's 5.01 % is above the 5 % Tier-3 bound.
 
-**Opt-in candidates, clearly labelled optimistic.** Decision 008 measured protocol and engine
-switches; none is a default. The best one replays under the
-**oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)**: every
-flagged call is approved if benign and denied if an attack, so the calibrator only learns benign
-calls. With three opt-in engine switches (`vel_count_attempts`, `seq_prereq_graded`,
-`novelty_full_n=50`) it reaches, on seed 0 / seed 1:
-
-| family | default, spec protocol | opt-in candidate, oracle-reviewer loop (optimistic) |
-|---|---|---|
-| magnitude_spike (m ≥ 10) | 0.538 / 0.625 | 0.692 / 0.750 |
-| scope_blowup | 1.000 / 0.750 | 1.000 / 1.000 |
-| exfil_volume | 0.579 / 0.621 | 1.000 / 0.966 |
-| prereq_skip | 0.933 / 1.000 | 1.000 / 1.000 |
-| novel_target | 0.388 / 0.417 | 1.000 / 1.000 |
-| velocity_burst | 0.700 / 0.635 | 0.880 / 0.962 |
-| benign FPR | 0.39 % / 0.56 % | 0.93 % / 0.89 % |
-| control FPR | 6.2 % / 4.9 % | 13.8 % / 8.7 % |
-
-Even this optimistic candidate fails the gate (magnitude_spike 0.69 / 0.75, velocity_burst 0.88 on
-seed 0), and the targeted detector is the *top* reason in only 0.30 / 0.22 of detected velocity
-bursts and 0.58 / 0.64 of exfil attacks (it is *among* the reasons in 0.89–1.00).
-
-The label-free alternatives do not fix it either (decision 008, "The censoring ratchet"; seed 0 /
-seed 1):
-
-- `enforce` and `drop` truncate the calibrator's input at θ, so θ ratchets down (median end
-  0.33–0.44) and benign FPR is 36.7 / 52.7 % and 37.6 / 31.9 %.
-- `winsorize` freezes θ at θ0 = 0.600, with benign FPR 13.5 / 13.5 %.
-- `winsorize` after 500 scores (shadow first) starts from the saturated allow-all θ: benign FPR
-  is 5.2 / 5.3 %, but min recall is 0.69 / 0.69 and 5–6 agents stay saturated. Adding `enforce`
-  to it raises benign FPR to 31.1 / 31.2 %.
+**Root causes (decision 008) and what Amendment A1 changed.** Decision 008 traced the gap to
+(a) the allow-all replay learning the attacks (91 of 121 misses), (b) magnitude spikes that were
+not extreme, scored on a squash that was too flat, (c) velocity bursts on agents whose traffic is
+already bursty, and too few magnitude attacks in the gate cell (13 on seed 0). Amendment A1
+changed the magnitude score (b), the velocity count score (c), the benchmark's spikes and their
+number (b, sample size) and the attribution criterion. Nothing in it addresses (a): under spec
+§5.2 allow-all every attack row is learned, and in the seed-0 leaderboard run the median live
+threshold is ≥ 0.999 on 18 of 20 agents, so only fused scores of about 1.0 are flagged.
 
 ## 7. Failure cases
 
-All numbers here are from the default engine on SW1 (by-time split, warm test rows, the engine's
-live thresholds), read from `results/synth-v1/time/engine/scores.parquet`.
+From the SW1 seed-0 leaderboard runs (by time, warm test rows, the engine's live thresholds),
+read from `results/synth-v1/time/{engine,engine-allow-all}/scores.parquet`.
 
-- **Saturated thresholds hide near-certain anomalies.** The median live threshold is ≥ 0.9989 on
-  17 of 20 agents (1.0 on 7). Missed `novel_target` attacks score 0.9998–0.9999 against thresholds
-  of 0.99995–1.0: the engine ranks them at the very top, yet the calibrator, having learned earlier
-  attacks as benign under allow-all replay, sets the bar just above them. 30 of 49 warm
-  `novel_target` attacks are missed this way or by the novelty ramp.
-- **Velocity bursts on noisy agents.** On `slack-notifier-a` and `helpdesk-triage-b`, whose
-  thresholds are lower (0.967–0.973), the closest missed bursts score 0.92–0.96. On
-  helpdesk-triage-b, whose median window holds about 3 calls, a burst needs about 46 calls to
-  reach 0.90 (decision 008); its bursts have 21–41.
-- **Magnitude spikes on wide fields.** A ×12 change of `due_in_days` (exec-assistant-a) is
-  z ≈ 3.1 on that field's spread and scores 0.54; a ×22 refund amount on sales-ops-a is still
-  exceeded by 1.7 % of that persona's own benign amounts. The second is arguably not an anomaly.
-- **False positives concentrate on one agent and one detector.** 200 of 50,949 warm benign calls
-  are flagged (0.39 %); 88 of them are on `support-refunds-c`, 81 of those fired by the sequence
-  detector, mostly on `stripe.create_refund`. Across agents the top detector of a false positive
-  is sequence 136 times, velocity 38, magnitude 20, novelty 6.
-- **The control set is where the FPR lives.** `benign_unusual` calls (benign by construction, but
-  unusual) are 42 of the 200 false positives and give a 6.2 % control FPR at live thresholds,
-  above the Tier-3 target of 5 %; 35 of the 42 are velocity.
+- **Under spec §5.2 allow-all, saturated thresholds hide near-certain anomalies.** The median
+  live threshold is ≥ 0.999 on 18 of 20 agents (2 of 20 under the oracle-reviewer approval loop
+  (labels act as a perfect human reviewer → optimistic)). 41 of 49 `novel_target` attacks are
+  missed: their best rows score 0.983–0.9999 against thresholds of 0.9993–1.0. The engine ranks
+  them near the top, yet the calibrator, having learned earlier attacks as benign, sets the bar
+  just above them.
+- **The new velocity score makes this worse under allow-all.** Bursts now score near 1 and are
+  learned, so helpdesk-triage-b and slack-notifier-a saturate; 9 of the 10 missed bursts are on
+  those two agents, and novel_target falls from 0.469 (23/49) with the engine before Amendment A1
+  to 0.163 (8/49) (spec A1.12 item 2). The old number existed because the old velocity score
+  failed on those agents.
+- **Magnitude spikes under allow-all.** The 5 missed far spikes (0.938 (76/81)) are on two refund
+  personas (support-refunds-b and support-refunds-c) and score 0.93–0.97 against thresholds of
+  0.9998–1.0.
+- **Weak exfil response signal.** 4 of the 8 exfil_volume misses under allow-all are on
+  helpdesk-triage-a, whose response-count key scores them only 0.44–0.57. Decision 008 §1 traced
+  the same key's weak score to the inflated item counts of earlier exfil reads in its baseline; that
+  was not re-checked on this dataset.
+- **False positives under the oracle-reviewer loop concentrate on sequence.** 297 of 50,884 warm
+  benign calls are flagged (0.58 %). 24 are `benign_unusual` controls (control FPR 3.5 %; top
+  detector magnitude 11, velocity 8, sequence 5). Of the other 273, sequence is the top detector
+  151 times, novelty 56, velocity 52, magnitude 14; sales-ops-a (48), finance-reconcile-a (35) and
+  sales-ops-b (29) have the most.
+- **Spikes just outside the benign range are missed.** On the sensitivity dataset the amended
+  engine catches 0.797 (51/64) of the gated spikes under the oracle-reviewer loop and 0.656 (42/64)
+  under allow-all. Some of those spikes are at or below a benign value of the same field and
+  should not be caught by any honest score.
+- **Attribution.** For detected velocity bursts, velocity is the top reason in 0.40 of cases on
+  seed 0: sequence reaches 1.0 on the third or fourth duplicated write, before velocity can. It is
+  among the reasons of a flagged row in every detected burst.
 - **At the leaderboard's operating point the engine is not deployable.** Forcing 95 % envelope
-  recall costs a per-agent FPR of 0.563. Even at that point `slow_drift` has the lowest envelope
-  recall (0.674, 147 of 218 envelopes), although every drift attack is eventually caught (median
-  delay 3 sessions, p90 8).
-- **Attribution.** For detected velocity bursts, velocity is the top reason in only 26 % of
-  cases; sequence fires first, because the duplicated write's lookup scrolls out of the
-  four-call `prior_tools` window.
+  recall costs a per-agent FPR of 0.490. At that point `slow_drift` has the lowest envelope recall
+  (0.656, 143 of 218 envelopes), although every drift attack is eventually caught.
 
 ## 8. Limitations
 
 - **Synthetic company.** SW1 is one generated company: 20 personas, a fixed tool catalog,
   hand-written task grammars and attack generators written by the same people who wrote the
   detectors. Attack families match the detectors by construction; real attacks need not.
+- **The magnitude attacks are far by construction.** On SW1 every gated spike is at least 5 × the
+  persona's benign p99 of the field. That corrects labels that contradicted the generator's own
+  benign control, but it also makes the cell easier. The sensitivity dataset (spikes just outside
+  the p99) is the reported counterweight: 0.797 (51/64) under the oracle-reviewer approval loop
+  (labels act as a perfect human reviewer → optimistic) and 0.656 (42/64) under spec §5.2
+  allow-all (§6).
+- **The oracle-reviewer loop is optimistic.** Its labels act as a perfect human reviewer. The
+  deployable behaviour lies between the allow-all and the oracle-reviewer numbers and depends on a
+  real reviewer's error rate, which is not measured. Allow-all measures detection without
+  enforcement, and that is what makes its live thresholds saturate.
 - **Single model family.** The sandbox dataset (when built) uses one agent model; results may not
   transfer to other models, tools or organizations.
 - **Retimed clock.** Sandbox sessions are placed on a simulated calendar (D-015): session starts
   are synthetic and only in-session gaps (clamped 0.5–120 s) and burst gaps are real, so velocity
   results on the sandbox data depend on the retiming. SW1 timestamps are fully synthetic.
-- **Small per-family attack counts.** Gate families have 8–52 warm test attacks per seed
-  (magnitude_spike m ≥ 10: 13 and 8), so one attack moves recall by 2–12 points; CIs on per-family
-  recall are wide and are not reported.
-- **Attack prevalence** (1.5 % of sessions) is far above any real base rate, which flatters
-  AUPRC; FPR is prevalence-free but the per-agent operating point is set on test labels.
-- **Allow-all replay.** The protocol measures detection without enforcement, and that is exactly
-  what makes the live thresholds saturate (§6). The deployable behaviour lies between the
-  allow-all and the oracle-reviewer numbers and depends on a real reviewer's error rate, which is
-  not measured.
+- **Small and concentrated per-family attack counts.** Gate families have 13–85 warm test attacks
+  per seed, so one attack moves recall by 1–8 points; CIs on per-family recall are not reported.
+  The magnitude cell is concentrated: on seed 0, support-refunds-c holds 22 of its 81 attacks and
+  the three refund personas 41.
+- **Attack prevalence** (1.5 % of sessions, plus the magnitude top-up) is far above any real base
+  rate, which flatters AUPRC; FPR is prevalence-free but the per-agent operating point is set on
+  test labels.
+- **Known over-scoring cases of the magnitude tail score** (spec A1.12 item 8): power-law tails,
+  small integer fields with tied markers, and fields that never varied. "×10 scores close to 1"
+  holds only on narrow fields.
+- **Velocity's over-dispersion correction is weak.** The share of benign velocity scores ≥ 0.5 is
+  0.76 % on seed 0 (above the 0.5 % prior) and reaches 3.1 % on sales-ops-b.
+- **Latency after Amendment A1** was not measured on an idle machine (`latency_p99_us` is null in
+  `matrix.json`); runs under load stayed below the 200 µs budget.
 - **Batch baseline caveat.** `isolation_forest` is fit offline on the train split, not online.
 - **LLM judge not evaluated.** It needs a live model; the code path is tested only with a scripted
   client, so no judge numbers exist.
 - **Envelope-level AUPRC is dominated by `velocity_burst`** (10–60 positive envelopes per attack,
   against one for most families), so engine ablations do not order monotonically (decision 007).
+  Decision 007's 90-day seed-0 ablation evidence was measured on the engine before Amendment A1
+  and was not re-measured. On `tiny_dataset` its strict xfail XPASSed after the A1 scoring became
+  the default (warm AUPRC: engine 0.608, engine-no-magnitude 0.522), and decision 007 carries a
+  dated addendum. Read ablations from per-family attack-level recall.
 
 ## 9. Reproduce
 
 ```
 uv sync --all-groups
-uv run python scripts/build_leaderboard.py   # SW1 + 8 replays + docs/leaderboard.md (~1 h 45 min)
-scripts/gate.sh --full                              # includes tests/acceptance/test_tier1_exit.py
+uv run python scripts/build_leaderboard.py       # SW1 + 14 replays + docs/leaderboard.md
+docs/decisions/evidence/a1-gate/run.sh seeds01   # SW1 seeds 0, 1 + sensitivity, both engines and protocols
+docs/decisions/evidence/a1-gate/run.sh seed2     # then seed 2; rewrites matrix.json / matrix.md
+scripts/gate.sh --full                           # includes tests/acceptance/test_tier1_exit.py
 ```
+
+`run.sh seed2` refuses to run before every seed-0/1 cell is written, so seed 2 stays unseen until
+seeds 0 and 1 are recorded.

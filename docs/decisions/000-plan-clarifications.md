@@ -2,6 +2,9 @@
 
 Spec clarifications this plan commits to. Open decisions 1-6 from spec section 10 get their own records later.
 
+D-021 to D-028 come with spec Amendment A1 (2026-11-11). D-021 was cited in the code before it was in this
+table; it was backfilled with Amendment A1 (plan Task 1.26).
+
 | ID | Clarification |
 |---|---|
 | D-001 | "Parts 1 and 2" = Tiers 1–2; Tier 0 is included as a prerequisite. |
@@ -24,3 +27,11 @@ Spec clarifications this plan commits to. Open decisions 1-6 from spec section 1
 | D-018 | `zendesk` in the sandbox is a local SQLite-backed MCP server, not a real API. |
 | D-019 | Golden hashes are taken over canonical JSONL (`envelope_id`, score rounded to 1e-9), not Parquet bytes (Parquet metadata varies by pyarrow version). |
 | D-020 | `velocity_burst` window `w` is uniform on [60, 300] s (the spec gives only `r`). |
+| D-021 | Per-agent operating point: the smallest α (highest thresholds) whose pooled test recall ≥ the target. The plan's "largest" would always pick the maximum α and the maximum FPR (the same slip D-007 fixed). |
+| D-022 | Velocity "normal rate" is the median of the key's historical window count (already in state, robust to learned bursts). The money-sum signal keeps the §6.4 rule so both signals share one scale. |
+| D-023 | `tail_prior` equals `cal_alpha` by definition (0.005). It is a separate field so a `cal_alpha` sweep moves thresholds only. It is not tuned. |
+| D-024 | In a BOOL-typed field magnitude learns values that `try_number` parses as finite (Python bools are not numbers) and scores only values that contradict BOOL. Novelty scores the contradiction only when magnitude has no usable reference. Pooled priors still learn NUMERIC-typed paths only. |
+| D-025 | "Far outside the normal range" = at or beyond `magnitude_far_mult` (5) × the persona's own benign p99 of the field, taken before injection; 5 × p99 is the level of the benign-labelled control. A first-pass session with no feasible candidate stays benign, consumes its attack id and is counted in the manifest. |
+| D-026 | The top-up is a second, magnitude-only pass on the stream `default_rng([seed, stable_hash("attacks:magnitude_topup")])`, one draw per eligible untouched session. On SW1 its rate equals `attack_rate` (0.015). The benchmark's magnitude gate cell must hold ≥ 50 attacks. |
+| D-027 | Among-the-reasons share: per detected attack of a gated family in its gate bucket, attributed when some **flagged** row carries a targeted-detector score `> reason_min`. `top_reason_share` is unchanged (family-wide) and is printed beside it as "original spec §9 criterion". |
+| D-028 | The Tier-1 gate is evaluated under both protocols and always shown as two labelled results. Which protocol's result closes Tier 1 is the user's open decision; no document may say "Tier-1 gate met" on the review result alone. |

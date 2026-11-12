@@ -1,11 +1,15 @@
 # 008 — Tier-1 exit gate: root causes and the fix candidates
 
-Status: **decided (Task 1.15); defaults changed by user decision (2026-11-10).** The controller's
-rulings are in the Decision section. At Task 1.15 no engine default and no benchmark-protocol
-default changed; the user later turned on the oracle-reviewer protocol and three engine switches
-(see "User decision (2026-11-10)" at the end). The Tier-1 gate is still not met. One
-label-semantics change was made to the generator: `exfil_volume` now labels the call that
-carries the response signal.
+Status: **decided (Task 1.15); defaults changed by user decision (2026-11-10); scoring, benchmark
+data and gate criterion changed by spec Amendment A1 (2026-11-11).** The last section,
+"Amendment A1 (2026-11-11)", holds the A1 results and supersedes every one-protocol gate statement
+above it. The controller's rulings are in the Decision section. At Task 1.15 no engine default and
+no benchmark-protocol default changed; the user later turned on the oracle-reviewer protocol and
+three engine switches (see "User decision (2026-11-10)"). After Amendment A1, on SW1 seeds 0, 1
+and 2, the amended criterion passes under the oracle-reviewer approval loop (labels act as a
+perfect human reviewer → optimistic) and fails under spec §5.2 allow-all. Which protocol's result
+closes Tier 1 is the user's open decision (D-028). One label-semantics change was made to the
+generator: `exfil_volume` now labels the call that carries the response signal.
 
 Evidence: `evidence/gate-seed0-seed1.md`, produced by the scripts in `evidence/008-root-causes/`
 and the `gate` suite of `agentfw.bench.sweeps`. Numbers marked *(manual inspection)* were read off
@@ -356,3 +360,230 @@ Two side effects to know about:
 
 The SW1 leaderboard, README and writeup are not rebuilt yet. They will be rebuilt once, after the
 pending engine fix in `schema_infer`, which also changes engine output.
+
+## Amendment A1 (2026-11-11)
+
+Spec: `docs/spec.md`, section "Amendment A1 (2026-11-11)" (A1.0 to A1.13). Implemented in plan
+Tasks 1.16 to 1.26. Evidence: `evidence/a1-gate/matrix.json` and `evidence/a1-gate/matrix.md`,
+written by `evidence/a1-gate/run.sh` (Task 1.23). Every gate number in this section is a cell of
+`matrix.json`. Gate cells are attack-level recall on warm test rows at live per-agent thresholds,
+`magnitude_spike` in bucket `10-100`, `slow_drift` excluded.
+
+Protocols, verbatim (spec A1.5):
+
+- spec §5.2 allow-all
+- oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)
+
+**This section supersedes the one-protocol gate statements above it.** They stay as the record of
+what was decided at the time:
+
+- Decision, GATE5: the single strict xfail with reason "Tier-1 gate not met under spec protocol".
+  `test_tier1_exit` is now parametrized by protocol. `test_tier1_exit[review]` carries no mark and
+  passes. `test_tier1_exit[allow]` is a strict xfail and the only strict xfail left in
+  `tests/acceptance/test_tier1_exit.py`; its reason names both protocols.
+- Consequences, first bullet ("The Tier-1 gate is not met under the spec protocol"; the strict
+  xfail; the README showing default-protocol numbers next to oracle-reviewer numbers). The README,
+  the writeup and `docs/leaderboard.md` now show the dual-protocol table below.
+- User decision (2026-11-10), the paragraph that starts "The Tier-1 gate is still not met". The
+  gate criterion is now the amended one (spec A1.7). `test_tier1_no_regression` pins the seed-0
+  rows of `matrix.json` under each protocol, with the same −0.1 tolerance. The SW1 leaderboard
+  (Task 1.25), the README and the writeup (Task 1.26) are rebuilt.
+
+### What was adopted, and from which design
+
+Each rule was prototyped and measured before adoption (spec A1.11). The adopted design is the
+reviewers' combined prototype tree (velocity A1.1, magnitude A1.2, far rule A1.4) with the
+rate-based top-up, the consumed attack id and A1.3 added. The prototype's other variants (`anscombe`
+and `budget` velocity modes, a negative-binomial count tail, a winsorizing fence) were not adopted
+and are not in the code.
+
+| item | spec | source | default now | before A1 (still selectable) |
+|---|---|---|---|---|
+| Velocity count signal: Poisson upper-tail deviate at the key's median window count, divided by the over-dispersion measured on the Anscombe scale | A1.1 | §3 "Open options": a raw-count (Poisson) tail score; the user's amendment of 2026-11-10 | `vel_count_stat = "poisson"` | `"logz"` |
+| Magnitude score: tail probability on a two-piece robust log scale, read as a posterior with `tail_prior = 0.005` (= `cal_alpha`, D-023) | A1.2 | §3 "Open options": a magnitude scoring change; the user's amendment | `mag_score = "tail"` | `"z"` |
+| Magnitude learns and scores numbers in BOOL-typed fields (D-024) | A1.3 | final-review ruling FR5 (not one of the user's items) | `mag_bool_numeric = True` | `False` |
+| Benchmark spikes land at or beyond 5 × the persona's benign p99 (D-025), plus a magnitude-only top-up pass (D-026) | A1.4 | §3 "Open options": a generator spike defined relative to the field's dispersion; the user's amendment | `sw1_config(seed)`: `magnitude_mode = "far"`, `magnitude_far_mult = 5.0`, `magnitude_topup_rate = 0.015`; generator defaults stay `"own"` / `0.0` | `"own"`, top-up 0 |
+| Gate evaluated and shown under both protocols (D-028) | A1.5 | the user's amendment | always both | one protocol |
+| Attribution: targeted detector among the reasons of a flagged row (D-027); the top-1 share is still printed as "original spec §9 criterion" | A1.6, A1.7 | §3 "Open options": gate on "targeted detector among the reasons"; the user's decision of 2026-11-10 on attribution | among-the-reasons share ≥ 0.90 | top-1 share ≥ 0.90 |
+
+`tail_prior`, `magnitude_far_mult` and `magnitude_topup_rate` are fixed by the spec. They were
+not swept or changed against any seed's recall, and nothing was retuned after the measurement
+below. The generator defaults did not change, so the CI, tiny, validation and decision-008
+datasets are byte-identical to before.
+
+### Tier-1 gate under both protocols, SW1 seeds 0, 1 and 2
+
+Copied from `matrix.md`. Amended engine (`EngineConfig()`), datasets `sw1_config(seed)`: seed 0
+`a455b10c705d`, seed 1 `e783c301bf21`, seed 2 `62645fcfd0b8` (traces sha). Seed 2 was generated
+and replayed only after seeds 0 and 1 were written to `matrix.json`. Cells: recall (n/N);
+among-the-reasons share; top-1 share (original spec §9 criterion, reported and not gated).
+Amended criterion (spec A1.7): per family recall ≥ 0.90 and among-the-reasons share ≥ 0.90,
+benign FPR ≤ 0.02. Each row is the result under one protocol. The two rows of a seed are read
+together, and neither alone is the Tier-1 gate result.
+
+| seed | Protocol | magnitude_spike 10-100 | scope_blowup | exfil_volume | prereq_skip | novel_target | velocity_burst | benign FPR | control FPR | amended criterion |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 1.000 (81/81); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 1.00; 0.84 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 1.000 (50/50); 1.00; 0.40 | 0.0058 | 0.035 | PASS |
+| 0 | spec §5.2 allow-all | 0.938 (76/81); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 0.579 (11/19); 1.00; 1.00 | 0.533 (8/15); 1.00; 1.00 | 0.163 (8/49); 1.00; 1.00 | 0.800 (40/50); 1.00; 0.40 | 0.0014 | 0.007 | FAIL: recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+| 1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 1.000 (85/85); 1.00; 1.00 | 1.000 (24/24); 1.00; 1.00 | 1.000 (29/29); 1.00; 0.79 | 1.000 (18/18); 1.00; 1.00 | 1.000 (36/36); 1.00; 1.00 | 0.981 (51/52); 1.00; 0.24 | 0.0062 | 0.028 | PASS |
+| 1 | spec §5.2 allow-all | 0.824 (70/85); 1.00; 0.97 | 1.000 (24/24); 1.00; 1.00 | 0.655 (19/29); 1.00; 1.00 | 0.667 (12/18); 1.00; 1.00 | 0.222 (8/36); 1.00; 1.00 | 0.808 (42/52); 1.00; 0.31 | 0.0023 | 0.013 | FAIL: recall:magnitude_spike, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+| 2 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 1.000 (85/85); 1.00; 0.99 | 1.000 (13/13); 1.00; 1.00 | 1.000 (38/38); 0.95; 0.82 | 1.000 (13/13); 1.00; 1.00 | 1.000 (38/38); 1.00; 1.00 | 1.000 (44/44); 1.00; 0.43 | 0.0050 | 0.050 | PASS |
+| 2 | spec §5.2 allow-all | 0.965 (82/85); 1.00; 0.93 | 1.000 (13/13); 1.00; 1.00 | 0.711 (27/38); 1.00; 0.96 | 0.846 (11/13); 1.00; 1.00 | 0.211 (8/38); 1.00; 1.00 | 0.682 (30/44); 1.00; 0.37 | 0.0018 | 0.031 | FAIL: recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+
+On all three seeds the amended criterion passes under the oracle-reviewer approval loop (labels
+act as a perfect human reviewer → optimistic) and fails under spec §5.2 allow-all. That is a pass
+under one protocol next to a fail under the other. Which protocol's result closes Tier 1 is the
+user's open decision (D-028; spec A1.13 item 1). The original spec §9 criterion (top-1 share
+≥ 0.90) fails under both protocols on every seed (velocity_burst 0.24 to 0.43). The Tier-2 exit is
+not reached: the live sandbox dataset v1 has not been built.
+
+### Companion rows (spec A1.5 rule 4)
+
+The `magnitude_spike` cell above is shown with its two companions: the engine before Amendment A1
+(`EngineConfig().replace(**PRE_A1_SWITCHES)`) on the same datasets, and both engines on the
+sensitivity dataset (`sw1_config(0)` with `magnitude_far_mult = 1.0`, traces `3fc612ce1fdb`;
+seed 0 only). The sensitivity rows are companion rows, not gate results.
+
+| dataset | engine | Protocol | magnitude_spike 10-100 | scope_blowup | exfil_volume | prereq_skip | novel_target | velocity_burst | benign FPR | control FPR | amended criterion |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| SW1 seed 0 (`a455b10c705d`) | pre-A1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.975 (79/81); 1.00; 0.99 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 0.89; 0.58 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 0.880 (44/50); 1.00; 0.30 | 0.0092 | 0.134 | FAIL: among:exfil_volume, recall:velocity_burst |
+| SW1 seed 0 (`a455b10c705d`) | pre-A1 | spec §5.2 allow-all | 0.753 (61/81); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 0.474 (9/19); 1.00; 1.00 | 0.667 (10/15); 1.00; 1.00 | 0.469 (23/49); 1.00; 1.00 | 0.680 (34/50); 1.00; 0.29 | 0.0025 | 0.060 | FAIL: recall:magnitude_spike, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+| SW1 seed 1 (`e783c301bf21`) | pre-A1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.988 (84/85); 1.00; 0.98 | 1.000 (24/24); 1.00; 1.00 | 0.966 (28/29); 1.00; 0.64 | 1.000 (18/18); 1.00; 1.00 | 1.000 (36/36); 1.00; 1.00 | 0.962 (50/52); 1.00; 0.22 | 0.0087 | 0.087 | PASS |
+| SW1 seed 1 (`e783c301bf21`) | pre-A1 | spec §5.2 allow-all | 0.788 (67/85); 1.00; 0.94 | 0.792 (19/24); 1.00; 1.00 | 0.586 (17/29); 1.00; 1.00 | 0.667 (12/18); 1.00; 1.00 | 0.444 (16/36); 1.00; 1.00 | 0.635 (33/52); 1.00; 0.15 | 0.0030 | 0.049 | FAIL: recall:magnitude_spike, recall:scope_blowup, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+| SW1 seed 2 (`62645fcfd0b8`) | pre-A1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.953 (81/85); 1.00; 0.98 | 1.000 (13/13); 1.00; 1.00 | 0.895 (34/38); 0.88; 0.65 | 1.000 (13/13); 1.00; 1.00 | 1.000 (38/38); 1.00; 1.00 | 0.864 (38/44); 1.00; 0.29 | 0.0089 | 0.108 | FAIL: recall:exfil_volume, among:exfil_volume, recall:velocity_burst |
+| SW1 seed 2 (`62645fcfd0b8`) | pre-A1 | spec §5.2 allow-all | 0.800 (68/85); 1.00; 0.97 | 0.615 (8/13); 1.00; 1.00 | 0.500 (19/38); 0.95; 0.95 | 0.846 (11/13); 1.00; 1.00 | 0.474 (18/38); 1.00; 1.00 | 0.591 (26/44); 1.00; 0.27 | 0.0025 | 0.062 | FAIL: recall:magnitude_spike, recall:scope_blowup, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+| sensitivity seed 0 (`3fc612ce1fdb`) | amended (A1) | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.797 (51/64); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 1.00; 0.84 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 1.000 (50/50); 1.00; 0.40 | 0.0060 | 0.035 | companion row (spec A1.5 rule 4), not a gate result |
+| sensitivity seed 0 (`3fc612ce1fdb`) | amended (A1) | spec §5.2 allow-all | 0.656 (42/64); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 0.632 (12/19); 1.00; 1.00 | 0.533 (8/15); 1.00; 1.00 | 0.163 (8/49); 1.00; 1.00 | 0.800 (40/50); 1.00; 0.38 | 0.0014 | 0.012 | companion row (spec A1.5 rule 4), not a gate result |
+| sensitivity seed 0 (`3fc612ce1fdb`) | pre-A1 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.688 (44/64); 1.00; 0.96 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 0.84; 0.58 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 0.880 (44/50); 1.00; 0.30 | 0.0090 | 0.134 | companion row (spec A1.5 rule 4), not a gate result |
+| sensitivity seed 0 (`3fc612ce1fdb`) | pre-A1 | spec §5.2 allow-all | 0.578 (37/64); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 0.474 (9/19); 1.00; 1.00 | 0.667 (10/15); 1.00; 1.00 | 0.469 (23/49); 1.00; 1.00 | 0.680 (34/50); 1.00; 0.26 | 0.0024 | 0.062 | companion row (spec A1.5 rule 4), not a gate result |
+
+What the companion rows show:
+
+- **On seed 1 the pre-A1 engine also passes the amended criterion under the oracle-reviewer
+  approval loop (labels act as a perfect human reviewer → optimistic).** On that seed the corrected
+  data and the among-the-reasons criterion are enough; the scoring change is not needed. Under
+  spec §5.2 allow-all the pre-A1 engine fails on seed 1 in six families.
+- On seeds 0 and 2 the pre-A1 engine fails under the oracle-reviewer loop: seed 0 on
+  velocity_burst 0.880 (44/50) and the exfil_volume among-the-reasons share 0.89; seed 2 on
+  exfil_volume 0.895 (34/38), its share 0.88, and velocity_burst 0.864 (38/44). These are the
+  cells the scoring change closes.
+- The pre-A1 engine already catches most far spikes under the oracle-reviewer loop
+  (0.975 (79/81), 0.988 (84/85), 0.953 (81/85)). The magnitude cell under that protocol is decided
+  by the generator correction more than by the scoring change (spec A1.12 item 4).
+- On the sensitivity dataset neither engine reaches 0.90 in the magnitude cell under either
+  protocol (amended 0.797 (51/64) and 0.656 (42/64); pre-A1 0.688 (44/64) and 0.578 (37/64)).
+- The control FPR drop under the oracle-reviewer loop (pre-A1 0.134 / 0.087 / 0.108, amended
+  0.035 / 0.028 / 0.050 on seeds 0 / 1 / 2) comes from the velocity change: flat keys no longer
+  over-score windows of 3 to 6 calls (spec A1.11).
+
+### Old → new record
+
+| item | before Amendment A1 | after Amendment A1 |
+|---|---|---|
+| SW1 seed 0 dataset (traces sha) | `e7b3bc2a2f20` (labels `bd94a3197d82`); this legacy dataset is still what the default generator config produces | `a455b10c705d` (`sw1_config(0)`) |
+| SW1 seed 0 sessions / envelopes | 42,289 / 174,878 | 42,289 / 174,878 (a spike changes an existing call) |
+| SW1 seed 0 attacks | 599 | 808 |
+| SW1 seed 1 attacks | 611 | 813 |
+| SW1 seed 0 magnitude spikes | 55 (spec A1.11) | 264: 53 first pass, 2 dropped, 211 top-up |
+| median spike strength, seed 0 | about 14 (spec A1.4) | 48.3 |
+| `magnitude_spike` gate cell (warm test, bucket 10-100), seeds 0 / 1 | 13 / 8 | 81 / 85 (seed 2: 85) |
+| engine golden `tests/golden/engine.sha256` | `f6573c610106` | `2223582ecd50` (Task 1.21) |
+| golden `engine-spec-allow` (spec engine, allow-all) | `c4042bc466f2` | `c4042bc466f2`, unchanged by rule |
+| golden `static_threshold` | `dc9f6b5927c9` | `dc9f6b5927c9`, unchanged |
+| CI baseline (`agentfw/bench/baseline_metrics.json`) | engine AUPRC 0.5000, FPR@95 0.008403 | unchanged: the CI dataset is byte-identical and `ci_regress --write-baseline` gave the same numbers |
+| engine defaults `vel_count_stat` / `mag_score` / `mag_bool_numeric` | `"logz"` / `"z"` / `False` | `"poisson"` / `"tail"` / `True` |
+| gate criterion | recall ≥ 0.90, top-1 share ≥ 0.90, benign FPR ≤ 2 % | recall ≥ 0.90, among-the-reasons share ≥ 0.90, benign FPR ≤ 2 %; top-1 share printed as "original spec §9 criterion" |
+| acceptance test | `test_tier1_exit`, one strict xfail | `test_tier1_exit[review]` passes; `test_tier1_exit[allow]` is a strict xfail |
+
+AUPRC and other dataset-wide numbers are not compared between the old and the new SW1: the attack
+mix changed, and magnitude spikes are now about a third of the attacks (spec A1.5 rule 5).
+
+### Dataset census
+
+From `matrix.md`. Spikes are counted over the whole dataset; the gate cell is the warm test rows in
+bucket 10-100.
+
+| dataset | traces sha | envelopes | attacks | spikes: first pass / dropped / top-up | spikes with strength ≥ 10 | share with strength ≥ 10 | median strength | gate cell n | gate cell by persona |
+|---|---|---|---|---|---|---|---|---|---|
+| SW1 seed 0 | `a455b10c705d` | 174,878 | 808 | 53 / 2 / 211 | 256 | 0.970 | 48.3 | 81 | support-refunds-c 22, lead-router-a 17, support-refunds-a 11, sales-ops-a 8, support-refunds-b 8, billing-disputes-a 4, sales-ops-b 4, crm-hygiene-a 3, exec-assistant-a 2, payouts-ops-a 1, renewals-a 1 |
+| SW1 seed 1 | `e783c301bf21` | 172,805 | 813 | 49 / 1 / 203 | 249 | 0.988 | 50.5 | 85 | lead-router-a 23, support-refunds-c 15, sales-ops-a 9, sales-ops-b 9, crm-hygiene-a 8, support-refunds-a 8, payouts-ops-a 5, support-refunds-b 4, exec-assistant-a 2, billing-disputes-a 1, renewals-a 1 |
+| SW1 seed 2 | `62645fcfd0b8` | 175,890 | 810 | 39 / 2 / 223 | 257 | 0.981 | 51.5 | 85 | support-refunds-c 20, support-refunds-a 16, lead-router-a 10, sales-ops-a 9, support-refunds-b 9, sales-ops-b 8, payouts-ops-a 4, billing-disputes-a 3, crm-hygiene-a 3, renewals-a 3 |
+| sensitivity, seed 0 (`magnitude_far_mult = 1.0`) | `3fc612ce1fdb` | | | | | | | 64 | |
+
+`Label.strength` keeps its meaning: the realized multiplier of the call's own value, in [3, 100].
+The gate bucket is still multiplier 10 to 100 (D-009). Because spikes now land far outside the
+benign range, 97 to 99 % of them have strength ≥ 10, so the 3-10 bucket is nearly empty.
+
+### What is still not met
+
+Spec A1.12, with the numbers measured on the implementation (`matrix.json`, `matrix.md`).
+
+1. **The amended criterion fails under spec §5.2 allow-all on seeds 0, 1 and 2.** Seed 0:
+   exfil_volume 0.579 (11/19), prereq_skip 0.533 (8/15), novel_target 0.163 (8/49),
+   velocity_burst 0.800 (40/50). Seed 1: those four (0.655 (19/29), 0.667 (12/18), 0.222 (8/36),
+   0.808 (42/52)) and magnitude_spike 0.824 (70/85). Seed 2: exfil_volume 0.711 (27/38),
+   prereq_skip 0.846 (11/13), novel_target 0.211 (8/38), velocity_burst 0.682 (30/44). This is
+   cause (a) of this decision, and no scoring change in Amendment A1 addresses it: every attack row
+   is learned. In the seed-0 leaderboard runs the median live threshold over the warm test rows is
+   ≥ 0.999 on 18 of 20 agents under spec §5.2 allow-all and on 2 of 20 under the oracle-reviewer
+   approval loop (labels act as a perfect human reviewer → optimistic), where every gated family
+   passes on every seed. That loop is called "the oracle-reviewer loop" below.
+2. **Under spec §5.2 allow-all, recall gets worse for novel_target** on the same data: pre-A1 →
+   amended 0.469 (23/49) → 0.163 (8/49) on seed 0, 0.444 (16/36) → 0.222 (8/36) on seed 1,
+   0.474 (18/38) → 0.211 (8/38) on seed 2. prereq_skip on seed 0 goes 0.667 (10/15) → 0.533 (8/15).
+   The mechanism (spec A1.12 item 2): bursts now score near 1 and are learned, so the thresholds of
+   helpdesk-triage-b and slack-notifier-a saturate. The old number existed because the old velocity
+   score failed on those agents. It must not be "fixed" by capping velocity or magnitude scores.
+3. **The original spec §9 criterion (top-1 share ≥ 0.90) is not met under either protocol.** Under
+   the oracle-reviewer loop: velocity_burst 0.40 / 0.24 / 0.43, exfil_volume 0.84 / 0.79 / 0.82,
+   scope_blowup 0.85 on seed 0. On a duplicated write, sequence reaches 1.0 on the third or fourth
+   duplicate, before velocity can. The gate no longer requires top-1; it stays reported.
+4. **Under the oracle-reviewer loop the magnitude cell is decided mostly by the generator
+   correction**, and on seed 1 the pre-A1 engine passes the amended criterion (companion rows above).
+5. **On the sensitivity dataset the amended engine does not reach 0.90:** 0.797 (51/64) under the
+   oracle-reviewer loop, 0.656 (42/64) under spec §5.2 allow-all (pre-A1 0.688 (44/64) /
+   0.578 (37/64)). Spec A1.12 counted 12 of the prototype's 64 gated spikes at or below the field's
+   largest benign value; that count was not repeated on the implementation's sensitivity dataset.
+6. **One velocity burst is still missed under the oracle-reviewer loop on seed 1:** 0.981 (51/52).
+7. **Control FPR under the oracle-reviewer loop is 3.52 % / 2.78 % / 5.01 %** on seeds 0 / 1 / 2.
+   Seed 2 is above the 5 % Tier-3 bound that spec A1.12 item 7 states for seeds 0 and 1. Nothing was
+   retuned (ruling A1-22).
+8. **Known over-scoring cases of the magnitude tail score** (spec A1.12 item 8, measured on the
+   prototype and not re-measured): power-law tails; small integer fields with tied markers; a field
+   that never varied (any change of about 14 % scores 0.5); `q95`'s 5 % breakdown point under
+   allow-all.
+9. **Velocity's over-dispersion correction is weak** (`disp` 1.0 to 1.15 on keys whose
+   variance-to-mean ratio is above 2). The share of benign velocity scores ≥ 0.5 under the
+   oracle-reviewer loop is 0.76 % / 1.22 % / 0.92 % on seeds 0 / 1 / 2 (pre-A1 1.11 % / 1.42 % /
+   1.27 %), above the 0.5 % prior. The per-agent shares are now recorded in `matrix.md` with no
+   threshold; the highest is payouts-ops-a at 3.53 % (seed 2).
+10. **Not measured:** `Engine.score` latency p99 on an idle machine (`latency_p99_us` is null in
+    `matrix.json`; three runs under load stayed below the 200 µs budget and are not pinned); seed 1
+    and seed 2 on the sensitivity dataset; Go parity of `erfc` and the cube root; the cause of the
+    sensitivity and allow-all magnitude drop against the prototype's fixed-count data; the 90-day
+    seed-0 ablation evidence of decision 007, which was measured on the pre-A1 engine (decision
+    007's dated addendum records only the `tiny_dataset` re-measurement).
+11. **A BOOL-typed field in magnitude cold start** still gets only novelty's ramped fallback score.
+12. **The magnitude gate cell is concentrated.** Seed 0: 81 attacks on 11 of 20 personas;
+    support-refunds-c holds 22 (27 %) and the three refund personas 41 (51 %). Seed 1: 85 on 11
+    personas; lead-router-a holds 23 (27 %). Seed 2: 85 on 10 personas; support-refunds-c holds 20
+    (24 %) and the three refund personas 45 (53 %). A per-persona failure moves the cell by up to
+    27 points.
+13. **The user's item 2 is not met literally at ×10 on the widest SW1 field.** "10 to 100 times the
+    usual value scores close to 1" holds at ×100 on every SW1 field, and at ×10 only on narrow
+    fields (log-sd up to about 0.6). At ×10 on sales-ops-a `amount` (log-sd 0.86) the score is
+    0.575 (spec A1.2).
+
+### Decisions left to the user
+
+Spec A1.13, copied verbatim:
+
+This amendment takes a default on each point below. Each is the user's decision; the default stands until the user changes it.
+
+1. **Which protocol's result closes Tier 1.** Default: left open; both results are always shown (A1.5) and a pass under the oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) alone is not described as the Tier-1 gate being met.
+2. **"Far" = 5 × the persona's benign p99.** Default: `magnitude_far_mult = 5.0` (A1.4).
+3. **The top-up rate 0.015 and the 50-attack minimum as a dataset-validity assertion.** Default: `magnitude_topup_rate = 0.015` on SW1; a dataset with fewer than 50 attacks in the gate cell fails the acceptance test (A1.4, A1.7).
+4. **The acceptance file goes green on its `review` parameter (oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)), with its `allow` parameter (spec §5.2 allow-all) as a strict xfail.** Default: yes (plan Task 1.24).
+5. **×10 on the widest SW1 field scores 0.575.** Default: accepted (A1.2, A1.12 item 13).
+6. **A1.3 lowers an existing score.** After `[0, 1]·40` a `2` scored 1.0 by novelty (FR2 N1) and now scores 0.048; a `5` scores 0.335. Default: accepted (`mag_bool_numeric = True`).
+7. **The new defaults leave each agent's calibrator holding old-formula scores after an upgrade (A1.8).** Default: the calibrator records are kept and the thresholds adapt over time; they are not reset.
