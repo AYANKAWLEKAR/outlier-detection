@@ -374,4 +374,4 @@ def test_replay_fills_flags_and_density_and_round_trips(tmp_path: Path) -> None:
 
 def test_score_row_defaults() -> None:
     names = [f.name for f in dataclasses.fields(ScoreRow)]
-    assert names[-2:] == ["flags", "density"]
+    assert names[-3:] == ["flags", "density", "session_label"]

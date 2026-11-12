@@ -52,6 +52,15 @@ read tools whose id args are ids the session has already seen and whose catalog 
 item count exactly when the picked read's does, each with that read's ``response_meta`` (its ids
 were seen, its ``fp``), so the run creates no new artifact and no tool gets a foreign shape.
 
+Splice (Task 2.4, F10; T-10, T-40): ``splice`` lives in ``SPLICE_ATTACKS`` (opt-in like the
+runaway families, outside SW1's list) and is a real attack, reported separately: per-call
+headline metrics and their thresholds leave it out and ``metrics.splice_report`` scores it.
+It copies a ``SPLICE_LEN``-call window of a donor session (``AttackContext.donors``: benign sessions
+of other personas sharing at least ``SPLICE_SHARED_MIN`` tools, ``donor_sessions``) whose tools are
+all this persona's, and inserts it between two calls of the session at evenly spaced timestamps.
+The copies take this session's identity, fresh envelope ids and no ``task_ids``; their id args are
+rebound to this session's ids (``_rebind``), and only the copies are labelled.
+
 R10 (T-29): an attack that rewrites a response keeps ``response_meta.fp`` consistent with it.
 ``exfil_volume``'s inflated read drops its ``fp`` (the payload text it was computed from is not
 available and no longer matches the item count) and its appended write fingerprints the same blob
@@ -103,11 +112,17 @@ __all__ = [
     "RUN_MIN",
     "SCOPE_MAX",
     "SCOPE_MIN",
+    "SPLICE_ATTACKS",
+    "SPLICE_DONORS_MAX",
+    "SPLICE_FAMILIES",
+    "SPLICE_LEN",
+    "SPLICE_SHARED_MIN",
     "V_MAX",
     "V_MIN",
     "applicable",
     "blow_up_list",
     "burst_duplicates",
+    "donor_sessions",
     "eligible",
     "fabricate_id",
     "far_bounds",
@@ -132,6 +147,9 @@ _MONEY_COUNT_NAMES = frozenset({"amount", "count", "qty", "total"})
 _RAND_ALPHABET = np.array(list("abcdefghijklmnopqrstuvwxyz0123456789"))
 RUN_MIN, RUN_MAX = 5, 60  # runaway repeats r, log-uniform (F2)
 RUN_GAP_MIN_MS, RUN_GAP_MAX_MS = 500, 3000
+SPLICE_LEN = 3  # calls per transplanted window (F10)
+SPLICE_SHARED_MIN = 3  # tools a donor persona shares with this one
+SPLICE_DONORS_MAX = 50  # donor sessions per persona, earliest first
 
 
 @dataclass(slots=True)
@@ -145,6 +163,9 @@ class AttackContext:
     # ``magnitude_mode="far"`` (A1.4): ``(tool, arg) -> far bound`` of this persona's money/count
     # write fields (``far_bounds``); ``None`` = the spec 4.6 construction (mode "own").
     far: Mapping[tuple[str, str], float] | None = None
+    # ``splice`` (Task 2.4): ``(donor agent, benign session)`` pairs, ``donor_sessions``; empty
+    # unless the factory supplies them (``generate`` does only when ``splice`` is enabled).
+    donors: Sequence[tuple[str, list[RawCall]]] = ()
 
 
 @dataclass(slots=True)
@@ -367,6 +388,9 @@ _ELIGIBLE: dict[str, Callable[[Persona, Catalog], bool]] = {
         for a in catalog[t].args.values()
     ),
     "stall": lambda persona, catalog: bool(_reads(persona, catalog)),
+    "splice": lambda persona, catalog: (
+        len({t for t in persona.tools if t in catalog}) >= SPLICE_SHARED_MIN
+    ),
 }
 
 
@@ -1029,6 +1053,117 @@ def stall(
     return _insert_run(session, i, run, rng, ctx, "stall")
 
 
+# --- splice (Task 2.4, F10; opt-in, T-10, T-40) --------------------------------------------------
+# Draw order (attack RNG only): the window, the insertion point, one draw per donor id rebound
+# (in window order, args before the next call), then two ULID draws per copy.
+
+
+def donor_sessions(
+    agent: str,
+    personas: Mapping[str, Persona],
+    sessions_by_persona: Mapping[str, Sequence[list[RawCall]]],
+) -> list[tuple[str, list[RawCall]]]:
+    """``(donor agent, session)`` for the sessions of every OTHER persona sharing at least
+    ``SPLICE_SHARED_MIN`` tools with ``agent``, earliest first (first call's ``(ts, session_id)``),
+    at most ``SPLICE_DONORS_MAX``. Pure; draws nothing."""
+    tools = set(personas[agent].tools)
+    donors = [
+        (other, s)
+        for other in sorted(sessions_by_persona)
+        if other != agent and len(tools & set(personas[other].tools)) >= SPLICE_SHARED_MIN
+        for s in sessions_by_persona[other]
+        if s
+    ]
+    donors.sort(key=lambda d: (d[1][0].ts_unix_ms, d[1][0].session_id))
+    return donors[:SPLICE_DONORS_MAX]
+
+
+def _splice_cands(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, int]]:
+    """``(donor index, window start)`` of every ``SPLICE_LEN``-call donor window whose tools are
+    all this persona's; none when the session has no gap between two calls to insert into."""
+    if len(session) < 2:
+        return []
+    tools = set(ctx.persona.tools)
+    return [
+        (d, k)
+        for d, (_, s) in enumerate(ctx.donors)
+        for k in range(len(s) - SPLICE_LEN + 1)
+        if all(c.tool_id in tools for c in s[k : k + SPLICE_LEN])
+    ]
+
+
+def _rebind(
+    window: Sequence[RawCall], seen: list[str], rng: np.random.Generator, ctx: AttackContext
+) -> list[RawCall]:
+    """``window`` with its id args rebound to this session's ids (T-40). A donor id already
+    rebound keeps its new value; else an id an earlier window call's response produced keeps its
+    in-window producer; any other donor id maps, once per window, to a uniform draw from the
+    session's ids seen before the insertion point with the arg's prefix, else from this persona's
+    pool with that prefix, else stays. A response that echoed a rebound id echoes its new value
+    and drops its stale ``fp`` (as T-29)."""
+    pools = {p.prefix: p for _, p in sorted(ctx.pools.items())}
+    mapping: dict[str, str] = {}
+    produced: set[str] = set()
+
+    def bind(v: str, prefix: str | None) -> str:
+        if v in produced and v not in mapping:
+            return v
+        if v not in mapping:
+            ids = _of_prefix(seen, prefix)
+            if not ids and prefix in pools:
+                ids = list(pools[prefix].ids)
+            mapping[v] = ids[int(rng.integers(len(ids)))] if ids else v
+        return mapping[v]
+
+    out: list[RawCall] = []
+    for c in window:
+        args: dict[str, Any] = copy.deepcopy(c.args)
+        for n, a in _id_args(c.tool_id, ctx.catalog):
+            v = args.get(n)
+            if isinstance(v, str):
+                args[n] = bind(v, a.prefix)
+            elif isinstance(v, list):
+                args[n] = [bind(x, a.prefix) if isinstance(x, str) else x for x in v]
+        rm = c.response_meta
+        if rm is not None and any(x in mapping and mapping[x] != x for x in rm.ids):
+            ids = tuple(mapping.get(x, x) for x in rm.ids)
+            rm = rm.model_copy(update={"ids": ids, "fp": None})
+        out.append(c.model_copy(update={"args": args, "response_meta": rm}))
+        produced.update(c.response_meta.ids if c.response_meta else ())
+    return out
+
+
+def splice(
+    session: list[RawCall], rng: np.random.Generator, ctx: AttackContext
+) -> AttackResult | None:
+    """A donor window (uniform over ``_splice_cands``) inserted before call ``j``, ``j`` uniform
+    on ``[1, len(session) - 1]``, at timestamps evenly between calls ``j - 1`` and ``j``; the
+    copies carry this session's identity and ids, fresh envelope ids and no ``task_ids``."""
+    cands = _splice_cands(session, ctx)
+    if not cands:
+        return None
+    d, k = cands[int(rng.integers(len(cands)))]
+    j = int(rng.integers(1, len(session)))
+    window = _rebind(ctx.donors[d][1][k : k + SPLICE_LEN], _seen_ids(session, j), rng, ctx)
+    host = session[0]
+    left, right = session[j - 1].ts_unix_ms, session[j].ts_unix_ms
+    copies = [
+        _copy_at(c, left + (right - left) * m // (SPLICE_LEN + 1), rng).model_copy(
+            update={
+                "session_id": host.session_id,
+                "agent_id": host.agent_id,
+                "principal_id": host.principal_id,
+            }
+        )
+        for m, c in enumerate(window, start=1)
+    ]
+    out = _renumber([*session[:j], *copies, *session[j:]])
+    return AttackResult(out, [_label(ctx, "splice", c.envelope_id) for c in copies])
+
+
+SPLICE_ATTACKS: dict[str, AttackFn] = {"splice": splice}
+SPLICE_FAMILIES: frozenset[str] = frozenset(SPLICE_ATTACKS)
+
 RUNAWAY_ATTACKS: dict[str, AttackFn] = {"loop": loop, "spin": spin, "stall": stall}
 RUNAWAY_FAMILIES: frozenset[str] = frozenset(RUNAWAY_ATTACKS)
 
@@ -1055,6 +1190,7 @@ _CANDS: dict[str, Callable[[list[RawCall], AttackContext], Sequence[object]]] = 
     "loop": _loop_cands,
     "spin": _spin_cands,
     "stall": _stall_cands,
+    "splice": _splice_cands,
 }
 
 
@@ -1082,11 +1218,12 @@ def inject(
     knows the catalog, personas and pools). Personas are visited in sorted ``agent_id`` order and
     sessions in time order; only ``rng`` (the attack stream) is ever drawn from. The family is
     uniform over the families applicable to THAT session (persona-eligible and with something to
-    mutate); a session where none applies stays benign. Families resolve in ``ATTACKS`` and
-    ``RUNAWAY_ATTACKS``; one not listed in ``cfg.families`` is never considered, so registering a
-    family changes no draw of a config that does not list it. ``benign_unusual`` is never chosen as
-    an attack: its draw is independent of attack selection (a session is a control candidate only
-    if it was not attacked), and with it disabled no control draw is made (streams are unchanged).
+    mutate); a session where none applies stays benign. Families resolve in ``ATTACKS``,
+    ``RUNAWAY_ATTACKS`` and ``SPLICE_ATTACKS``; one not listed in ``cfg.families`` is never
+    considered, so registering a family changes no draw of a config that does not list it.
+    ``benign_unusual`` is never chosen as an attack: its draw is independent of attack selection
+    (a session is a control candidate only if it was not attacked), and with it disabled no
+    control draw is made (streams are unchanged).
 
     ``cfg.magnitude_mode == "far"`` (A1.4) with ``magnitude_spike`` enabled: each persona's far
     bounds are computed once, from its untouched sessions (one extra ``ctx_factory`` call per
@@ -1114,7 +1251,7 @@ def inject(
     if cfg.magnitude_topup_rate > 0 and topup_rng is None:
         raise ValueError("magnitude_topup_rate > 0 needs its own RNG stream: pass topup_rng")
     families = list(dict.fromkeys(cfg.families))
-    registry = {**ATTACKS, **RUNAWAY_ATTACKS}  # read per call: tests monkeypatch ATTACKS
+    registry = {**ATTACKS, **RUNAWAY_ATTACKS, **SPLICE_ATTACKS}  # per call: tests monkeypatch
     unknown = sorted(set(families) - set(registry))
     if unknown:
         raise ValueError(f"unknown attack family: {unknown}")

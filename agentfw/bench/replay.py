@@ -126,6 +126,9 @@ class ScoreRow:
     # ``TrajectoryInfo``); "" / None when unscored or the detector has no trajectory.
     flags: str = ""
     density: float | None = None
+    # The session's label (``session_metrics.session_labels``: benign / runaway / attacked),
+    # filled by ``replay`` once every row is built (Task 2.4).
+    session_label: str | None = None
 
 
 def _order(r: RawCall) -> tuple[int, str, int]:
@@ -273,6 +276,12 @@ def replay(
         detector.update(env, outcome)
         tracker.observe(env)
         obs[key] += 1
+    # Local import: session_metrics reads ScoreRow from this module (an import cycle at load time).
+    from agentfw.bench.session_metrics import session_labels
+
+    by_session = session_labels(rows)
+    for row in rows:
+        row.session_label = by_session[row.session_id]
     return rows
 
 

@@ -7,6 +7,9 @@ Conventions shared by every function:
 * Rows whose ``fused_score`` is NaN (not sampled by the detector) are excluded from every metric.
 * Rows of the runaway families (``RUNAWAY_FAMILIES``: loop, spin, stall; T-10) are excluded from
   every metric here, neither positive nor negative; ``bench.session_metrics`` scores them.
+  ``splice`` rows (``SPLICE_FAMILIES``; T-10, T-40) are excluded the same way, so headline
+  metrics and every fitted threshold are splice-free; :func:`splice_report` scores splice recall
+  at those same thresholds. :func:`is_reported_separately` is the shared predicate.
   The array-level functions (:func:`auprc`, :func:`fpr_at_recall`) drop NaN scores the same way.
 * A row is **flagged** when ``fused_score >= threshold``. :data:`Thresholds` is one of
 
@@ -33,7 +36,7 @@ import orjson
 from numpy.typing import NDArray
 
 from agentfw.bench.replay import ScoreRow
-from agentfw.synth.attacks import RUNAWAY_FAMILIES
+from agentfw.synth.attacks import RUNAWAY_FAMILIES, SPLICE_FAMILIES
 
 __all__ = [
     "BOOTSTRAP_N",
@@ -53,6 +56,7 @@ __all__ = [
     "Metrics",
     "PerAgentResult",
     "RecallCell",
+    "SpliceReport",
     "Thresholds",
     "among_reasons_share",
     "auprc",
@@ -67,11 +71,13 @@ __all__ = [
     "drift_delay",
     "fpr_at_recall",
     "gate_preview",
+    "is_reported_separately",
     "is_runaway",
     "latency_summary",
     "per_agent_fpr_at_recall",
     "precision_at",
     "recall_by_family",
+    "splice_report",
     "top_reason_share",
 ]
 
@@ -229,8 +235,18 @@ def is_runaway(attack_family: str | None) -> bool:
     return attack_family in RUNAWAY_FAMILIES
 
 
+def is_reported_separately(attack_family: str | None) -> bool:
+    """True for a runaway family or ``splice`` (T-10, T-40): out of every metric and threshold
+    here; runaway families are scored by ``session_metrics``, splice by :func:`splice_report`."""
+    return is_runaway(attack_family) or attack_family in SPLICE_FAMILIES
+
+
 def _valid(rows: Sequence[ScoreRow]) -> list[ScoreRow]:
-    return [r for r in rows if not math.isnan(r.fused_score) and not is_runaway(r.attack_family)]
+    return [
+        r
+        for r in rows
+        if not math.isnan(r.fused_score) and not is_reported_separately(r.attack_family)
+    ]
 
 
 def calibration_rows(rows: Sequence[ScoreRow]) -> list[ScoreRow]:
@@ -764,6 +780,12 @@ def _per_agent_fpr(rows: Sequence[ScoreRow]) -> float:
     return per_agent_fpr_at_recall(rows).fpr
 
 
+def _pool(rows: Sequence[ScoreRow], warm_only: bool) -> list[ScoreRow]:
+    """``compute_all``'s population: valid (splice-free, runaway-free), not calibration, and warm
+    when ``warm_only``; thresholds are fitted on its train part and judged on its test part."""
+    return [r for r in _valid(rows) if r.split != "calibration" and (r.is_warm or not warm_only)]
+
+
 def compute_all(
     rows: Sequence[ScoreRow],
     *,
@@ -786,7 +808,7 @@ def compute_all(
     automatically. When the per-agent target is unreachable, ``fpr95_per_agent`` and its CI are
     NaN and ``per_agent_recall`` reports the best achievable recall.
     """
-    pool = [r for r in _valid(rows) if r.split != "calibration" and (r.is_warm or not warm_only)]
+    pool = _pool(rows, warm_only)
     test = [r for r in pool if r.split == "test"]
     s, y = _xy(test)
 
@@ -829,4 +851,52 @@ def compute_all(
         fpr95_per_agent_ci_n_dropped=pa_ci.n_dropped,
         precision_global=precision_at(recall_g, fpr_g, base_rate),
         attack_base_rate=base_rate,
+    )
+
+
+# --- splice, reported separately (T-10, T-40) ---------------------------------------------------
+
+
+@dataclass(slots=True, frozen=True)
+class SpliceReport:
+    attack: RecallCell  # an attack_id is detected when any of its test rows is flagged
+    envelope: RecallCell
+    breakdown_mode: BreakdownMode
+
+
+def splice_report(
+    rows: Sequence[ScoreRow],
+    *,
+    warm_only: bool,
+    breakdown_thresholds: BreakdownMode = "per_agent",
+) -> SpliceReport:
+    """Splice recall on the **test** split at the thresholds :func:`compute_all` uses for its
+    breakdowns with the same arguments: the per-agent thresholds fitted on the splice-free pool
+    (``"per_agent"``) or each row's live threshold (``"row"``). Splice rows never move those
+    thresholds; this only scores the splice rows (NaN-score, calibration and, with ``warm_only``,
+    cold rows dropped as there) against them."""
+    thresholds: Thresholds = (
+        "row"
+        if breakdown_thresholds == "row"
+        else per_agent_fpr_at_recall(_pool(rows, warm_only), RECALL_TARGET).thresholds
+    )
+    spliced = [
+        r
+        for r in rows
+        if _is_attack(r)
+        and r.attack_family in SPLICE_FAMILIES
+        and r.split == "test"
+        and not math.isnan(r.fused_score)
+        and (r.is_warm or not warm_only)
+    ]
+    hits = [_flag(r, thresholds) for r in spliced]
+    attacks: dict[str, bool] = {}
+    for r, hit in zip(spliced, hits, strict=True):
+        key = r.attack_id or r.envelope_id
+        attacks[key] = attacks.get(key, False) or hit
+    n_atk, n_env = sum(attacks.values()), sum(hits)
+    return SpliceReport(
+        attack=RecallCell(_rate(n_atk, len(attacks)), n_atk, len(attacks)),
+        envelope=RecallCell(_rate(n_env, len(hits)), n_env, len(hits)),
+        breakdown_mode=breakdown_thresholds,
     )

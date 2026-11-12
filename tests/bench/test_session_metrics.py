@@ -12,15 +12,25 @@ import pytest
 
 from agentfw.bench.ci_regress import CI_DATASET
 from agentfw.bench.dataset import load_dir
-from agentfw.bench.metrics import compute_all
+from agentfw.bench.metrics import compute_all, per_agent_fpr_at_recall, splice_report
 from agentfw.bench.registry import make_detector
-from agentfw.bench.replay import ScoreRow, SplitSpec, replay
+from agentfw.bench.replay import (
+    ScoreRow,
+    SplitSpec,
+    read_score_table,
+    replay,
+    write_score_table,
+)
 from agentfw.bench.session_metrics import (
     decision_benign_fpr,
     decision_control_fpr,
     decision_flagged,
     decision_recall_by_family,
+    length_matched,
+    matched_pairs,
+    session_auroc,
     session_labels,
+    session_scores,
     vital_false_flag_rate,
 )
 from agentfw.synth.attacks import RUNAWAY_FAMILIES
@@ -112,11 +122,16 @@ def test_vital_false_flag_rate_counts_benign_sessions_with_a_full_vital_score() 
     assert math.isnan(vital_false_flag_rate([]))
 
 
-def _replayed(tmp_path: Path, families: list[str], attack_rate: float = 0.15) -> list[ScoreRow]:
+def _replayed(
+    tmp_path: Path,
+    families: list[str],
+    attack_rate: float = 0.15,
+    split: SplitSpec = SplitSpec(),  # noqa: B008 - frozen
+) -> list[ScoreRow]:
     cfg = CI_DATASET.model_copy(update={"families": families, "attack_rate": attack_rate})
     generate(cfg, tmp_path)
     raws, labels, _ = load_dir(tmp_path)
-    return replay(raws, labels, make_detector("engine-vital"), SplitSpec())
+    return replay(raws, labels, make_detector("engine-vital"), split)
 
 
 def test_runaway_rows_excluded_from_per_call_metrics(tmp_path: Path) -> None:
@@ -217,3 +232,133 @@ def test_decision_recall_family_comes_from_the_first_row() -> None:
 
     rows = [atk("b_fam", "block", 9), atk("a_fam", "allow", 1)]
     assert decision_recall_by_family(rows) == {"a_fam": 1.0}
+
+
+# -- Task 2.4: session scores, AUROC, length-matched set, the session label column -------------
+
+
+def test_session_auroc_on_handmade_rows() -> None:
+    rows = [
+        # attacked sessions: max fused 0.9 and 0.4 (an unscored NaN row is ignored)
+        _row("a1", fused_score=0.2),
+        _atk("a1", "magnitude_spike", fused_score=0.9),
+        _atk("a2", "splice", fused_score=0.4),
+        _row("a2", fused_score=math.nan),
+        # a runaway session is a positive too (T-10: scored by session metrics)
+        _atk("r1", "loop", fused_score=0.7),
+        # benign sessions: 0.5, 0.1, 0.4 (a tie with a2), and one never scored (dropped)
+        _row("b1", fused_score=0.5),
+        _row("b1", fused_score=0.3),
+        _row("b2", fused_score=0.1),
+        _row("b3", fused_score=0.4, control_type="benign_unusual"),
+        _row("b4", fused_score=math.nan),
+    ]
+    scores = session_scores(rows)
+    assert {k: v for k, v in scores.items() if k != "b4"} == {
+        "a1": 0.9, "a2": 0.4, "r1": 0.7, "b1": 0.5, "b2": 0.1, "b3": 0.4,
+    }  # fmt: skip
+    assert math.isnan(scores["b4"])
+    # default: attacked only (r1 is dropped, not a negative). Positives 0.9, 0.4; negatives 0.5,
+    # 0.4, 0.1: 0.9 beats all 3; 0.4 beats 0.1, ties 0.4 (1/2), loses to 0.5 -> (3 + 1.5) / 6
+    assert session_auroc(rows) == pytest.approx(4.5 / 6)
+    assert session_auroc(rows, frozenset({"attacked"})) == session_auroc(rows)
+    # runaway-inclusive: positives 0.9, 0.7, 0.4 -> (3 + 3 + 1.5) / 9
+    assert session_auroc(rows, frozenset({"attacked", "runaway"})) == pytest.approx(7.5 / 9)
+    assert session_auroc(rows, frozenset({"runaway"})) == pytest.approx(1.0)  # a1, a2 dropped
+    with pytest.raises(ValueError, match="benign"):
+        session_auroc(rows, frozenset({"attacked", "benign"}))
+    assert math.isnan(session_auroc([_row("b", fused_score=0.1)]))
+    assert math.isnan(session_auroc([_atk("r", "loop", fused_score=0.1), _row("b")]))  # no positive
+    assert math.isnan(session_auroc([]))
+
+
+def _lengths(agent: str, label: str, sizes: dict[str, int]) -> list[ScoreRow]:
+    out = []
+    for sess, n in sizes.items():
+        for _ in range(n):
+            if label == "benign":
+                out.append(_row(sess, agent_id=agent))
+            else:
+                out.append(_atk(sess, label, agent_id=agent))
+    return out
+
+
+def test_length_matched_pairs_within_tol() -> None:
+    rows = [
+        *_lengths("A", "magnitude_spike", {"A-x1": 10, "A-x2": 11, "A-x3": 30, "A-x4": 5}),
+        *_lengths("A", "benign", {"A-b1": 12, "A-b2": 9, "A-b3": 11, "A-b4": 50, "A-b5": 3}),
+        *_lengths("B", "splice", {"B-x1": 8}),
+        *_lengths("B", "benign", {"B-b1": 9}),
+        *_lengths("A", "loop", {"A-r1": 12}),  # a runaway session is never paired (T-40)
+        *_lengths("C", "novel_target", {"C-x1": 9}),  # no benign session of C: dropped
+        *_lengths("D", "benign", {"D-b1": 9}),
+    ]
+    count = {s: sum(r.session_id == s for r in rows) for s in {r.session_id for r in rows}}
+    agent = {r.session_id: r.agent_id for r in rows}
+    labels = session_labels(rows)
+    for seed in range(20):
+        pairs = matched_pairs(rows, seed=seed)
+        assert pairs == matched_pairs(rows, seed=seed)  # deterministic
+        used = [s for p in pairs for s in p]
+        assert len(used) == len(set(used))  # no session reused
+        for atk, ben in pairs:
+            assert labels[atk] == "attacked" and labels[ben] == "benign"
+            assert agent[atk] == agent[ben]
+            assert abs(count[atk] - count[ben]) <= 2
+        # A-x1 (10), A-x2 (11) and A-x4 (5, with b5 at 3) can always pair; A-x3 (30) never can
+        assert {a for a, _ in pairs} == {"A-x1", "A-x2", "A-x4", "B-x1"}
+        kept = length_matched(rows, seed=seed)
+        assert {r.session_id for r in kept} == set(used)
+        assert kept == [r for r in rows if r.session_id in set(used)]  # row order kept
+    assert len({tuple(matched_pairs(rows, seed=s)) for s in range(20)}) > 1  # the seed matters
+    assert matched_pairs(rows, tol=0) == [("A-x2", "A-b3")]  # the only equal lengths
+    assert length_matched([]) == [] and matched_pairs([]) == []
+
+
+def test_session_label_column_filled(tmp_path: Path) -> None:
+    families = [*CI_DATASET.families, "splice", "loop"]
+    rows = _replayed(tmp_path, families, attack_rate=0.5)
+    labels = session_labels(rows)
+    assert all(r.session_label == labels[r.session_id] for r in rows)
+    assert set(labels.values()) == {"benign", "runaway", "attacked"}
+    spliced = {r.session_id for r in rows if r.attack_family == "splice"}
+    assert spliced and {labels[s] for s in spliced} == {"attacked"}
+    p = tmp_path / "scores.parquet"
+    write_score_table(rows, p)
+    assert read_score_table(p) == rows
+
+
+def test_splice_is_reported_at_splice_free_thresholds(tmp_path: Path) -> None:
+    """T-40 (review round 1): headline metrics and their thresholds are fitted on splice-free rows,
+    and ``splice_report`` scores splice recall at those same thresholds."""
+    # every row in test: on this dataset all splices land on sales-ops-a, inside the default
+    # time split's train part
+    rows = _replayed(tmp_path, ["splice"], attack_rate=0.5, split=SplitSpec(train_frac=0.0))
+    without = [r for r in rows if r.attack_family != "splice"]
+    assert len(without) < len(rows)
+    for mode in ("per_agent", "row"):
+        m = compute_all(rows, warm_only=False, breakdown_thresholds=mode, n_boot=0)
+        assert repr(m) == repr(  # repr: NaN fields compare equal
+            compute_all(without, warm_only=False, breakdown_thresholds=mode, n_boot=0)
+        )
+        assert "splice" not in m.per_family_attack
+        rep = splice_report(rows, warm_only=False, breakdown_thresholds=mode)
+        test_splices = {
+            r.attack_id for r in rows if r.attack_family == "splice" and r.split == "test"
+        }
+        assert rep.attack.n_total == len(test_splices) > 0
+        assert rep.envelope.n_total == sum(
+            r.attack_family == "splice" and r.split == "test" for r in rows
+        )
+        assert 0 <= rep.attack.n_detected <= rep.attack.n_total
+        assert rep.breakdown_mode == mode
+    # the per-agent thresholds are those compute_all fitted, without splice rows
+    pa = per_agent_fpr_at_recall([r for r in without if r.split != "calibration"])
+    hit = {
+        r.attack_id
+        for r in rows
+        if r.attack_family == "splice"
+        and r.split == "test"
+        and r.fused_score >= pa.thresholds.get(r.agent_id, math.inf)
+    }
+    assert splice_report(rows, warm_only=False).attack.n_detected == len(hit)

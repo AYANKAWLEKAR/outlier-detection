@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, ValidationError
 from agentfw.core.envelope import JsonValue, Label, RawCall
 from agentfw.core.hints import ToolAnnotations
 from agentfw.core.schemas import ToolSchema
-from agentfw.synth.attacks import ATTACKS, AttackContext, inject
+from agentfw.synth.attacks import ATTACKS, AttackContext, donor_sessions, inject
 from agentfw.synth.dists import IdPool
 from agentfw.synth.load import (
     CATALOG_DIR,
@@ -123,6 +123,10 @@ def _inject_attacks(
     if not cfg.families and cfg.magnitude_topup_rate == 0:  # the top-up needs no family (A1.4)
         return by_persona, {}, stats
     by_id = {p.agent_id: p for p in personas}
+    # ``splice`` donors (Task 2.4): the untouched sessions of other personas, built once per
+    # persona and only when splice is enabled; no RNG is drawn.
+    splice_on = "splice" in cfg.families
+    donors: dict[str, list[tuple[str, list[RawCall]]]] = {}
 
     def ctx_factory(
         agent: str, attack_id: str, persona_sessions: Sequence[list[RawCall]], idx: int
@@ -132,7 +136,11 @@ def _inject_attacks(
         pools = {
             n: IdPool(sp.prefix, sp.size, sp.s, pool_rng) for n, sp in sorted(p.id_pools.items())
         }
-        return AttackContext(catalog, p, pools, attack_id, persona_sessions, idx)
+        if splice_on and agent not in donors:
+            donors[agent] = donor_sessions(agent, by_id, by_persona)
+        return AttackContext(
+            catalog, p, pools, attack_id, persona_sessions, idx, donors=donors.get(agent, ())
+        )
 
     out, labels = inject(
         by_persona,

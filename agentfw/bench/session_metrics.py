@@ -11,9 +11,19 @@ Decision metrics (Task 2.2) read the ``decision`` column instead of a threshold 
 score, so they see what the decision pipeline (``core.trajectory.decide``: provisional flags,
 later the gate, escalation and the authority ceiling) did with a call: a row is flagged when its
 decision is ``block`` or ``require_approval``. Rows without a decision (unscored) and runaway rows
-(T-10) are in no denominator. Recall is per attack (an ``attack_id`` is detected when any of its
-rows is flagged; its family is that of its first row by ``(ts_unix_ms, envelope_id)``), as
-``metrics.recall_by_family(level="attack")``.
+(T-10) are in no denominator; ``splice`` attacks get their own recall line (no threshold is fitted
+here, so they move no other number; T-40). Recall is per attack (an ``attack_id`` is detected
+when any of its rows is flagged; its family is that of its first row by
+``(ts_unix_ms, envelope_id)``), as ``metrics.recall_by_family(level="attack")``.
+
+Session scores (Task 2.4, F10): a session's score is the max fused score of its scored rows, and
+session AUROC ranks the ``positives`` sessions (default: ``attacked`` only) above benign ones;
+sessions of any other label, and sessions with no scored row, are left out. The length-matched
+control (the paper's length confound) pairs each attacked session with an unused benign session
+of the same agent whose call count is within ``tol``; everything unpaired, runaway sessions
+included, is dropped (T-40). Comparing ``session_auroc`` on all rows with it on
+``length_matched`` rows therefore changes only the length mix, not the positive class.
+``replay`` fills ``ScoreRow.session_label`` from :func:`session_labels`.
 """
 
 from __future__ import annotations
@@ -23,9 +33,10 @@ from collections import defaultdict
 from collections.abc import Sequence
 from typing import Literal
 
+import numpy as np
 import orjson
 
-from agentfw.bench.metrics import is_runaway
+from agentfw.bench.metrics import auroc, is_runaway
 from agentfw.bench.replay import ScoreRow
 from agentfw.core.detectors.vital import LOOP, NAME, SPIN, STALL
 from agentfw.synth.attacks import RUNAWAY_FAMILIES
@@ -36,7 +47,11 @@ __all__ = [
     "decision_control_fpr",
     "decision_flagged",
     "decision_recall_by_family",
+    "length_matched",
+    "matched_pairs",
+    "session_auroc",
     "session_labels",
+    "session_scores",
     "vital_false_flag_rate",
 ]
 
@@ -119,3 +134,71 @@ def decision_control_fpr(rows: Sequence[ScoreRow]) -> float:
 def decision_benign_fpr(rows: Sequence[ScoreRow]) -> float:
     """Flagged share of all benign rows, controls included (NaN when there is none)."""
     return _flag_rate([r for r in _decided(rows) if r.label != "attack"])
+
+
+# -- session scores and the length-matched control (Task 2.4) ------------------------------------
+
+
+def session_scores(rows: Sequence[ScoreRow]) -> dict[str, float]:
+    """``session_id -> max fused score`` over its scored rows (NaN when none was scored)."""
+    out: dict[str, float] = {}
+    for r in rows:
+        cur = out.setdefault(r.session_id, math.nan)
+        s = r.fused_score
+        if not math.isnan(s) and (math.isnan(cur) or s > cur):
+            out[r.session_id] = s
+    return out
+
+
+_ATTACKED: frozenset[SessionLabel] = frozenset({"attacked"})
+
+
+def session_auroc(
+    rows: Sequence[ScoreRow], positives: frozenset[SessionLabel] = _ATTACKED
+) -> float:
+    """AUROC of :func:`session_scores`: sessions labelled in ``positives`` against ``benign``
+    ones; a session in neither is dropped, not counted as a negative (NaN without both
+    classes). ``positives`` must not hold ``benign``."""
+    if "benign" in positives:
+        raise ValueError("positives must not include 'benign'")
+    labels = session_labels(rows)
+    scores = session_scores(rows)
+    sessions = [s for s in sorted(scores) if labels[s] in positives or labels[s] == "benign"]
+    return auroc(
+        np.array([scores[s] for s in sessions], dtype=np.float64),
+        np.array([labels[s] in positives for s in sessions], dtype=np.bool_),
+    )
+
+
+def matched_pairs(rows: Sequence[ScoreRow], tol: int = 2, seed: int = 0) -> list[tuple[str, str]]:
+    """``(attacked session, benign session)`` pairs of one agent whose call counts (rows per
+    session) differ by at most ``tol``; no session is used twice. Per agent in sorted order, the
+    attacked sessions (sorted, then shuffled by ``default_rng(seed)``) each take a uniform draw
+    among the unused benign sessions in range, if any. Runaway sessions are never paired."""
+    labels = session_labels(rows)
+    count: dict[str, int] = defaultdict(int)
+    agent: dict[str, str] = {}
+    for r in rows:
+        count[r.session_id] += 1
+        agent.setdefault(r.session_id, r.agent_id)
+    by_agent: dict[str, dict[SessionLabel, list[str]]] = defaultdict(lambda: defaultdict(list))
+    for s in sorted(labels):
+        by_agent[agent[s]][labels[s]].append(s)
+    rng = np.random.default_rng(seed)
+    pairs: list[tuple[str, str]] = []
+    for a in sorted(by_agent):
+        attacked, free = by_agent[a]["attacked"], list(by_agent[a]["benign"])
+        for i in rng.permutation(len(attacked)):
+            s = attacked[int(i)]
+            near = [b for b in free if abs(count[b] - count[s]) <= tol]
+            if near:
+                b = near[int(rng.integers(len(near)))]
+                free.remove(b)
+                pairs.append((s, b))
+    return pairs
+
+
+def length_matched(rows: Sequence[ScoreRow], tol: int = 2, seed: int = 0) -> list[ScoreRow]:
+    """The rows of the sessions :func:`matched_pairs` pairs, in their original order."""
+    keep = {s for p in matched_pairs(rows, tol, seed) for s in p}
+    return [r for r in rows if r.session_id in keep]

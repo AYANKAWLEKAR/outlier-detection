@@ -12,7 +12,8 @@ loses is counted under ``"redundant"``.
 per-call metrics on), so the table covers the same attacks as test-split recall; calibration and
 train rows are ignored. No warm filter is applied: it matches ``compute_all(warm_only=False)``.
 Runaway attacks (``metrics.is_runaway``, T-10) are in no per-call metric, so they are never
-"detected" here and never enter the table.
+"detected" here and never enter the table. ``splice`` attacks do enter it, as their own family:
+the table reads the engine's decisions and fits no threshold, so they move no other row (T-40).
 """
 
 from __future__ import annotations
