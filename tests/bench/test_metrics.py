@@ -410,6 +410,28 @@ def test_gate_preview_nan_benign_fpr_and_nan_share_fail() -> None:
     assert g.failures == ("recall:novel_target", "among:novel_target", "benign_fpr")
 
 
+def test_gate_preview_gates_among_inside_the_gate_bucket() -> None:
+    # A detected magnitude spike of strength 5 (bucket 3-10, outside the gate bucket 10-100)
+    # whose only reason is sequence: family-wide the share would be 1/2, in the gate bucket it is 1.
+    off_bucket = _atk(
+        0.9,
+        attack_id="magnitude_spike-s5",
+        attack_family="magnitude_spike",
+        strength=5.0,
+        threshold=0.5,
+        per_detector_json=_per(("sequence", 0.95), ("magnitude", 0.3)),
+    )
+    mag = [_gate_atk("magnitude_spike", ("magnitude", 0.9)), off_bucket]
+    rows = _gate_rows(magnitude_spike=mag)
+    assert among_reasons_share(rows, "magnitude_spike", "magnitude", "row") == 0.5  # family-wide
+    g = gate_preview(rows)
+    cell = g.cells["magnitude_spike"]
+    assert (cell.bucket, cell.n_detected, cell.n_total) == ("10-100", 1, 1)
+    assert cell.among_reasons_share == 1.0
+    assert "among:magnitude_spike" not in g.failures
+    assert g.passed is True and g.failures == ()
+
+
 def test_gate_preview_lists_missing_families_as_failures() -> None:
     g = gate_preview(_gate_rows(prereq_skip=[]))
     assert g.missing == ("prereq_skip",)

@@ -12,7 +12,17 @@ from agentfw.bench.ablation import replay_detector
 from agentfw.bench.gate import ORIGINAL_CRITERION_LABEL, gate_matrix, main, render_gate_matrix
 from agentfw.bench.metrics import GATE_FAMILIES, GatePreview, gate_preview
 from agentfw.bench.replay import PROTOCOL_LABELS, OutcomeMode, SplitSpec
+from agentfw.bench.sweeps import PRE_A1_SWITCHES
 from agentfw.core.config import EngineConfig
+
+
+def _direct(traces: Path, cfg: EngineConfig, mode: OutcomeMode) -> GatePreview:
+    rows, _ = replay_detector(traces, "engine", SplitSpec(), cfg, mode)
+    return gate_preview(rows)
+
+
+def _dump(g: GatePreview) -> bytes:
+    return orjson.dumps(g)
 
 
 @pytest.fixture(scope="module")
@@ -28,15 +38,13 @@ def test_gate_matrix_runs_both_protocols(
         gate_matrix(tiny_dataset, protocols=("review",))
     with pytest.raises(ValueError, match="both"):
         gate_matrix(tiny_dataset, protocols=("allow", "enforce"))
-    # Each entry is gate_preview of the engine replayed under that protocol, same config.
+    # Each entry is gate_preview of the engine replayed under that protocol, same config: every
+    # field, floats included, is equal (_dump writes NaN as null, so NaN == NaN here).
     for mode in ("review", "allow"):
-        rows, _ = replay_detector(tiny_dataset, "engine", SplitSpec(), EngineConfig(), mode)
-        want = gate_preview(rows)
-        got = matrix[mode]
-        assert (got.passed, got.failures, got.missing) == (want.passed, want.failures, want.missing)
-        assert {f: (c.n_detected, c.n_total) for f, c in got.cells.items()} == {
-            f: (c.n_detected, c.n_total) for f, c in want.cells.items()
-        }
+        assert _dump(matrix[mode]) == _dump(_direct(tiny_dataset, EngineConfig(), mode))
+    # The two protocols give different results on the tiny dataset, so the comparison above
+    # would catch a gate_matrix that replayed one protocol twice.
+    assert _dump(matrix["review"]) != _dump(matrix["allow"])
 
 
 def test_render_gate_matrix_labels_verbatim(matrix: dict[OutcomeMode, GatePreview]) -> None:
@@ -91,6 +99,14 @@ def test_gate_cli_writes_md_and_json(tiny_dataset: Path, tmp_path: Path) -> None
         for g in row.values():
             assert set(g) >= {"cells", "benign_fpr", "control_fpr", "passed", "failures"}
     assert rep["labels"] == {m: PROTOCOL_LABELS[m] for m in ("review", "allow")}
+    # The pre-A1 row is the engine replayed with PRE_A1_SWITCHES under each protocol (so the CLI
+    # and gate_matrix really use that config), and it differs from the default engine row.
+    pre_cfg = EngineConfig().replace(**PRE_A1_SWITCHES)
+    for mode in ("review", "allow"):
+        assert rep["results"][pre][mode] == orjson.loads(
+            _dump(_direct(tiny_dataset, pre_cfg, mode))
+        )
+    assert rep["results"][pre] != rep["results"]["engine"]
     md = md_path.read_text()
     assert f"### {pre}" in md and "### engine" in md
     assert PROTOCOL_LABELS["allow"] in md and PROTOCOL_LABELS["review"] in md
