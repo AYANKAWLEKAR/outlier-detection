@@ -8,9 +8,18 @@ from pathlib import Path
 import orjson
 import pytest
 
+from agentfw.bench import gate as gate_mod
 from agentfw.bench.ablation import replay_detector
-from agentfw.bench.gate import ORIGINAL_CRITERION_LABEL, gate_matrix, main, render_gate_matrix
-from agentfw.bench.metrics import GATE_FAMILIES, GatePreview, gate_preview
+from agentfw.bench.gate import (
+    ENGINE_ROW,
+    ORIGINAL_CRITERION_LABEL,
+    PRE_A1_ROW,
+    gate_matrix,
+    load_gate_json,
+    main,
+    render_gate_matrix,
+)
+from agentfw.bench.metrics import GATE_FAMILIES, GateCell, GatePreview, gate_preview
 from agentfw.bench.replay import PROTOCOL_LABELS, OutcomeMode, SplitSpec
 from agentfw.bench.sweeps import PRE_A1_SWITCHES
 from agentfw.core.config import EngineConfig
@@ -67,8 +76,6 @@ def test_render_gate_matrix_labels_verbatim(matrix: dict[OutcomeMode, GatePrevie
 
 
 def test_render_gate_matrix_cell_format() -> None:
-    from agentfw.bench.metrics import GateCell
-
     cells = {
         fam: GateCell(bucket, det, 1.0, 10, 10, 0.3, 1.0)
         for fam, (bucket, det) in GATE_FAMILIES.items()
@@ -86,10 +93,7 @@ def test_render_gate_matrix_cell_format() -> None:
 def test_gate_cli_writes_md_and_json(tiny_dataset: Path, tmp_path: Path) -> None:
     md_path, js_path = tmp_path / "gate.md", tmp_path / "gate.json"
     args = ["--traces", str(tiny_dataset), "--out", str(md_path), "--json", str(js_path)]
-    assert main(args) == 0
-    one = orjson.loads(js_path.read_bytes())
-    assert list(one["results"]) == ["engine"]
-    assert main([*args, "--pre-a1"]) == 0  # --pre-a1 adds a second engine row
+    assert main(args) == 0  # the pre-A1 row is always computed (spec A1.5 rule 4, ruling A1-17)
     rep = orjson.loads(js_path.read_bytes())
     assert len(rep["results"]) == 2
     pre = list(rep["results"])[1]
@@ -121,3 +125,213 @@ def test_render_gate_matrix_never_shows_one_protocol_alone() -> None:
         render_gate_matrix({"engine": {"review": ok}})
     md = render_gate_matrix({"engine": {"allow": ok, "review": ok}})  # input order does not matter
     assert md.index(PROTOCOL_LABELS["review"]) < md.index(PROTOCOL_LABELS["allow"])
+
+
+# --- Task 1.22a: the magnitude cell is never shown without its companion rows (spec A1.5 rule 4,
+# ruling A1-17) ---------------------------------------------------------------------------------
+
+_MAG_COL = 1 + list(GATE_FAMILIES).index("magnitude_spike")  # column 0 is the protocol label
+_MAG_TEXT = "0.778 (7/9); 0.66; 0.55"  # what the hand-built magnitude cell renders to when shown
+_OTHER_TEXT = "1.000 (10/10); 1.00; 0.30"
+_COMPANION_HEAD = "## Companion: sensitivity dataset (magnitude_far_mult = 1.0)"
+_COMPANION_VERDICT = "companion row (spec A1.5 rule 4), not a gate result"
+
+
+def _withheld(missing: str) -> str:
+    return f"withheld (spec A1.5 rule 4: missing {missing})"
+
+
+def _preview(*, failing_magnitude: bool = False) -> GatePreview:
+    cells = {
+        fam: GateCell(bucket, det, 1.0, 10, 10, 0.3, 1.0)
+        for fam, (bucket, det) in GATE_FAMILIES.items()
+    }
+    cells["magnitude_spike"] = GateCell("10-100", "magnitude", 7 / 9, 7, 9, 0.55, 0.66)
+    failures = ("recall:magnitude_spike",) if failing_magnitude else ()
+    return GatePreview(
+        cells=cells, benign_fpr=0.01, control_fpr=0.05, min_recall=7 / 9,
+        passed=not failures, failures=failures,
+    )  # fmt: skip
+
+
+def _both(g: GatePreview) -> dict[OutcomeMode, GatePreview]:
+    return {"review": g, "allow": g}
+
+
+def _table_rows(md: str) -> list[list[str]]:
+    """Every protocol line of every block, split into its columns."""
+    labels = tuple(f"| {PROTOCOL_LABELS[m]} |" for m in ("review", "allow"))
+    return [ln.strip().strip("|").split(" | ") for ln in md.splitlines() if ln.startswith(labels)]
+
+
+def _strip(cols: list[str]) -> list[str]:
+    return [c.strip() for c in cols]
+
+
+def test_magnitude_cell_withheld_without_companions() -> None:
+    md = render_gate_matrix({ENGINE_ROW: _both(_preview(failing_magnitude=True))})
+    rows = [_strip(r) for r in _table_rows(md)]
+    assert len(rows) == 2
+    for cols in rows:
+        assert cols[_MAG_COL] == _withheld("pre-A1 row and sensitivity row")
+        # The other families' cells and the FPRs are printed as before.
+        others = [c for i, c in enumerate(cols[1 : 1 + len(GATE_FAMILIES)], 1) if i != _MAG_COL]
+        assert others == [_OTHER_TEXT] * (len(GATE_FAMILIES) - 1)
+        assert cols[-3:-1] == ["0.0100", "0.050"]
+        # The verdict is computed from the data, not from what is displayed.
+        assert cols[-1] == "FAIL: recall:magnitude_spike"
+    assert _MAG_TEXT not in md and "(7/9)" not in md and "0.778" not in md
+    assert _COMPANION_HEAD not in md
+    # The output says how to get the magnitude cells.
+    assert "--sensitivity-traces" in md
+
+
+@pytest.mark.parametrize(
+    ("with_pre", "with_sens", "missing"),
+    [(True, False, "sensitivity row"), (False, True, "pre-A1 row")],
+    ids=["pre-A1-present", "sensitivity-present"],
+)
+def test_magnitude_cell_withheld_names_the_one_missing_companion(
+    with_pre: bool, with_sens: bool, missing: str
+) -> None:
+    g = _both(_preview())
+    results = {ENGINE_ROW: g, **({PRE_A1_ROW: g} if with_pre else {})}
+    sens = {ENGINE_ROW: g} if with_sens else None
+    md = render_gate_matrix(results, sensitivity=sens)
+    rows = [_strip(r) for r in _table_rows(md)]
+    # Every block, the companion block included, withholds the cell.
+    assert len(rows) == 2 * (len(results) + (1 if with_sens else 0))
+    for cols in rows:
+        assert cols[_MAG_COL] == _withheld(missing)
+    assert _MAG_TEXT not in md and "(7/9)" not in md
+    assert (_COMPANION_HEAD in md) is with_sens
+
+
+def test_magnitude_cell_shown_with_both_companions() -> None:
+    g = _both(_preview())
+    md = render_gate_matrix(
+        {ENGINE_ROW: g, PRE_A1_ROW: g}, sensitivity={ENGINE_ROW: g, PRE_A1_ROW: g}
+    )
+    assert "withheld" not in md
+    rows = [_strip(r) for r in _table_rows(md)]
+    assert len(rows) == 8  # two main blocks and two companion blocks, two protocols each
+    for cols in rows:
+        assert cols[_MAG_COL] == _MAG_TEXT
+    assert md.count(_COMPANION_HEAD) == 1
+    head = md.index(_COMPANION_HEAD)
+    # The companion block follows the main blocks, one table per sensitivity row, same protocol
+    # order, and its last column is the companion text, never a verdict.
+    assert md.index(f"### {ENGINE_ROW}") < md.index(f"### {PRE_A1_ROW}") < head
+    tail = md[head:]
+    assert tail.index(f"### {ENGINE_ROW}") < tail.index(f"### {PRE_A1_ROW}")
+    assert tail.index(PROTOCOL_LABELS["review"]) < tail.index(PROTOCOL_LABELS["allow"])
+    main_rows, comp_rows = rows[:4], rows[4:]
+    assert all(cols[-1] == "PASS" for cols in main_rows)
+    assert all(cols[-1] == _COMPANION_VERDICT for cols in comp_rows)
+    assert "PASS" not in tail and "FAIL" not in tail
+
+
+def test_sensitivity_row_requires_both_protocols() -> None:
+    g = _preview()
+    with pytest.raises(ValueError, match="both"):
+        render_gate_matrix(
+            {ENGINE_ROW: _both(g), PRE_A1_ROW: _both(g)}, sensitivity={ENGINE_ROW: {"review": g}}
+        )
+
+
+def test_cli_always_computes_pre_a1_row(tiny_dataset: Path, tmp_path: Path) -> None:
+    md_path, js_path = tmp_path / "gate.md", tmp_path / "gate.json"
+    base = ["--traces", str(tiny_dataset), "--out", str(md_path), "--json", str(js_path)]
+    for extra in ([], ["--pre-a1"]):  # --pre-a1 is accepted and changes nothing
+        assert main([*base, *extra]) == 0
+        rep = orjson.loads(js_path.read_bytes())
+        assert list(rep) == ["traces", "sensitivity_traces", "labels", "results", "sensitivity"]
+        assert list(rep["results"]) == [ENGINE_ROW, PRE_A1_ROW]
+        assert rep["sensitivity_traces"] is None and rep["sensitivity"] is None
+        md = md_path.read_text()
+        assert f"### {PRE_A1_ROW}" in md
+        # No sensitivity input: every magnitude cell is withheld and the output names the option.
+        rows = [_strip(r) for r in _table_rows(md)]
+        assert len(rows) == 4
+        assert all(cols[_MAG_COL] == _withheld("sensitivity row") for cols in rows)
+        assert "--sensitivity-traces" in md
+        # JSON is data: it keeps the magnitude cell's numbers.
+        for row in rep["results"].values():
+            for g in row.values():
+                assert g["cells"]["magnitude_spike"]["n_total"] > 0
+
+
+def test_cli_sensitivity_traces_shows_magnitude_cells(tiny_dataset: Path, tmp_path: Path) -> None:
+    md_path, js_path = tmp_path / "gate.md", tmp_path / "gate.json"
+    args = ["--traces", str(tiny_dataset), "--sensitivity-traces", str(tiny_dataset)]
+    assert main([*args, "--out", str(md_path), "--json", str(js_path)]) == 0
+    rep = orjson.loads(js_path.read_bytes())
+    assert rep["sensitivity_traces"] == str(tiny_dataset)
+    assert list(rep["sensitivity"]) == [ENGINE_ROW, PRE_A1_ROW]
+    # The sensitivity rows are the engine and the pre-A1 engine replayed on that directory (here
+    # the same dataset, so they equal the main rows).
+    assert rep["sensitivity"] == rep["results"]
+    md = md_path.read_text()
+    assert "withheld" not in md
+    assert _COMPANION_HEAD in md
+    rows = [_strip(r) for r in _table_rows(md)]
+    assert len(rows) == 8
+    eng = rep["results"][ENGINE_ROW]["review"]["cells"]["magnitude_spike"]
+    shown = f"({eng['n_detected']}/{eng['n_total']})"
+    assert shown in rows[0][_MAG_COL]
+    assert all(cols[-1] == _COMPANION_VERDICT for cols in rows[4:])
+
+
+def _assert_same(a: GatePreview, b: GatePreview) -> None:
+    def same(x: object, y: object) -> bool:
+        if isinstance(x, float) and isinstance(y, float):
+            return (math.isnan(x) and math.isnan(y)) or x == y
+        return type(x) is type(y) and x == y
+
+    for f in ("benign_fpr", "control_fpr", "min_recall", "passed", "missing", "failures"):
+        assert same(getattr(a, f), getattr(b, f)), f
+    assert list(a.cells) == list(b.cells)
+    for fam, ca in a.cells.items():
+        cb = b.cells[fam]
+        assert isinstance(cb, GateCell)
+        for f in ca.__slots__:
+            assert same(getattr(ca, f), getattr(cb, f)), (fam, f)
+
+
+def test_load_gate_json_round_trips_nan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    nan = float("nan")
+    cells = {
+        "magnitude_spike": GateCell("10-100", "magnitude", 0.0, 0, 3, nan, nan),
+        "prereq_skip": GateCell("all", "sequence", 0.5, 1, 2, 1.0, 1.0),
+    }
+    missing = tuple(f for f in GATE_FAMILIES if f not in cells)
+    g = GatePreview(
+        cells=cells, benign_fpr=0.01, control_fpr=nan, min_recall=0.0, passed=False,
+        missing=missing, failures=("recall:magnitude_spike", *(f"missing:{f}" for f in missing)),
+    )  # fmt: skip
+    seen: list[tuple[Path, EngineConfig]] = []
+
+    def fake_gate_matrix(traces_dir: Path, cfg: EngineConfig) -> dict[OutcomeMode, GatePreview]:
+        seen.append((traces_dir, cfg))
+        return {"review": g, "allow": g}
+
+    monkeypatch.setattr(gate_mod, "gate_matrix", fake_gate_matrix)
+    js = tmp_path / "gate.json"
+    main(["--traces", "t", "--json", str(js)])
+    results, sens = load_gate_json(js)
+    assert sens is None
+    assert list(results) == [ENGINE_ROW, PRE_A1_ROW]
+    main(["--traces", "t", "--sensitivity-traces", "s", "--json", str(js)])
+    results, sens = load_gate_json(js)
+    assert sens is not None and list(sens) == [ENGINE_ROW, PRE_A1_ROW]
+    # Main and sensitivity rows: the engine and the pre-A1 engine on each directory.
+    assert [p for p, _ in seen[2:]] == [Path("t"), Path("t"), Path("s"), Path("s")]
+    for loaded in (results, sens):
+        for by_mode in loaded.values():
+            assert list(by_mode) == ["review", "allow"]
+            for back in by_mode.values():
+                assert isinstance(back, GatePreview)
+                _assert_same(back, g)
+                assert math.isnan(back.control_fpr)
+                assert math.isnan(back.cells["magnitude_spike"].among_reasons_share)
+                assert isinstance(back.missing, tuple) and isinstance(back.failures, tuple)
