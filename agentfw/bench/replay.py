@@ -122,6 +122,10 @@ class ScoreRow:
     latency_us: float
     threshold: float | None
     decision: str | None = None  # the detector's Decision value; None when unscored
+    # The call's flags (comma-joined sorted names) and its session's flag density (Task 2.1,
+    # ``TrajectoryInfo``); "" / None when unscored or the detector has no trajectory.
+    flags: str = ""
+    density: float | None = None
 
 
 def _order(r: RawCall) -> tuple[int, str, int]:
@@ -213,6 +217,8 @@ def replay(
         latency = 0.0
         threshold: float | None = None
         decision: str | None = None
+        flags = ""
+        density: float | None = None
         outcome = Outcome.ALLOWED
         flagged = False
         if scored:
@@ -227,6 +233,9 @@ def replay(
             threshold = res.threshold
             decision = None if res.decision is None else res.decision.value
             flagged = res.decision in _FLAGGED
+            if res.trajectory is not None:
+                flags = ",".join(sorted(f.name for f in res.trajectory.flags))
+                density = res.trajectory.density
             if outcomes == "enforce" and res.decision is Decision.BLOCK:
                 outcome = Outcome.BLOCKED
         lab = labels.get(env.envelope_id)
@@ -257,6 +266,8 @@ def replay(
                 latency_us=latency,
                 threshold=threshold,
                 decision=decision,
+                flags=flags,
+                density=density,
             )
         )
         detector.update(env, outcome)

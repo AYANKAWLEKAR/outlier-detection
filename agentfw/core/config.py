@@ -127,6 +127,20 @@ class EngineConfig:
     br_mode: BrMode = "off"
     br_k: float = 0.6
     irreversible_b: float = 0.6
+    # Session flag window (F7 substrate, Task 2.1; core.trajectory). Every call derives flags
+    # (``derive_flags``: a score counts from ``flag_min``); with ``sessions`` (T-34: it opens the
+    # engine's one session gate, which later session features also open; shut = no
+    # ``sess:`` records, ``TrajectoryInfo.density`` None) ``update`` records them, for every
+    # outcome, in a per-session window of the last ``session_window`` calls, and ``density`` =
+    # Σ of each call's highest flag weight / ``session_window`` (T-09). Every
+    # ``sess_sweep_every`` records, non-halted sessions idle > ``sess_idle_ms`` are evicted
+    # (T-15). ``prov_unresolved_weight``: the weight of an ``UNRESOLVED`` flag (Task 2.2).
+    sessions: bool = False
+    session_window: int = 6
+    flag_min: float = 0.5
+    sess_idle_ms: int = 1_800_000
+    sess_sweep_every: int = 4096
+    prov_unresolved_weight: float = 0.125
     # Fusion (§6.11)
     fusion_bonus: float = 0.15
     fusion_bonus_gate: float = 0.5

@@ -46,6 +46,19 @@ sets ``Reason.blast_radius = b`` on every reason; ``"modulate"`` decides against
 ``θ_eff = θ · (1 − br_k · b)``. ``DetectorResult.threshold``, the calibrator and every piece of
 state keep the agent's own θ, so modulation moves decisions only. ``b`` reads the sequence
 detector's kind records (write kind, item counts) and never writes, so ``score`` stays pure.
+
+Session flags (F7 substrate, Task 2.1): ``score`` also derives the call's flags
+(``core.trajectory.flags``) into ``TrajectoryInfo.flags`` and caches them with the fused score.
+Everything else about sessions sits behind one gate, ``Engine._book`` (T-34, ruling R15): a
+``SessionBook`` when ``sessions`` -- or, later, any feature that needs session records -- is on,
+else None (no ``sess:`` record is ever written, ``density`` is None and the session settings are
+not validated). With it, ``score`` reads the session's flag window into
+``TrajectoryInfo.density`` (T-09; pure, ``SessionBook.peek``), and ``update`` first records the
+call's flags in that window -- for **every** outcome, before the early return above, since a
+blocked call is still a step of the session -- with the cached flags when they are ``e``'s, else
+a fresh pure evaluation computed before anything moves (its fused score and threshold then serve
+step 1). Session records are never read by a detector, so scores, decisions and every other
+record are the same with and without the gate.
 """
 
 from __future__ import annotations
@@ -67,6 +80,7 @@ from agentfw.core.detectors.velocity import VelocityDetector
 from agentfw.core.detectors.vital import VitalDetector
 from agentfw.core.envelope import (
     ActionEnvelope,
+    Decision,
     DetectorResult,
     DetectorScore,
     FieldType,
@@ -80,6 +94,8 @@ from agentfw.core.patterns import try_number
 from agentfw.core.priors import PooledPriors
 from agentfw.core.schema_infer import TypeInference, TypeView
 from agentfw.core.state import DictStore, StateStore
+from agentfw.core.trajectory.flags import Flag, derive_flags
+from agentfw.core.trajectory.session import SessionBook
 
 __all__ = ["ALL_DETECTORS", "DETECTOR_ORDER", "KNOWN_DETECTORS", "VITAL", "Engine"]
 
@@ -170,23 +186,26 @@ class Engine:
         self._velocity = (
             vel if isinstance(vel, VelocityDetector) and "velocity" in self.enabled else None
         )
-        self._cache: tuple[str, float, float] | None = None  # (envelope_id, fused, threshold)
+        # The one session gate (T-34, ruling R15): ``_book`` is None exactly when no feature needs
+        # session records; recording (``update``) and density (``_evaluate``) both test it. A later
+        # feature that needs the window ORs its switch into this expression.
+        sessions_on = cfg.sessions
+        self._book: SessionBook | None = SessionBook(self.store, cfg) if sessions_on else None
+        # (envelope_id, fused, threshold, flags) of the last score
+        self._cache: tuple[str, float, float, frozenset[Flag]] | None = None
 
     # -- Detector protocol ---------------------------------------------------------------------
 
     def reset(self) -> None:
         self.store.clear()
+        if self._book is not None:
+            self._book.reset()
         self._cache = None
 
     def score(self, e: ActionEnvelope) -> DetectorResult:
         t0 = perf_counter_ns()
-        view = self._view(e)
-        per, fr = self._fuse(e, view)
-        agent = e.agent_id
-        theta = self.calibrator.threshold(agent)
-        traj = self._trajectory(e, theta)
-        decision = self.calibrator.decide(agent, fr.fused, traj.threshold_eff)
-        self._cache = (e.envelope_id, fr.fused, theta)
+        view, per, fr, theta, traj, decision = self._evaluate(e)
+        self._cache = (e.envelope_id, fr.fused, theta, traj.flags)
         return DetectorResult(
             fused_score=fr.fused,
             per_detector=per,
@@ -202,9 +221,17 @@ class Engine:
         cached = self._cache
         fused: float | None = None
         theta = math.nan
+        flags: frozenset[Flag] | None = None
         if cached is not None and cached[0] == e.envelope_id:
             self._cache = None
-            _, fused, theta = cached
+            _, fused, theta, flags = cached
+        book = self._book
+        if book is not None:  # first, for every outcome (blocked calls enter the window)
+            if flags is None:  # pure: nothing below has moved yet
+                _, _, fr, theta, traj, _ = self._evaluate(e)
+                fused, flags = fr.fused, traj.flags
+            book.record(e, flags)
+            book.maybe_evict(e.ts_unix_ms)
         censor = self.cfg.cal_censor
         if censor != "none" and self.calibrator.n_scored(e.agent_id) < self.cfg.cal_censor_min_n:
             censor = "none"  # still in shadow: learn like the spec
@@ -237,6 +264,26 @@ class Engine:
         return self.store.nbytes()
 
     # -- internals ------------------------------------------------------------------------------
+
+    def _evaluate(
+        self, e: ActionEnvelope
+    ) -> tuple[
+        _CallTypes, tuple[DetectorScore, ...], FusionResult, float, TrajectoryInfo, Decision
+    ]:
+        """Pure: types, scores, fusion, the agent's θ, the trajectory (flags and density
+        included) and the decision."""
+        view = self._view(e)
+        per, fr = self._fuse(e, view)
+        agent = e.agent_id
+        theta = self.calibrator.threshold(agent)
+        traj = self._trajectory(e, theta)
+        decision = self.calibrator.decide(agent, fr.fused, traj.threshold_eff)
+        hint = self.hints.get(e.tool_id)
+        flags = frozenset(derive_flags(per, decision, traj.irreversible, hint, self.cfg))
+        book = self._book
+        density = None if book is None else book.density_with(book.peek(e.session_id), flags)
+        traj = dataclasses.replace(traj, flags=flags, density=density)
+        return view, per, fr, theta, traj, decision
 
     def _trajectory(self, e: ActionEnvelope, theta: float) -> TrajectoryInfo:
         cfg, seq = self.cfg, self._sequence

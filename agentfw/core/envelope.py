@@ -20,6 +20,7 @@ from pydantic import (
 
 if TYPE_CHECKING:
     from agentfw.core.sketch.bloom import BloomFilter
+    from agentfw.core.trajectory.flags import Flag
 
 __all__ = [
     "ActionEnvelope",
@@ -256,6 +257,10 @@ class TrajectoryInfo:
     blast_radius: float | None
     irreversible: bool
     threshold_eff: float
+    #: This call's flags (``core.trajectory.flags``) and its session's flag density including
+    #: this call (T-09; ``None`` unless ``EngineConfig.sessions``).
+    flags: frozenset[Flag] = frozenset()
+    density: float | None = None
 
 
 @dataclass(slots=True, frozen=True)

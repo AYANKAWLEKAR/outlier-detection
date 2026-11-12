@@ -111,6 +111,16 @@ VITAL_DEFAULTS: dict[str, object] = {
     "vital_stall_di": 0.3,
 }
 
+# Task 2.1 session flag window (feature spec F7; T-09, T-15). ``sessions`` gates recording (T-34).
+SESSION_DEFAULTS: dict[str, object] = {
+    "sessions": False,
+    "session_window": 6,
+    "flag_min": 0.5,
+    "sess_idle_ms": 1_800_000,
+    "sess_sweep_every": 4096,
+    "prov_unresolved_weight": 0.125,
+}
+
 
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
@@ -122,6 +132,7 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | A1_DEFAULTS
         | TRAJECTORY_SWITCH_DEFAULTS
         | VITAL_DEFAULTS
+        | SESSION_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
 
