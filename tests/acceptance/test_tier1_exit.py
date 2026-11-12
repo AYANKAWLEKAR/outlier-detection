@@ -236,7 +236,8 @@ _ALLOW_XFAIL = pytest.mark.xfail(
     strict=True,
     raises=AssertionError,
     reason="Tier-1 gate (Amendment A1) not met under spec §5.2 allow-all: the replay learns the "
-    "attack rows; see docs/decisions/008-tier1-gate.md",
+    "attack rows; see docs/decisions/008-tier1-gate.md; the oracle-reviewer approval loop (labels "
+    "act as a perfect human reviewer → optimistic) result is test_tier1_exit[review]",
 )
 
 

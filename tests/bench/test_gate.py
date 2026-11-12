@@ -368,3 +368,23 @@ def test_load_gate_json_round_trips_nan(tmp_path: Path, monkeypatch: pytest.Monk
                 assert math.isnan(back.control_fpr)
                 assert math.isnan(back.cells["magnitude_spike"].among_reasons_share)
                 assert isinstance(back.missing, tuple) and isinstance(back.failures, tuple)
+
+
+# --- Task 1.24a: an unknown protocol key is refused (ruling A1-21) -------------------------------
+
+
+@pytest.mark.parametrize("section", ["results", "sensitivity"])
+def test_load_gate_json_refuses_an_unknown_protocol(
+    tiny_dataset: Path, tmp_path: Path, section: str
+) -> None:
+    js = tmp_path / "gate.json"
+    args = ["--traces", str(tiny_dataset), "--sensitivity-traces", str(tiny_dataset)]
+    assert main([*args, "--json", str(js)]) == 0
+    load_gate_json(js)  # the file as written loads
+    payload = orjson.loads(js.read_bytes())
+    row = payload[section][ENGINE_ROW]
+    row["bogus"] = row.pop("allow")  # the same data under a protocol key that does not exist
+    bad = tmp_path / "bad.json"
+    bad.write_bytes(orjson.dumps(payload))
+    with pytest.raises(ValueError, match="unknown replay protocol 'bogus'"):
+        load_gate_json(bad)
