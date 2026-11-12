@@ -18,7 +18,16 @@ on the record; ``update`` refreshes it and ``score`` never writes (it recomputes
 
 Id flow (c): for a *write* tool, each ID-typed flat value absent from ``session_ids_seen`` scores
 ``present / total`` of that (agent, tool, path)'s history (0 until ``total >= flow_min_obs``); the
-max over missing values is ``s_flow``. Evidence: ``missing_id_path``, ``r_flow`` (never raw ids).
+max over missing values is ``s_flow``. Evidence: ``missing_id_path``, ``r_flow``, ``n`` (the
+history's ``total``; the deepest over ID paths when nothing is missing), ``ref_source`` (never
+raw ids).
+With ``flow_ledger`` (Task 1.4) "present" means the value has a ``LedgerRef`` on this envelope
+(an id produced earlier in the session, or seeded from the task input) or is in
+``session_ids_seen`` (ids known only through the Bloom overflow); the history counts presence
+the same way and ``FlowRecord.producers`` tallies the producer tool of each ref
+(``usual_producer`` names the commonest). ``ref_source`` is the source of the first ref on the
+flagged path (or, when nothing is missing, on any ID-typed path); None without one or without the
+switch.
 A tool is a write if its hint says so, else if it has been seen with an ID-typed argument and never
 with a response ``item_count`` -- learned only from past ``update`` calls, so scoring is causal.
 
@@ -30,12 +39,12 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar, Self
 
 from agentfw.core.config import EngineConfig
-from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType
+from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType, LedgerRef
 from agentfw.core.hints import ToolHint
 from agentfw.core.schema_infer import TypeView
 from agentfw.core.state import (
@@ -157,13 +166,18 @@ class FlowRecord:
     KIND: ClassVar[str] = "flow"
     present: int = 0
     total: int = 0
+    producers: dict[str, int] = field(default_factory=dict)  # producer tool -> count (flow_ledger)
 
     def to_dict(self) -> dict[str, object]:
-        return {"present": self.present, "total": self.total}
+        out: dict[str, object] = {"present": self.present, "total": self.total}
+        if self.producers:  # omitted while empty: dumped state bytes match pre-ledger snapshots
+            out["producers"] = dict(sorted(self.producers.items()))
+        return out
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Self:
-        return cls(int(d["present"]), int(d["total"]))
+        prod = {str(t): int(n) for t, n in d.get("producers", {}).items()}
+        return cls(int(d["present"]), int(d["total"]), prod)
 
 
 def _contexts(prior: tuple[str, ...]) -> tuple[str, str]:
@@ -257,25 +271,62 @@ class SequenceDetector:
         rec = self._store.get(key_kind(agent, tool))
         return isinstance(rec, ToolKindRecord) and rec.has_id_arg and not rec.has_item_count
 
+    def usual_producer(self, agent: str, tool: str, path: str) -> str | None:
+        """Commonest producer tool of this (agent, tool, path)'s ids; ties by name. Read-only."""
+        rec = self._store.get(key_flow(agent, tool, path))
+        if not isinstance(rec, FlowRecord) or not rec.producers:
+            return None
+        return min(rec.producers.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+
+    def _is_present(self, e: ActionEnvelope, v: str, ref_ids: frozenset[str] | None) -> bool:
+        """Is id ``v`` already known? ``ref_ids`` is this path's ledger-ref ids (None = v3)."""
+        if ref_ids is not None and v in ref_ids:
+            return True
+        return v in e.session_ids_seen
+
+    def _refs_by_path(self, e: ActionEnvelope) -> dict[str, list[LedgerRef]] | None:
+        if not self._cfg.flow_ledger:
+            return None
+        out: dict[str, list[LedgerRef]] = {}
+        for r in e.ledger_refs:
+            out.setdefault(r.path, []).append(r)
+        return out
+
     def _s_flow(self, e: ActionEnvelope, types: TypeView) -> tuple[float, dict[str, object]]:
-        ev: dict[str, object] = {"missing_id_path": None, "r_flow": 0.0}
+        ev: dict[str, object] = {"missing_id_path": None, "r_flow": 0.0, "n": 0, "ref_source": None}
         if not self.is_write(e.agent_id, e.tool_id):
             return 0.0, ev
+        refs = self._refs_by_path(e)
         best = -1.0
+        first_ref: str | None = None
+        n_any = 0
         for path in sorted(e.flat_args):
             if types(path) != FieldType.ID:
                 continue
+            seen_rec = self._store.get(key_flow(e.agent_id, e.tool_id, path))
+            if isinstance(seen_rec, FlowRecord):
+                n_any = max(n_any, seen_rec.total)
+            prefs = refs.get(path, []) if refs is not None else []
+            if first_ref is None and prefs:
+                first_ref = prefs[0].source
+            ids = frozenset(r.artifact_id for r in prefs) if refs is not None else None
             if not any(
-                isinstance(v, str) and v not in e.session_ids_seen for v in e.flat_args[path]
+                isinstance(v, str) and not self._is_present(e, v, ids) for v in e.flat_args[path]
             ):
                 continue
             rec = self._store.get(key_flow(e.agent_id, e.tool_id, path))
             r = 0.0
-            if isinstance(rec, FlowRecord) and rec.total >= self._cfg.flow_min_obs:
-                r = rec.present / rec.total
+            n = 0
+            if isinstance(rec, FlowRecord):
+                n = rec.total
+                if rec.total >= self._cfg.flow_min_obs:
+                    r = rec.present / rec.total
             if r > best:
                 best = r
-                ev["missing_id_path"], ev["r_flow"] = path, r
+                ev["missing_id_path"], ev["r_flow"], ev["n"] = path, r, n
+                ev["ref_source"] = prefs[0].source if prefs else None
+        if best < 0.0:  # nothing missing: report the first ref and the deepest history
+            ev["ref_source"], ev["n"] = first_ref, n_any
         return max(0.0, best), ev
 
     # --- protocol ----------------------------------------------------------------------
@@ -340,6 +391,7 @@ class SequenceDetector:
                 prec = ToolKindRecord()
                 self._store.put(pkey, prec)
             prec.has_item_count = True
+        refs = self._refs_by_path(e)
         for path, vals in e.flat_args.items():
             if types(path) != FieldType.ID:
                 continue
@@ -352,7 +404,15 @@ class SequenceDetector:
             if not isinstance(frec, FlowRecord):
                 frec = FlowRecord()
                 self._store.put(fkey, frec)
+            ids: frozenset[str] | None = None
+            by_id: dict[str, LedgerRef] = {}
+            if refs is not None:
+                by_id = {r.artifact_id: r for r in refs.get(path, [])}
+                ids = frozenset(by_id)
             for v in strs:
                 frec.total += 1
-                if v in e.session_ids_seen:
+                if self._is_present(e, v, ids):
                     frec.present += 1
+                ref = by_id.get(v)
+                if ref is not None and ref.producer_tool is not None:
+                    frec.producers[ref.producer_tool] = frec.producers.get(ref.producer_tool, 0) + 1

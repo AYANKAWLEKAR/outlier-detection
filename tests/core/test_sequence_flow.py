@@ -310,3 +310,172 @@ def test_item_count_via_prev_response_marks_read(seq: SequenceDetector) -> None:
     s_ctl, ev = seq._s_flow(probe([(read2, {"charge_id": fake}, None)]), TYPES)
     assert s_ctl == 1.0 and ev["r_flow"] == 1.0  # the gate is the only difference
     assert s_read == 0.0
+
+
+# -- Task 1.4: id flow over the artifact ledger (flow_ledger) ---------------------------------
+
+LEDGER_CFG = EngineConfig(flow_ledger=True)
+
+
+def warm_flow_engine(cfg: EngineConfig, present_rate: float, n: int = 40) -> SequenceDetector:
+    """Learn `n` write sessions; `present_rate` of them look the id up first (response-sourced)."""
+    det = SequenceDetector(DictStore(), cfg)
+    flowing = round(n * present_rate)
+    tr = SessionTracker()
+    for i in range(n):
+        cid = f"ch_3W{i:06d}"
+        sid = f"w{next(_sid)}"
+        steps: list[tuple[str, Mapping[str, Any]]] = []
+        if i < flowing:
+            steps.append((READ, {"charge_id": cid}))
+        steps.append((WRITE, {"charge_id": cid}))
+        for j, (tool, args) in enumerate(steps):
+            rm = ResponseMeta(item_count=1, ids=(cid,)) if tool == READ else None
+            e = make_env(
+                tracker=tr,
+                session_id=sid,
+                agent_id=AGENT,
+                tool_id=tool,
+                seq_no=j,
+                args=dict(args),
+                response_meta=rm,
+            )
+            det.update(e, TYPES)
+            tr.observe(e)
+    return det
+
+
+def flow_score(
+    det: SequenceDetector, args: Mapping[str, Any], task_ids: tuple[str, ...] = ()
+) -> float:
+    return flow_eval(det, args, task_ids)[0]
+
+
+def flow_eval(
+    det: SequenceDetector, args: Mapping[str, Any], task_ids: tuple[str, ...] = ()
+) -> tuple[float, dict[str, object]]:
+    e = make_env(
+        tracker=SessionTracker(),
+        session_id=f"f{next(_sid)}",
+        agent_id=AGENT,
+        tool_id=WRITE,
+        seq_no=0,
+        args=dict(args),
+        task_ids=task_ids,
+    )
+    return det._s_flow(e, TYPES)
+
+
+def test_prereq_skip_fabricated_id_scores_r_flow() -> None:
+    eng = warm_flow_engine(LEDGER_CFG, present_rate=0.95)
+    assert flow_score(eng, {"charge_id": "ch_fabricated1"}) == pytest.approx(0.95)
+
+
+def test_same_write_with_task_seeded_id_scores_zero() -> None:
+    eng = warm_flow_engine(LEDGER_CFG, present_rate=0.95)
+    s, ev = flow_eval(eng, {"charge_id": "ch_fromtask01"}, ("ch_fromtask01",))
+    assert s == 0.0
+    assert ev["ref_source"] == "task_input"
+    assert ev["missing_id_path"] is None
+
+
+def test_switch_off_keeps_v3_behaviour() -> None:
+    eng = warm_flow_engine(EngineConfig(), 0.95)
+    assert flow_score(eng, {"charge_id": "ch_fromtask01"}, ("ch_fromtask01",)) == pytest.approx(
+        0.95
+    )
+
+
+def test_switch_off_state_has_no_producers_and_old_snapshot_loads() -> None:
+    eng = warm_flow_engine(EngineConfig(), 0.95)
+    rec = eng._store.get(key_flow(AGENT, WRITE, "charge_id"))
+    assert isinstance(rec, FlowRecord) and rec.producers == {}
+    assert rec.to_dict() == {"present": rec.present, "total": rec.total}
+    old = FlowRecord.from_dict({"present": 3, "total": 5})
+    assert old.producers == {} and old.to_dict() == {"present": 3, "total": 5}
+
+
+def test_history_counts_task_seeded_ids_as_present() -> None:
+    det = SequenceDetector(DictStore(), LEDGER_CFG)
+    tr = SessionTracker()
+    for i in range(25):  # every write uses a task-input id: never in session_ids_seen
+        cid = f"ch_3T{i:06d}"
+        e = make_env(
+            tracker=tr,
+            session_id=f"t{i}",
+            agent_id=AGENT,
+            tool_id=WRITE,
+            seq_no=0,
+            args={"charge_id": cid},
+            task_ids=(cid,),
+        )
+        det.update(e, TYPES)
+        tr.observe(e)
+    rec = det._store.get(key_flow(AGENT, WRITE, "charge_id"))
+    assert isinstance(rec, FlowRecord) and (rec.present, rec.total) == (25, 25)
+    assert rec.producers == {}  # task inputs have no producer tool
+    assert flow_score(det, {"charge_id": "ch_fabricated1"}) == 1.0
+
+
+def test_bloom_only_id_counts_as_present() -> None:
+    """An id in session_ids_seen with no ledger ref (Bloom overflow) is present, not missing."""
+    eng = warm_flow_engine(LEDGER_CFG, present_rate=0.95)
+    e = make_env(
+        tracker=SessionTracker(),
+        session_id="bl",
+        agent_id=AGENT,
+        tool_id=WRITE,
+        seq_no=0,
+        args={"charge_id": "ch_bloomonly1"},
+    )
+    e = dataclasses.replace(e, session_ids_seen=frozenset({"ch_bloomonly1"}))  # type: ignore[arg-type]
+    assert e.ledger_refs == ()
+    s, _ = eng._s_flow(e, TYPES)
+    assert s == 0.0
+
+
+def test_producers_tallied_and_usual_producer() -> None:
+    eng = warm_flow_engine(LEDGER_CFG, present_rate=0.95)
+    rec = eng._store.get(key_flow(AGENT, WRITE, "charge_id"))
+    assert isinstance(rec, FlowRecord)
+    assert rec.producers == {READ: 38}
+    assert eng.usual_producer(AGENT, WRITE, "charge_id") == READ
+    assert eng.usual_producer(AGENT, WRITE, "other_id") is None
+    assert eng.usual_producer("nobody", WRITE, "charge_id") is None
+    assert FlowRecord.from_dict(rec.to_dict()).producers == rec.producers
+
+
+def test_usual_producer_ties_break_by_name_and_is_read_only() -> None:
+    det = SequenceDetector(DictStore(), LEDGER_CFG)
+    det._store.put(key_flow(AGENT, WRITE, "charge_id"), FlowRecord(4, 4, {"z.b": 2, "a.b": 2}))
+    before = det._store.nbytes()
+    assert det.usual_producer(AGENT, WRITE, "charge_id") == "a.b"
+    assert det._store.nbytes() == before
+
+
+def test_evidence_n_and_no_raw_ids() -> None:
+    eng = warm_flow_engine(LEDGER_CFG, present_rate=0.95)
+    s, ev = flow_eval(eng, {"charge_id": "ch_fabricated1"})
+    assert ev["n"] == 40 and ev["missing_id_path"] == "charge_id"
+    assert "ch_fabricated1" not in orjson.dumps(ev).decode()
+    assert flow_eval(eng, {"charge_id": "ch_fromtask01"}, ("ch_fromtask01",))[1]["n"] == 40
+    off = warm_flow_engine(EngineConfig(), 0.95)
+    assert flow_eval(off, {"charge_id": "ch_fabricated1"})[1]["ref_source"] is None
+    assert flow_eval(off, {"charge_id": "ch_fabricated1"})[1]["n"] == 40
+
+
+def test_ledger_score_is_pure() -> None:
+    eng = warm_flow_engine(LEDGER_CFG, present_rate=0.95)
+    dump = {k: orjson.dumps(r.to_dict()) for k, r in eng._store.items()}
+    flow_score(eng, {"charge_id": "ch_fabricated1"})
+    assert {k: orjson.dumps(r.to_dict()) for k, r in eng._store.items()} == dump
+
+
+def test_strict_replay_with_flow_ledger_has_no_leak() -> None:
+    from agentfw.bench.ci_regress import ci_dataset
+    from agentfw.bench.replay import SplitSpec, replay
+    from agentfw.core.engine import Engine
+
+    raws, labels = ci_dataset()
+    rows = replay(raws, labels, Engine(cfg=LEDGER_CFG), SplitSpec(), strict=True)
+    assert len(rows) == len(raws)

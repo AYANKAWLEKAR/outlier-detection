@@ -90,6 +90,10 @@ A1_DEFAULTS: dict[str, object] = {
 }
 
 
+# Task 1.4 trajectory switches (T-03): off by default.
+TRAJECTORY_SWITCH_DEFAULTS: dict[str, object] = {"flow_ledger": False}
+
+
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
         GLOBAL_CONSTRAINT_VALUES
@@ -98,6 +102,7 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | DECISION_OVERRIDES
         | USER_DECISION_DEFAULTS
         | A1_DEFAULTS
+        | TRAJECTORY_SWITCH_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
 

@@ -99,6 +99,9 @@ class EngineConfig:
     seq_prereq_graded: bool = True
     # Id flow (§6.7-6.8)
     flow_min_obs: int = 20
+    # Task 1.4 switch (T-04): "present" = a ledger ref on the envelope or a session_ids_seen hit,
+    # so ids seeded from the task input count as flowing. False = v3 (session_ids_seen only).
+    flow_ledger: bool = False
     # Fusion (§6.11)
     fusion_bonus: float = 0.15
     fusion_bonus_gate: float = 0.5
