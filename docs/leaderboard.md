@@ -20,7 +20,7 @@ Rows from the leaderboard runs, split `time`: `engine`: runs `engine` (oracle-re
 
 Warm test rows at live per-agent thresholds, attack level (slow_drift excluded). Amended criterion (spec A1.7): per family attack recall >= 0.9 and among-the-reasons share >= 0.9, benign FPR <= 0.02. Among = share of detected attacks with the targeted detector among the reasons (score > reason_min) of a flagged row; top-1 = the original spec §9 criterion, reported and not gated. Each line is the result under one protocol; the two lines are shown together and neither alone is the Tier-1 gate result. Which protocol closes Tier 1 is the user's open decision (D-028).
 
-The magnitude_spike cell is shown only with its two companion rows (spec A1.5 rule 4): the engine before Amendment A1 on the same dataset (`pre-A1 engine (defaults + PRE_A1_SWITCHES)`, always computed by the CLI) and the amended engine on the sensitivity dataset (`magnitude_far_mult = 1.0`, CLI option `--sensitivity-traces DIR`), printed after the main blocks.
+The magnitude_spike cell is shown only with its two companion rows (spec A1.5 rule 4): the engine before Amendment A1 on the same dataset (`pre-A1 engine (defaults + PRE_A1_SWITCHES)`, the leaderboard runs `engine-pre-a1` and `engine-pre-a1-allow-all`) and the amended engine on the sensitivity dataset (`magnitude_far_mult = 1.0`, rows copied from `docs/decisions/evidence/a1-gate/matrix.json`), printed after the main blocks.
 
 ### engine
 
@@ -29,12 +29,16 @@ The magnitude_spike cell is shown only with its two companion rows (spec A1.5 ru
 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 1.000 (81/81); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 1.00; 0.84 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 1.000 (50/50); 1.00; 0.40 | 0.0058 | 0.035 | PASS |
 | spec §5.2 allow-all | 0.938 (76/81); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 0.579 (11/19); 1.00; 1.00 | 0.533 (8/15); 1.00; 1.00 | 0.163 (8/49); 1.00; 1.00 | 0.800 (40/50); 1.00; 0.40 | 0.0014 | 0.007 | FAIL: recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
 
+Census of the magnitude_spike gate cell (spec A1.4): n 81 (warm test rows, bucket 10-100) by persona: support-refunds-c 22, lead-router-a 17, support-refunds-a 11, sales-ops-a 8, support-refunds-b 8, billing-disputes-a 4, sales-ops-b 4, crm-hygiene-a 3, exec-assistant-a 2, payouts-ops-a 1, renewals-a 1; over all 264 spikes of the dataset, median strength 48.3 and share with strength >= 10 0.970.
+
 ### pre-A1 engine (defaults + PRE_A1_SWITCHES)
 
 | Protocol | magnitude_spike 10-100: recall (n/N); among; top-1 (original spec §9 criterion) | scope_blowup all: recall (n/N); among; top-1 (original spec §9 criterion) | exfil_volume all: recall (n/N); among; top-1 (original spec §9 criterion) | prereq_skip all: recall (n/N); among; top-1 (original spec §9 criterion) | novel_target all: recall (n/N); among; top-1 (original spec §9 criterion) | velocity_burst all: recall (n/N); among; top-1 (original spec §9 criterion) | benign FPR | control FPR | amended criterion |
 |---|---|---|---|---|---|---|---|---|---|
 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.975 (79/81); 1.00; 0.99 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 0.89; 0.58 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 0.880 (44/50); 1.00; 0.30 | 0.0092 | 0.134 | FAIL: among:exfil_volume, recall:velocity_burst |
 | spec §5.2 allow-all | 0.753 (61/81); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 0.474 (9/19); 1.00; 1.00 | 0.667 (10/15); 1.00; 1.00 | 0.469 (23/49); 1.00; 1.00 | 0.680 (34/50); 1.00; 0.29 | 0.0025 | 0.060 | FAIL: recall:magnitude_spike, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
+
+Census of the magnitude_spike gate cell (spec A1.4): n 81 (warm test rows, bucket 10-100) by persona: support-refunds-c 22, lead-router-a 17, support-refunds-a 11, sales-ops-a 8, support-refunds-b 8, billing-disputes-a 4, sales-ops-b 4, crm-hygiene-a 3, exec-assistant-a 2, payouts-ops-a 1, renewals-a 1; over all 264 spikes of the dataset, median strength 48.3 and share with strength >= 10 0.970.
 
 ## Companion: sensitivity dataset (magnitude_far_mult = 1.0)
 
