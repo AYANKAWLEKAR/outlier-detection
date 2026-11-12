@@ -6,7 +6,9 @@
 Writes three score tables of one configuration (default: the spec engine, outcomes "allow"):
   primary.parquet   -- replay(outcomes=OUTCOMES) with spec_config(params), i.e.
                        EngineConfig().replace(**{**SPEC_SWITCHES, **params}): PARAMS apply on top
-                       of the spec values of the switches the user later made defaults (U1)
+                       of the spec values of the switches the user later made defaults (U1) and
+                       of the pre-amendment scoring (PRE_A1_SWITCHES, Amendment A1), so 008's
+                       candidates replay the engine before Amendment A1
   oraclecal.parquet -- the same, but the calibrator never learns attack-labelled calls
   oracle.parquet    -- the same config with replay(outcomes="oracle"): nothing learns attacks
 The two oracle variants read every label: diagnostics only, never reported numbers.

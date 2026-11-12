@@ -813,5 +813,6 @@ def test_pre_a1_velocity_state_scores_immediately(tmp_path: Path) -> None:
     assert scores[-1].evidence["z"] == pytest.approx(_count_z(25, 2.0, 2.0, 2.0), abs=1e-2)
 
 
-def test_default_is_still_logz() -> None:
-    assert EngineConfig().vel_count_stat == "logz"
+def test_default_is_poisson() -> None:
+    """A1.9 (Task 1.21): the amended count signal is the default; "logz" stays selectable."""
+    assert EngineConfig().vel_count_stat == "poisson"

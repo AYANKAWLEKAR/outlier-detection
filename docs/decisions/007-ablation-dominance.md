@@ -39,3 +39,23 @@ Option 2. The `engine-no-magnitude` case is a strict xfail on `tiny_dataset`, an
 ablations stay asserted. Ablation conclusions should be read from per-family attack-level recall, not
 envelope AUPRC. Whether the Tier-1 "ablation table" exit criterion needs an attack-level AUPRC is left
 to the controller (Task 1.15).
+
+## Addendum 2026-11-11 (Amendment A1, Task 1.21): the `tiny_dataset` xfail XPASSes and is removed
+
+With the Amendment A1 scoring as the engine default (`vel_count_stat = "poisson"`,
+`mag_score = "tail"`, `mag_bool_numeric = True`; spec A1.1 to A1.3), the strict xfail on
+`engine-no-magnitude` XPASSed, so the mark is removed and the property is asserted for all four
+single-detector ablations on `tiny_dataset`. Warm test AUPRC, replay outcomes `allow`, measured on
+the implementation:
+
+| engine configuration | engine | engine-no-magnitude | engine-no-novelty | engine-no-velocity | engine-no-sequence |
+|---|---|---|---|---|---|
+| defaults (Amendment A1 scoring) | 0.608 | 0.522 | 0.381 | 0.557 | 0.485 |
+| `PRE_A1_SWITCHES` (pre-amendment scoring) | 0.472 | 0.521 | 0.268 | 0.436 | 0.380 |
+
+The pre-amendment row still violates the property (0.472 < 0.521; it was 0.449 < 0.500 when this
+record was written, before the user-decision defaults of decision 008). The change comes from the
+scoring, not from the data: the dataset is the same, and `engine-no-magnitude` barely moves
+(0.522 vs 0.521, the velocity count statistic only). The 90-day seed-0 evidence above was not
+re-measured and still reflects the pre-amendment engine. The reading advice stands: ablation
+conclusions come from per-family attack-level recall, not envelope AUPRC.

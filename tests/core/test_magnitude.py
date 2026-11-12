@@ -13,6 +13,7 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
+from agentfw.bench.sweeps import PRE_A1_SWITCHES
 from agentfw.core.config import EngineConfig
 from agentfw.core.detectors.base import iter_fields, normal_sf, posterior, signed_log1p, squash
 from agentfw.core.detectors.magnitude import MagnitudeDetector, MagRecord, direction_for
@@ -505,19 +506,22 @@ TAIL_EVIDENCE_KEYS = {
 }
 
 
-def test_default_is_still_z() -> None:
-    assert EngineConfig().mag_score == "z" and EngineConfig().tail_prior == 0.005
+def test_default_is_tail() -> None:
+    """A1.9 (Task 1.21): the tail score is the default; "z" stays selectable."""
+    assert EngineConfig().mag_score == "tail" and EngineConfig().tail_prior == 0.005
 
 
-def test_z_rule_is_unchanged_and_has_no_p_tail(trained_mag: Trained) -> None:
+def test_z_rule_is_unchanged_and_has_no_p_tail() -> None:
+    """The pre-amendment engine (``PRE_A1_SWITCHES``) still scores magnitude by the §6.3 rule."""
+    pre_a1 = build(_lognormal(), cfg=EngineConfig().replace(**PRE_A1_SWITCHES))
     explicit = build(_lognormal(), cfg=Z)
     for x in (37.0, 370.0, 740.0):
-        (default,) = scores_for(trained_mag, {"amount": x})
+        (old,) = scores_for(pre_a1, {"amount": x})
         (same,) = scores_for(explicit, {"amount": x})
-        assert default == same
-        assert set(default.evidence) == TAIL_EVIDENCE_KEYS - {"p_tail"}
-        z = default.evidence["z"]
-        assert isinstance(z, float) and default.score == squash(z, Z.z0, Z.tau)
+        assert old == same
+        assert set(old.evidence) == TAIL_EVIDENCE_KEYS - {"p_tail"}
+        z = old.evidence["z"]
+        assert isinstance(z, float) and old.score == squash(z, Z.z0, Z.tau)
 
 
 @pytest.mark.parametrize("value", ["Tail", "zscore", "", None, 1])

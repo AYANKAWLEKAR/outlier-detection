@@ -19,11 +19,11 @@ The long sweeps run outside pytest: ``python -m agentfw.bench.sweeps --traces DI
 (see :func:`main`), which also measures quantile tail error (Open Decision 1) and velocity
 long-window memory (Open Decision 4), and writes ``sweeps.json`` + ``sweeps.md``. Suite ``gate``
 (Task 1.15, decision 008) replays :data:`GATE_CANDIDATES`, each with its replay outcome mode and
-the spec values of the three user-decision switches pinned (:data:`SPEC_SWITCHES`), so it keeps
-reproducing decision 008's evidence; it adds the live-threshold trajectory summary (the censoring
-ratchet). Every other suite replays the current defaults under ``--outcomes`` (default: the
-benchmark protocol ``BENCH_OUTCOMES``, the oracle-reviewer approval loop); :func:`sweep` takes the
-outcome mode explicitly.
+the spec values of the three user-decision switches and of the three Amendment A1 scoring
+switches pinned (:data:`SPEC_SWITCHES`), so it keeps reproducing decision 008's evidence; it
+adds the live-threshold trajectory summary (the censoring ratchet). Every other suite replays the
+current defaults under ``--outcomes`` (default: the benchmark protocol ``BENCH_OUTCOMES``, the
+oracle-reviewer approval loop); :func:`sweep` takes the outcome mode explicitly.
 """
 
 from __future__ import annotations
@@ -80,7 +80,9 @@ from agentfw.synth.generate import generate
 
 __all__ = [
     "GATE_CANDIDATES",
+    "PRE_A1_SWITCHES",
     "SPEC_SWITCHES",
+    "Z0TAU_NOTE",
     "SweepRow",
     "calibration_tail_error",
     "field_tail_errors",
@@ -380,6 +382,11 @@ def velocity_memory(det: Detector) -> dict[str, float]:
 # --- CLI ----------------------------------------------------------------------------------------
 
 Z0_TAU: dict[str, list[object]] = {"z0": [2.5, 3.0, 3.5], "tau": [0.5, 0.75, 1.0]}
+#: Printed under the ``z0tau`` suite (spec A1.2).
+Z0TAU_NOTE = (
+    "z0 and tau are read by velocity (both signals) and by mag_score = z (spec §6.3). At the "
+    "defaults (mag_score = tail, Amendment A1.2) this suite moves velocity only."
+)
 CAL_ALPHAS = [0.005, 0.01]
 SUITE_GRIDS: dict[str, dict[str, list[object]]] = {
     "z0tau": Z0_TAU,
@@ -397,24 +404,36 @@ ABLATION_VARIANTS = [
     *(f"engine-only-{d}" for d in DETECTOR_ORDER),
     "engine-no-priors",
 ]
+#: The scoring of the engine before Amendment A1 (spec A1.9): §6.4 count z, §6.3 magnitude z,
+#: BOOL-typed fields skipped by magnitude. On top of the defaults these alone reproduce the
+#: pre-amendment engine.
+PRE_A1_SWITCHES: dict[str, object] = {
+    "vel_count_stat": "logz",
+    "mag_score": "z",
+    "mag_bool_numeric": False,
+}
 #: Spec values of the three switches the user turned on by default (decision 008, user decision
-#: 2026-11-10). Every gate candidate starts from them, so the suite keeps decision 008's meaning.
+#: 2026-11-10) and of the Amendment A1 scoring (:data:`PRE_A1_SWITCHES`). Every gate candidate
+#: starts from them, so the suite keeps decision 008's meaning.
 SPEC_SWITCHES: dict[str, object] = {
     "vel_count_attempts": False,
     "seq_prereq_graded": False,
     "novelty_full_n": 200,
+    **PRE_A1_SWITCHES,
 }
 #: Task 1.15 gate candidates (docs/decisions/008-tier1-gate.md): ``(setting, params, outcomes)``,
 #: params on top of :data:`SPEC_SWITCHES`. "default" is the spec engine under the spec's
 #: allow-all replay. "oracle-reviewer" rows use replay outcomes "review": the oracle-reviewer
 #: approval loop (labels act as a perfect human reviewer → optimistic). ``oracle`` reads every
 #: label (attacks never learned): a diagnostic upper bound only. The last oracle-reviewer row
-#: (all three switches) is today's benchmark protocol and engine defaults (user decision).
+#: (all three switches) is the benchmark protocol and the engine defaults of the user decision,
+#: i.e. the engine before Amendment A1 (its scoring switches stay at :data:`PRE_A1_SWITCHES`).
 REVIEW_NOTE = (
     f"oracle-reviewer = {PROTOCOL_LABELS['review']}; oracle = no call labelled attack is ever "
     f'learned (diagnostic). "default" is the spec engine under {PROTOCOL_LABELS["allow"]}. The '
-    "benchmark protocol and engine defaults (user decision 2026-11-10) are the row "
-    '"oracle-reviewer, vel attempts, graded prereq, novelty_full_n=50".'
+    "benchmark protocol and engine defaults of the user decision (2026-11-10) are the row "
+    '"oracle-reviewer, vel attempts, graded prereq, novelty_full_n=50": the engine before '
+    "Amendment A1 (every row keeps the pre-amendment scoring)."
 )
 _W: dict[str, object] = {"cal_censor": "winsorize"}
 _W500: dict[str, object] = {**_W, "cal_censor_min_n": 500}
@@ -649,6 +668,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     f"| {e['setting']} | {int(vm['vel_keys'])} | {int(vm['vel_json_sparse'])} "
                     f"| {int(vm['vel_json_dense'])} | {int(vm['vel_json_no_long'])} |"
                 )
+        if s == "z0tau":
+            md += ["", Z0TAU_NOTE]
         if s == "gate":
             md += ["", REVIEW_NOTE, "", *_trajectory_summary_md(entries)]
         if s == "saturation":

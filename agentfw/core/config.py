@@ -45,11 +45,12 @@ class EngineConfig:
     # ``mag_resp_signal``: score/learn the previous response's ``item_count`` (§2.3).
     mag_direction_default: Direction = "both"
     mag_resp_signal: bool = True
-    # Amendment A1.2: how a value's distance from the median becomes a score. "z" (spec §6.3): the
-    # IQR-scaled robust z through ``squash(z, z0, tau)``; "tail": a two-piece robust scale on the
-    # side the value falls on, the normal upper-tail probability p of its z, and the posterior
-    # ``tail_prior / (tail_prior + (1 - tail_prior) * p)``. No state differs between the two.
-    mag_score: ScoreModel = "z"
+    # Amendment A1.2: how a value's distance from the median becomes a score. "tail" (default):
+    # a two-piece robust scale on the side the value falls on, the normal upper-tail probability
+    # p of its z, and the posterior ``tail_prior / (tail_prior + (1 - tail_prior) * p)``; "z"
+    # (spec §6.3, pre-amendment): the IQR-scaled robust z through ``squash(z, z0, tau)``. No
+    # state differs between the two.
+    mag_score: ScoreModel = "tail"
     # Prior anomaly rate of the tail score. Equals ``cal_alpha`` by definition (D-023); a field of
     # its own so that a ``cal_alpha`` sweep moves thresholds and not scores. Fixed by the spec:
     # never swept, never tuned against benchmark recall.
@@ -57,9 +58,10 @@ class EngineConfig:
     # Amendment A1.3: in a BOOL-typed field (a history of only 0 and 1) magnitude also learns the
     # values that parse as finite numbers (never Python bools or "true"/"false") and scores the
     # ones that contradict BOOL (a number outside {0, 1}); novelty then scores such a value only
-    # while magnitude has no usable reference for the field. False: the pre-amendment behaviour
-    # (magnitude skips BOOL-typed fields, novelty scores the contradiction as unseen).
-    mag_bool_numeric: bool = False
+    # while magnitude has no usable reference for the field. Default True; False: the
+    # pre-amendment behaviour (magnitude skips BOOL-typed fields, novelty scores the
+    # contradiction as unseen).
+    mag_bool_numeric: bool = True
     # Pooled priors (§6.10)
     prior_iqr_inflate: float = 1.5
     prior_novelty_discount: float = 0.67
@@ -74,10 +76,11 @@ class EngineConfig:
     # the short window's scored count; they never enter the history baseline. Default on by user
     # decision (2026-11-10, decision 008 "User decision"); False = spec.
     vel_count_attempts: bool = True
-    # Amendment A1.1: how the count signal turns the short-window count into z. "logz" (spec
-    # §6.4): robust z of ln(1 + count); "poisson": the normal deviate of the Poisson upper tail
-    # at the key's median window count, over its over-dispersion. The money sum is always "logz".
-    vel_count_stat: VelCountStat = "logz"
+    # Amendment A1.1: how the count signal turns the short-window count into z. "poisson"
+    # (default): the normal deviate of the Poisson upper tail at the key's median window count,
+    # over its over-dispersion; "logz" (spec §6.4, pre-amendment): robust z of ln(1 + count).
+    # The money sum is always "logz".
+    vel_count_stat: VelCountStat = "poisson"
     # Novelty (§6.5)
     novelty_lru: int = 10_000
     # Novelty ramp min(1, n / novelty_full_n): 50 by user decision (2026-11-10, decision 008);

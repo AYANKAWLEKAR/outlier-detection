@@ -847,8 +847,9 @@ def test_pinned_first_non_bool_number_scores_one_and_persists_while_blocked_pre_
     assert eng.store.get(key_mag("a", "shop.order", "qty")) is None  # BOOL history: never pushed
 
 
-def test_default_is_still_pre_a1() -> None:
-    assert EngineConfig().mag_bool_numeric is False
+def test_default_is_a1() -> None:
+    """A1.9 (Task 1.21): magnitude scores BOOL-typed numbers by default; False stays selectable."""
+    assert EngineConfig().mag_bool_numeric is True
 
 
 def test_bool_to_numeric_retype_does_not_start_cold() -> None:

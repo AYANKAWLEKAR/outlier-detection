@@ -78,13 +78,15 @@ DECISION_OVERRIDES: dict[str, object] = {
     "prereq_rate": 0.90,  # docs/decisions/003-prereq-threshold.md
 }
 
-# Amendment A1 (spec A1.9). ``vel_count_stat`` and ``mag_score`` stay at the §6.4 / §6.3 rules
-# until Task 1.21 flips them. ``tail_prior`` equals ``cal_alpha`` by definition (D-023).
+# Amendment A1 (spec A1.9): the amended scoring is the default (Task 1.21). Pre-amendment values:
+# vel_count_stat="logz" (§6.4), mag_score="z" (§6.3), mag_bool_numeric=False; tests of the old
+# behaviour pin them explicitly (``agentfw.bench.sweeps.PRE_A1_SWITCHES``). ``tail_prior``
+# equals ``cal_alpha`` by definition (D-023).
 A1_DEFAULTS: dict[str, object] = {
-    "vel_count_stat": "logz",
-    "mag_score": "z",
+    "vel_count_stat": "poisson",
+    "mag_score": "tail",
     "tail_prior": 0.005,
-    "mag_bool_numeric": False,
+    "mag_bool_numeric": True,
 }
 
 
@@ -98,6 +100,10 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | A1_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
+
+
+def test_tail_prior_equals_cal_alpha_by_default() -> None:
+    assert EngineConfig().tail_prior == EngineConfig().cal_alpha == 0.005
 
 
 def test_vel_count_stat_values() -> None:

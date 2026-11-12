@@ -5,7 +5,9 @@
 e.g. ... traces/sweep-seed0 review '{"vel_count_attempts": true, "seq_prereq_graded": true,
 "novelty_full_n": 50}'. JSON_PARAMS apply on top of the spec engine: the config is
 spec_config(params) = EngineConfig().replace(**{**SPEC_SWITCHES, **params}), so '{}' is the spec
-engine even though the engine defaults changed later (user decision, Task U1). Per gate family (warm test, live thresholds): detected attacks, the top-1
+engine even though the engine defaults changed later (user decision, Task U1; Amendment A1 scoring,
+Task 1.21: SPEC_SWITCHES includes PRE_A1_SWITCHES, so every candidate is the engine before
+Amendment A1). Per gate family (warm test, live thresholds): detected attacks, the top-1
 detector:part of each detected attack's representative row (the brief's top_reason_share), and
 reason_share = share of detected attacks with the targeted detector among the reasons (score >
 reason_min) of a flagged row. Then flagged calls (block + require_approval) per agent-day.

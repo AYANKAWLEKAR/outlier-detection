@@ -35,24 +35,11 @@ def test_ablation_returns_one_row_per_variant_in_order(ablation: list[AblationRo
         assert set(r.per_family_recall) == {"magnitude_spike", "prereq_skip", "novel_target"}
 
 
-# Measured in Task 1.14: on tiny_dataset (5 days, 18 warm test attack rows) removing magnitude
-# RAISES warm AUPRC (0.449 -> 0.500): magnitude's benign false positives on short-history keys
-# outrank attacks. Kept as a strict xfail so the property is re-checked automatically (an XPASS
-# fails the run) -- see docs/decisions/007-ablation-dominance.md.
-_MAG_HURTS = pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="Task 1.14 finding: engine-no-magnitude beats engine on tiny_dataset",
-)
-
-
-@pytest.mark.parametrize(
-    "variant",
-    [
-        pytest.param(v, marks=_MAG_HURTS) if v == "engine-no-magnitude" else v
-        for v in ABLATION_VARIANTS[1:]
-    ],
-)
+# Task 1.14 found removing magnitude RAISED warm AUPRC on tiny_dataset (a strict xfail). With the
+# Amendment A1 scoring as the default the property holds for every single-detector ablation
+# (Task 1.21: engine 0.608 >= engine-no-magnitude 0.522) -- see
+# docs/decisions/007-ablation-dominance.md, addendum 2026-11-11.
+@pytest.mark.parametrize("variant", ABLATION_VARIANTS[1:])
 def test_full_engine_auprc_at_least_every_single_detector_ablation(
     ablation: list[AblationRow], variant: str
 ) -> None:
@@ -346,19 +333,41 @@ def test_bench_tools_require_an_explicit_protocol(tiny_dataset: Path) -> None:
 
 def test_gate_candidates_pin_the_spec_switches() -> None:
     """The 008 evidence suite keeps its meaning: "default" is the spec engine, allow-all."""
-    from agentfw.bench.sweeps import GATE_CANDIDATES, SPEC_SWITCHES
+    from agentfw.bench.sweeps import GATE_CANDIDATES, PRE_A1_SWITCHES, REVIEW_NOTE, SPEC_SWITCHES
     from agentfw.core.config import EngineConfig
 
+    assert PRE_A1_SWITCHES == {
+        "vel_count_stat": "logz",
+        "mag_score": "z",
+        "mag_bool_numeric": False,
+    }
     assert SPEC_SWITCHES == {
         "vel_count_attempts": False,
         "seq_prereq_graded": False,
         "novelty_full_n": 200,
+        **PRE_A1_SWITCHES,
     }
     by_name = {n: (p, o) for n, p, o in GATE_CANDIDATES}
     assert by_name["default"] == (SPEC_SWITCHES, "allow")
     assert all(set(SPEC_SWITCHES) <= set(p) for p, _ in by_name.values())
-    rec, mode = by_name["oracle-reviewer, vel attempts, graded prereq, novelty_full_n=50"]
-    assert EngineConfig().replace(**rec) == EngineConfig() and mode == "review"
+    rec_name = "oracle-reviewer, vel attempts, graded prereq, novelty_full_n=50"
+    rec, mode = by_name[rec_name]
+    # 008's recommended candidate is the engine before Amendment A1, not today's default.
+    assert EngineConfig().replace(**rec) == EngineConfig().replace(**PRE_A1_SWITCHES)
+    assert mode == "review"
+    assert EngineConfig().replace(**PRE_A1_SWITCHES) != EngineConfig()
+    assert f'"{rec_name}"' in REVIEW_NOTE and "before Amendment A1" in REVIEW_NOTE
+
+
+def test_z0tau_note_is_printed_in_sweeps_md(tiny_dataset: Path, tmp_path: Path) -> None:
+    """At the defaults z0 / tau move velocity only (A1.2): sweeps.md says so under z0tau."""
+    from agentfw.bench.sweeps import Z0TAU_NOTE, main
+
+    assert "velocity only" in Z0TAU_NOTE and "A1.2" in Z0TAU_NOTE
+    args = ["--traces", str(tiny_dataset), "--out", str(tmp_path), "--suites", "z0tau"]
+    assert main([*args, "--outcomes", "allow"]) == 0
+    md = (tmp_path / "sweeps.md").read_text()
+    assert Z0TAU_NOTE in md.split("## z0tau", 1)[1]
 
 
 def test_sweeps_cli_records_the_protocol_of_the_grid_suites(
