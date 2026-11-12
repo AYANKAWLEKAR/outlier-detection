@@ -44,7 +44,7 @@ The magnitude_spike cell is shown only with its two companion rows (spec A1.5 ru
 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.975 (79/81); 1.00; 0.99 | 1.000 (13/13); 1.00; 0.85 | 1.000 (19/19); 0.89; 0.58 | 1.000 (15/15); 1.00; 1.00 | 1.000 (49/49); 1.00; 1.00 | 0.880 (44/50); 1.00; 0.30 | 0.0092 | 0.134 | FAIL: among:exfil_volume, recall:velocity_burst |
 | spec §5.2 allow-all | 0.753 (61/81); 1.00; 1.00 | 1.000 (13/13); 1.00; 0.85 | 0.474 (9/19); 1.00; 1.00 | 0.667 (10/15); 1.00; 1.00 | 0.469 (23/49); 1.00; 1.00 | 0.680 (34/50); 1.00; 0.29 | 0.0025 | 0.060 | FAIL: recall:magnitude_spike, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
 
-### Companion: sensitivity dataset (magnitude_far_mult = 1.0)
+### Companion: sensitivity dataset (seed 0, magnitude_far_mult = 1.0)
 
 The same engine rows replayed on the sensitivity dataset. They are the companion rows of the magnitude_spike cell, not gate results.
 
@@ -86,7 +86,7 @@ The magnitude_spike cell is shown only with its two companion rows (spec A1.5 ru
 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.988 (84/85); 1.00; 0.98 | 1.000 (24/24); 1.00; 1.00 | 0.966 (28/29); 1.00; 0.64 | 1.000 (18/18); 1.00; 1.00 | 1.000 (36/36); 1.00; 1.00 | 0.962 (50/52); 1.00; 0.22 | 0.0087 | 0.087 | PASS |
 | spec §5.2 allow-all | 0.788 (67/85); 1.00; 0.94 | 0.792 (19/24); 1.00; 1.00 | 0.586 (17/29); 1.00; 1.00 | 0.667 (12/18); 1.00; 1.00 | 0.444 (16/36); 1.00; 1.00 | 0.635 (33/52); 1.00; 0.15 | 0.0030 | 0.049 | FAIL: recall:magnitude_spike, recall:scope_blowup, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
 
-### Companion: sensitivity dataset (magnitude_far_mult = 1.0)
+### Companion: sensitivity dataset (seed 0, magnitude_far_mult = 1.0)
 
 The same engine rows replayed on the sensitivity dataset. They are the companion rows of the magnitude_spike cell, not gate results.
 
@@ -128,7 +128,7 @@ The magnitude_spike cell is shown only with its two companion rows (spec A1.5 ru
 | oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) | 0.953 (81/85); 1.00; 0.98 | 1.000 (13/13); 1.00; 1.00 | 0.895 (34/38); 0.88; 0.65 | 1.000 (13/13); 1.00; 1.00 | 1.000 (38/38); 1.00; 1.00 | 0.864 (38/44); 1.00; 0.29 | 0.0089 | 0.108 | FAIL: recall:exfil_volume, among:exfil_volume, recall:velocity_burst |
 | spec §5.2 allow-all | 0.800 (68/85); 1.00; 0.97 | 0.615 (8/13); 1.00; 1.00 | 0.500 (19/38); 0.95; 0.95 | 0.846 (11/13); 1.00; 1.00 | 0.474 (18/38); 1.00; 1.00 | 0.591 (26/44); 1.00; 0.27 | 0.0025 | 0.062 | FAIL: recall:magnitude_spike, recall:scope_blowup, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst |
 
-### Companion: sensitivity dataset (magnitude_far_mult = 1.0)
+### Companion: sensitivity dataset (seed 0, magnitude_far_mult = 1.0)
 
 The same engine rows replayed on the sensitivity dataset. They are the companion rows of the magnitude_spike cell, not gate results.
 
@@ -206,7 +206,7 @@ Recalls within one attack of the expectation count as a match; score hashes are 
 | prereq_skip | 0 | 1.000 (15/15); among 1.00 | 1.000 (15/15); among 1.00 | 0.533 (8/15); among 1.00 | 0.533 (8/15); among 1.00 | yes / yes | review: recall or among below 0.90; allow: expected to fail, recorded | no |
 | novel_target | 0 | 1.000 (49/49); among 1.00 | 1.000 (49/49); among 1.00 | 0.163 (8/49); among 1.00 | 0.163 (8/49); among 1.00 | yes / yes | review: recall or among below 0.90; allow: expected to fail, recorded | no |
 | velocity_burst | 0 | 1.000 (50/50); among 1.00 | 1.000 (50/50); among 1.00 | 0.800 (40/50); among 1.00 | 0.800 (40/50); among 1.00 | yes / yes | review: recall or among below 0.90; allow: expected to fail, recorded | no |
-| benign FPR; control FPR | 0 | 0.58 %; 3.5 % | 0.58 %; 3.5 % | 0.14 %; 0.7 % | 0.14 %; 0.7 % | - | review: benign FPR above 2 % | no |
+| benign FPR; control FPR | 0 | 0.58 %; 3.50 % | 0.58 %; 3.52 % | 0.14 %; 0.70 % | 0.14 %; 0.73 % | - | review: benign FPR above 2 % | no |
 | share of benign magnitude scores >= 0.5 | 0 | 0.47 % | 0.47 % | not stated | 0.48 % | - | review: above 1.0 % | no |
 | amended gate (A1.7) | 0 | PASS | PASS | FAIL | FAIL: recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst | - | (covered by the lines above) | no |
 | magnitude_spike | 1 | 1.000 (85/85); among 1.00 | 1.000 (85/85); among 1.00 | 0.824 (70/85); among 1.00 | 0.824 (70/85); among 1.00 | yes / yes | review: recall or among below 0.90; allow: expected to fail, recorded | no |
@@ -215,7 +215,7 @@ Recalls within one attack of the expectation count as a match; score hashes are 
 | prereq_skip | 1 | 1.000 (18/18); among 1.00 | 1.000 (18/18); among 1.00 | 0.667 (12/18); among 1.00 | 0.667 (12/18); among 1.00 | yes / yes | review: recall or among below 0.90; allow: expected to fail, recorded | no |
 | novel_target | 1 | 1.000 (36/36); among 1.00 | 1.000 (36/36); among 1.00 | 0.222 (8/36); among 1.00 | 0.222 (8/36); among 1.00 | yes / yes | review: recall or among below 0.90; allow: expected to fail, recorded | no |
 | velocity_burst | 1 | 0.981 (51/52); among 1.00 | 0.981 (51/52); among 1.00 | 0.808 (42/52); among 1.00 | 0.808 (42/52); among 1.00 | yes / yes | review: recall or among below 0.90; allow: expected to fail, recorded | no |
-| benign FPR; control FPR | 1 | 0.62 %; 2.8 % | 0.62 %; 2.8 % | 0.23 %; 1.3 % | 0.23 %; 1.3 % | - | review: benign FPR above 2 % | no |
+| benign FPR; control FPR | 1 | 0.62 %; 2.80 % | 0.62 %; 2.78 % | 0.23 %; 1.30 % | 0.23 %; 1.31 % | - | review: benign FPR above 2 % | no |
 | share of benign magnitude scores >= 0.5 | 1 | 0.52 % | 0.52 % | not stated | 0.53 % | - | review: above 1.0 % | no |
 | amended gate (A1.7) | 1 | PASS | PASS | FAIL | FAIL: recall:magnitude_spike, recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst | - | (covered by the lines above) | no |
 | magnitude_spike | 2 | none (unused seed) | 1.000 (85/85); among 1.00 | none (unused seed) | 0.965 (82/85); among 1.00 | - / - | see the amended gate line | no |
@@ -224,15 +224,18 @@ Recalls within one attack of the expectation count as a match; score hashes are 
 | prereq_skip | 2 | none (unused seed) | 1.000 (13/13); among 1.00 | none (unused seed) | 0.846 (11/13); among 1.00 | - / - | see the amended gate line | no |
 | novel_target | 2 | none (unused seed) | 1.000 (38/38); among 1.00 | none (unused seed) | 0.211 (8/38); among 1.00 | - / - | see the amended gate line | no |
 | velocity_burst | 2 | none (unused seed) | 1.000 (44/44); among 1.00 | none (unused seed) | 0.682 (30/44); among 1.00 | - / - | see the amended gate line | no |
-| benign FPR; control FPR | 2 | none (unused seed) | 0.50 %; 5.0 % | none (unused seed) | 0.18 %; 3.1 % | - | review: benign FPR above 2 % | no |
+| benign FPR; control FPR | 2 | none (unused seed) | 0.50 %; 5.01 % | none (unused seed) | 0.18 %; 3.08 % | - | review: benign FPR above 2 % | no |
 | share of benign magnitude scores >= 0.5 | 2 | none (unused seed) | 0.48 % | not stated | 0.49 % | - | review: above 1.0 % | no |
 | amended gate (A1.7) | 2 | PASS | PASS | none (unused seed) | FAIL: recall:exfil_volume, recall:prereq_skip, recall:novel_target, recall:velocity_burst | - | seed 2: fails under review | no |
 | companion: sw1 dataset, pre-a1 engine, magnitude_spike 10-100 | 0 | 0.975 | 0.975 (79/81) | 0.753 | 0.753 (61/81) | yes / yes | - | no |
 | companion: sw1 dataset, pre-a1 engine, magnitude_spike 10-100 | 1 | 0.988 | 0.988 (84/85) | 0.788 | 0.788 (67/85) | yes / yes | - | no |
+| companion: sw1 dataset, pre-a1 engine, magnitude_spike 10-100 | 2 | none (unused seed) | 0.953 (81/85) | none (unused seed) | 0.800 (68/85) | - / - | - | no |
 | companion: sens dataset, a1 engine, magnitude_spike 10-100 | 0 | 0.797 | 0.797 (51/64) | 0.656 | 0.656 (42/64) | yes / yes | - | no |
 | companion: sens dataset, pre-a1 engine, magnitude_spike 10-100 | 0 | 0.688 | 0.688 (44/64) | 0.578 | 0.578 (37/64) | yes / yes | - | no |
 
 Stop conditions of the brief (Step 4) that hold: none.
+
+Control FPR of the amended engine under the oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic), above the 5 % Tier-3 bound (A1.12 item 7, which states seeds 0 and 1 stay below it): sw1 seed 2: 5.01 %. Not a stop condition of the brief (Step 4); recorded.
 
 ## Latency
 

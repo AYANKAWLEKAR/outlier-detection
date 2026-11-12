@@ -19,27 +19,47 @@ CELLS=results/a1-gate
 STAGE="${1:-all}"
 mkdir -p traces "$CELLS"
 
-cells() {  # replay every (engine, protocol) of the given datasets, 4 at a time
+cell_files() {  # the cell file of every (engine, protocol) of the given datasets
     for d in "$@"; do
         for e in a1 pre-a1; do
             for p in review allow; do
-                echo "traces/$d $e $p $CELLS/$d--$e--$p.json"
+                echo "$d $e $p $CELLS/$d--$e--$p.json"
             done
         done
-    done | xargs -P 4 -L 1 sh -c 'uv run python '"$M"' cell "$0" "$1" "$2" "$3"'
+    done
+}
+
+cells() {  # replay every (engine, protocol) of the given datasets, 4 at a time
+    cell_files "$@" | xargs -P 4 -L 1 sh -c 'uv run python '"$M"' cell "traces/$0" "$1" "$2" "$3"'
+}
+
+require_cells() {  # every cell of the given datasets is written (a committed matrix.json is not)
+    local d e p f
+    while read -r d e p f; do
+        [[ -f "$f" ]] || { echo "run.sh: $f is missing; run stage seeds01 first" >&2; return 1; }
+    done < <(cell_files "$@")
 }
 
 if [[ "$STAGE" == "seeds01" || "$STAGE" == "all" ]]; then
     uv run python "$M" gen 0 traces/sw1-seed0 & a=$!
     uv run python "$M" gen 1 traces/sw1-seed1 & b=$!
     uv run python "$M" gen 0 traces/sw1-sens-seed0 1.0 & c=$!
-    wait "$a" && wait "$b" && wait "$c"  # each generation must succeed
+    # Wait for all three, then stop if any failed. Explicit exit: errexit ignores a failure
+    # inside an && list, and bash 3.2 (macOS /bin/bash) ignores a failing (( )) or [[ ]].
+    failed=0
+    for pid in "$a" "$b" "$c"; do
+        wait "$pid" || failed=1
+    done
+    if [[ "$failed" != 0 ]]; then
+        echo "run.sh: a dataset generation failed; nothing was replayed" >&2
+        exit 1
+    fi
     cells sw1-seed0 sw1-seed1 sw1-sens-seed0
     uv run python "$M" merge "$CELLS"
 fi
 
 if [[ "$STAGE" == "seed2" || "$STAGE" == "all" ]]; then
-    test -f docs/decisions/evidence/a1-gate/matrix.json  # seeds 0 and 1 are written first
+    require_cells sw1-seed0 sw1-seed1 sw1-sens-seed0  # seeds 0 and 1 are written first
     uv run python "$M" gen 2 traces/sw1-seed2
     cells sw1-seed2
     uv run python "$M" merge "$CELLS"

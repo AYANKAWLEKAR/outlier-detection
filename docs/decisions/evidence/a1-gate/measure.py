@@ -28,8 +28,15 @@ dataset (labels.jsonl, one strength per attack id), the share with strength >= 1
 and ``matrix.md`` next to this file (``matrix.md`` via ``render_gate_matrix``; the sensitivity
 dataset's rows are passed as ``sensitivity`` so the ``magnitude_spike`` cells are shown with their
 companion rows, spec A1.5 rule 4). ``latency_p99_us`` is kept from an existing ``matrix.json``.
-``latency``: writes that number (null: no idle-machine measurement, spec A1.8) and NOTE (how it
-was measured, or why it is null) and re-renders ``matrix.md``.
+``merge`` refuses an incomplete set: every cell of seeds 0 and 1 and of the sensitivity dataset,
+and all four of seed 2 once any is there. ``latency``: writes that number (null: no idle-machine
+measurement, spec A1.8) and NOTE (how it was measured, or why it is null) and re-renders
+``matrix.md``.
+
+This script imports two private helpers of ``agentfw.bench.metrics`` (``_bucket_of``,
+``_numeric_score``) and sits outside the gate's ruff and mypy scope (``docs`` is excluded);
+``tests/bench/test_a1_evidence.py`` imports it and renders the committed ``matrix.json`` with it,
+so a rename of either helper, or a ``GatePreview`` change that breaks ``_preview``, fails the gate.
 """  # noqa: E501 - the usage lines are kept whole
 
 from __future__ import annotations
@@ -223,7 +230,21 @@ def _row(dataset: str, seed: int, c: dict[str, Any], path: Path) -> dict[str, An
     }
 
 
+def _missing_cells(cells_dir: Path) -> list[str]:
+    """Cell files a matrix needs that are not written: every cell of seeds 0 and 1 and of the
+    sensitivity dataset (stage seeds01), and all four of seed 2 once any is there (stage seed2)."""
+    missing: list[str] = []
+    for key, d in DATASETS.items():
+        paths = [cells_dir / f"{d}--{e}--{p}.json" for e in ENGINES for p in PROTOCOLS]
+        if key != ("sw1", 2) or any(p.exists() for p in paths):
+            missing += [str(p) for p in paths if not p.exists()]
+    return missing
+
+
 def merge(cells_dir: Path) -> None:
+    missing = _missing_cells(cells_dir)
+    if missing:  # never overwrite the matrix with part of it
+        raise SystemExit("merge: cell files missing: " + ", ".join(missing))
     rows: list[dict[str, Any]] = []
     counts: dict[str, dict[str, int]] = {}
     cens: dict[str, dict[str, Any]] = {}
@@ -232,7 +253,7 @@ def merge(cells_dir: Path) -> None:
         for engine in ENGINES:
             for protocol in PROTOCOLS:
                 path = cells_dir / f"{d}--{engine}--{protocol}.json"
-                if not path.exists():
+                if not path.exists():  # seed 2 before stage seed2 (_missing_cells checked)
                     continue
                 c = orjson.loads(path.read_bytes())
                 rows.append(_row(dataset, seed, c, path))
@@ -336,6 +357,16 @@ EXP_MAG = {
     ("sens", 0, "pre-a1"): {"review": 0.688, "allow": 0.578},
 }
 EXP_MAG_SHARE = {0: 0.0047, 1: 0.0052}
+#: the magnitude cell's companion rows in the comparison (spec A1.5 rule 4); seed 2 has no
+#: expectation (unused seed) but its magnitude cell is shown there, so its companion is too
+COMPANIONS = [
+    ("sw1", 0, "pre-a1"),
+    ("sw1", 1, "pre-a1"),
+    ("sw1", 2, "pre-a1"),
+    ("sens", 0, "a1"),
+    ("sens", 0, "pre-a1"),
+]
+TIER3_CONTROL_FPR = 0.05  # the Tier-3 bound A1.12 item 7 cites (recorded, not a stop condition)
 
 
 def _within_one(recall: float, exp: float, n: int) -> str:
@@ -453,11 +484,11 @@ def _comparison(m: dict[str, Any]) -> tuple[list[str], list[str]]:
         for proto in PROTOCOLS:
             r = by[proto]
             exp = (
-                f"{_pct(EXP_FPR[seed][proto][0])}; {_pct(EXP_FPR[seed][proto][1], 1)}"
+                f"{_pct(EXP_FPR[seed][proto][0])}; {_pct(EXP_FPR[seed][proto][1])}"
                 if seed in EXP_FPR
                 else "none (unused seed)"
             )
-            cells.append((exp, f"{_pct(_nan(r['benign_fpr']))}; {_pct(_nan(r['control_fpr']), 1)}"))
+            cells.append((exp, f"{_pct(_nan(r['benign_fpr']))}; {_pct(_nan(r['control_fpr']))}"))
         fpr = _nan(by["review"]["benign_fpr"])
         add_gate(
             "benign FPR; control FPR",
@@ -501,12 +532,19 @@ def _comparison(m: dict[str, Any]) -> tuple[list[str], list[str]]:
             "seed 2: fails under review" if seed == 2 else "(covered by the lines above)",
             seed == 2 and not by["review"]["passed"],
         )
-    for (dataset, seed, engine), exp_by in EXP_MAG.items():
+    for dataset, seed, engine in COMPANIONS:
+        exp_by = EXP_MAG.get((dataset, seed, engine))
+        if exp_by is None and all(_find(m, dataset, seed, engine, p) is None for p in PROTOCOLS):
+            continue  # seed 2 before stage seed2
         cells, matches = [], []
         for proto in PROTOCOLS:
             rec, nd, nt = _mag(_find(m, dataset, seed, engine, proto))
-            cells.append((f"{exp_by[proto]:.3f}", f"{_f(rec)} ({nd}/{nt})"))
-            matches.append(_within_one(rec, exp_by[proto], nt))
+            if exp_by is None:
+                cells.append(("none (unused seed)", f"{_f(rec)} ({nd}/{nt})"))
+                matches.append("-")
+            else:
+                cells.append((f"{exp_by[proto]:.3f}", f"{_f(rec)} ({nd}/{nt})"))
+                matches.append(_within_one(rec, exp_by[proto], nt))
         add_gate(
             f"companion: {dataset} dataset, {engine} engine, magnitude_spike 10-100",
             seed,
@@ -584,7 +622,9 @@ def render(m: dict[str, Any]) -> str:
             f"dataset and, after the main blocks, both engines on the seed-0 sensitivity dataset "
             f"(`{sp}`; the sensitivity dataset exists for seed 0 only).",
             "",
-            _demote(render_gate_matrix(res, sensitivity=sens_rows)),
+            _label_sens_seed(_demote(render_gate_matrix(res, sensitivity=sens_rows)))
+            if sens_rows
+            else _demote(render_gate_matrix(res, sensitivity=sens_rows)),
             "",
         ]
     lines += _shares_md(m)
@@ -602,6 +642,8 @@ def render(m: dict[str, Any]) -> str:
         + ("; ".join(stops) if stops else "none")
         + ".",
         "",
+        _tier3_note(m),
+        "",
         "## Latency",
         "",
     ]
@@ -616,6 +658,33 @@ def render(m: dict[str, Any]) -> str:
         lines += ["", str(note)]
     lines.append("")
     return "\n".join(lines)
+
+
+def _tier3_note(m: dict[str, Any]) -> str:
+    """The amended engine's control FPRs under the oracle-reviewer loop above the Tier-3 bound,
+    at two decimals (the gate tables print 0.050 for 0.0501)."""
+    over = [
+        f"sw1 seed {r['seed']}: {_pct(_nan(r['control_fpr']))}"
+        for r in m["rows"]
+        if (r["dataset"], r["engine"], r["protocol"]) == ("sw1", "a1", "review")
+        and _nan(r["control_fpr"]) > TIER3_CONTROL_FPR
+    ]
+    return (
+        f"Control FPR of the amended engine under the {LABEL['review']}, above the 5 % Tier-3 "
+        "bound (A1.12 item 7, which states seeds 0 and 1 stay below it): "
+        + ("; ".join(over) if over else "none")
+        + ". Not a stop condition of the brief (Step 4); recorded."
+    )
+
+
+SENS_HEADING = "Companion: sensitivity dataset (magnitude_far_mult = 1.0)"
+
+
+def _label_sens_seed(md: str) -> str:
+    """Name the sensitivity companion's seed under every seed's block (it exists for seed 0)."""
+    if md.count(SENS_HEADING) != 1:
+        raise SystemExit(f"render: expected one {SENS_HEADING!r} heading in the gate block")
+    return md.replace(SENS_HEADING, SENS_HEADING.replace("(", "(seed 0, ", 1))
 
 
 def _demote(md: str) -> str:
