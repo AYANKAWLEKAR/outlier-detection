@@ -8,7 +8,8 @@
   },
   "history": [
     "2026-11-11 initial stamp: tiers 0-2 constants",
-    "2026-11-11 rebase onto feat/tiers-0-2 a6d5f51: detectors/base.py changed by 94501da (A1.2 magnitude log-scale tail, behind mag_score); no calibrated constant depends on it"
+    "2026-11-11 rebase onto feat/tiers-0-2 a6d5f51: detectors/base.py changed by 94501da (A1.2 magnitude log-scale tail, behind mag_score); no calibrated constant depends on it",
+    "2026-11-11 ledger_refs/task_ids added to envelope+normalizer (Task 1.1); additive, no calibrated constant reads them"
   ],
-  "normalizer_hash": "b40d92cdaab34d59a5902271504c2c472326093b634298b53b50ef7ba72bf687"
+  "normalizer_hash": "c432bb908de20ee7bb9c6adcfc2df096cd5c9dc2a21fc79eed60d8266018c214"
 }

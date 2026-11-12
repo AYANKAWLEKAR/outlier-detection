@@ -5,9 +5,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 if TYPE_CHECKING:
     from agentfw.core.sketch.bloom import BloomFilter
@@ -22,6 +30,7 @@ __all__ = [
     "IdSnapshot",
     "JsonValue",
     "Label",
+    "LedgerRef",
     "Outcome",
     "PrevResponse",
     "RawCall",
@@ -78,6 +87,27 @@ class RawCall(BaseModel):
     tool_id: str = Field(pattern=r"^[a-z0-9_]+\.[a-z0-9_]+$")
     args: dict[str, JsonValue]
     response_meta: ResponseMeta | None = None
+    # Ids the task itself supplied (set on a session's first call). Omitted from serialized
+    # output while empty so existing traces and manifest hashes keep their bytes.
+    task_ids: tuple[str, ...] = Field(default=(), max_length=64)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_task_ids(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        out: dict[str, Any] = handler(self)
+        if not self.task_ids:
+            out.pop("task_ids", None)
+        return out
+
+
+@dataclass(slots=True, frozen=True)
+class LedgerRef:
+    """An id used in a call's args that the session ledger already knows (see core.ledger)."""
+
+    artifact_id: str
+    path: str
+    producer_seq: int
+    producer_tool: str | None
+    source: Literal["args", "response", "task_input"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,6 +145,8 @@ class ActionEnvelope:
     session_ids_seen: IdSnapshot
     prev_response: PrevResponse | None
     blast_radius: float | None = None
+    ledger_refs: tuple[LedgerRef, ...] = ()
+    task_ids: tuple[str, ...] = ()
 
 
 class Label(BaseModel):

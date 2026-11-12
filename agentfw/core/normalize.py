@@ -5,8 +5,19 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Self
 
-from agentfw.core.envelope import ActionEnvelope, IdSnapshot, PrevResponse, RawCall, Scalar
+import orjson
+
+from agentfw.core.envelope import (
+    ActionEnvelope,
+    IdSnapshot,
+    PrevResponse,
+    RawCall,
+    Scalar,
+)
+from agentfw.core.ledger import ArtifactLedger
 from agentfw.core.patterns import email_domain, id_prefix, is_id_like, url_host
 from agentfw.core.sketch.bloom import BloomFilter
 
@@ -15,6 +26,7 @@ __all__ = ["SessionTracker", "flatten", "normalize"]
 MAX_DEPTH = 16
 FREETEXT_MIN_LEN = 40
 
+_EMPTY_LEDGER = ArtifactLedger()
 _Out = dict[str, list[Scalar]]
 
 
@@ -73,6 +85,7 @@ class _Session:
     bloom: BloomFilter | None = None
     prev: PrevResponse | None = None
     snap: IdSnapshot | None = None
+    ledger: ArtifactLedger = field(default_factory=ArtifactLedger)
 
 
 class SessionTracker:
@@ -91,6 +104,10 @@ class SessionTracker:
             s.snap = IdSnapshot(frozenset(s.ids), s.bloom.copy() if s.bloom else None)
         return tuple(s.tools), s.snap, s.prev
 
+    def ledger(self, session_id: str) -> ArtifactLedger | None:
+        s = self._sessions.get(session_id)
+        return None if s is None else s.ledger
+
     def _add_id(self, s: _Session, v: str) -> None:
         if v in s.ids or (s.bloom is not None and v in s.bloom):
             return
@@ -105,7 +122,12 @@ class SessionTracker:
     def observe(self, e: ActionEnvelope) -> None:
         s = self._sessions.get(e.session_id)
         if s is None:
-            s = self._sessions[e.session_id] = _Session(tools=deque(maxlen=self.k))
+            s = self._sessions[e.session_id] = _Session(
+                tools=deque(maxlen=self.k),
+                ledger=ArtifactLedger(self.max_ids, e.session_id),
+            )
+        s.ledger.seed_task(e.task_ids)
+        s.ledger.record(e)
         s.tools.append(e.tool_id)
         for vals in e.flat_args.values():
             for v in vals:
@@ -117,11 +139,46 @@ class SessionTracker:
                 self._add_id(s, v)
         s.prev = PrevResponse(e.tool_id, rm.item_count if rm is not None else None)
 
+    def dump(self, path: str | Path) -> None:
+        """Write one JSON line per session (sorted by session id, sorted keys)."""
+        lines = []
+        for sid in sorted(self._sessions):
+            s = self._sessions[sid]
+            rec: dict[str, Any] = {
+                "session_id": sid,
+                "k": self.k,
+                "max_ids": self.max_ids,
+                "tools": list(s.tools),
+                "ids": sorted(s.ids),
+                "bloom": s.bloom.to_dict() if s.bloom is not None else None,
+                "prev": None if s.prev is None else [s.prev.tool_id, s.prev.item_count],
+                "ledger": s.ledger.to_dict(),
+            }
+            lines.append(orjson.dumps(rec, option=orjson.OPT_SORT_KEYS))
+        Path(path).write_bytes(b"\n".join(lines) + (b"\n" if lines else b""))
+
+    @classmethod
+    def load(cls, path: str | Path) -> Self:
+        recs = [orjson.loads(ln) for ln in Path(path).read_bytes().splitlines() if ln.strip()]
+        tr = cls(k=recs[0]["k"], max_ids=recs[0]["max_ids"]) if recs else cls()
+        for r in recs:
+            s = _Session(
+                tools=deque(r["tools"], maxlen=tr.k),
+                ids=set(r["ids"]),
+                bloom=BloomFilter.from_dict(r["bloom"]) if r["bloom"] is not None else None,
+                prev=None if r["prev"] is None else PrevResponse(r["prev"][0], r["prev"][1]),
+                ledger=ArtifactLedger.from_dict(r["ledger"]),
+            )
+            tr._sessions[r["session_id"]] = s
+        return tr
+
 
 def normalize(raw: RawCall, tracker: SessionTracker) -> ActionEnvelope:
     """Build an envelope from a raw call. Reads the tracker; never observes."""
     flat, derived = flatten(raw.args)
     prior_tools, ids_seen, prev = tracker.snapshot(raw.session_id)
+    ledger = tracker.ledger(raw.session_id)
+    refs = (_EMPTY_LEDGER if ledger is None else ledger).refs_for(flat, raw.task_ids)
     return ActionEnvelope(
         envelope_id=raw.envelope_id,
         schema_version=raw.schema_version,
@@ -138,4 +195,6 @@ def normalize(raw: RawCall, tracker: SessionTracker) -> ActionEnvelope:
         prior_tools=prior_tools,
         session_ids_seen=ids_seen,
         prev_response=prev,
+        ledger_refs=refs,
+        task_ids=raw.task_ids,
     )
