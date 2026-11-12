@@ -373,15 +373,21 @@ def test_load_gate_json_round_trips_nan(tmp_path: Path, monkeypatch: pytest.Monk
 # --- Task 1.24a: an unknown protocol key is refused (ruling A1-21) -------------------------------
 
 
-@pytest.mark.parametrize("section", ["results", "sensitivity"])
-def test_load_gate_json_refuses_an_unknown_protocol(
-    tiny_dataset: Path, tmp_path: Path, section: str
-) -> None:
-    js = tmp_path / "gate.json"
+@pytest.fixture(scope="module")
+def written_gate_json(tiny_dataset: Path, tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """One `--json` file with both sections, written once for every case that edits a copy."""
+    js = tmp_path_factory.mktemp("gate_json") / "gate.json"
     args = ["--traces", str(tiny_dataset), "--sensitivity-traces", str(tiny_dataset)]
     assert main([*args, "--json", str(js)]) == 0
-    load_gate_json(js)  # the file as written loads
-    payload = orjson.loads(js.read_bytes())
+    return js
+
+
+@pytest.mark.parametrize("section", ["results", "sensitivity"])
+def test_load_gate_json_refuses_an_unknown_protocol(
+    written_gate_json: Path, tmp_path: Path, section: str
+) -> None:
+    load_gate_json(written_gate_json)  # the file as written loads
+    payload = orjson.loads(written_gate_json.read_bytes())  # a fresh copy for this case only
     row = payload[section][ENGINE_ROW]
     row["bogus"] = row.pop("allow")  # the same data under a protocol key that does not exist
     bad = tmp_path / "bad.json"
