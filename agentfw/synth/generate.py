@@ -16,7 +16,7 @@ from typing import Literal
 
 import numpy as np
 import orjson
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from agentfw.core.envelope import Label, RawCall
 from agentfw.synth.attacks import AttackContext, inject
@@ -53,7 +53,7 @@ class GenerateConfig(BaseModel):
     # lands at or beyond ``magnitude_far_mult`` x the persona's benign p99 of the field
     # (``attacks.far_bounds``); 5.0 = ``attacks.CONTROL_P99_MULT``, the benign-labelled control.
     magnitude_mode: Literal["own", "far"] = "own"
-    magnitude_far_mult: float = Field(default=5.0, gt=0)
+    magnitude_far_mult: float = Field(default=5.0, gt=0, allow_inf_nan=False)
 
 
 class Manifest(BaseModel):
@@ -181,20 +181,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("--catalog", type=Path, default=CATALOG_DIR)
     ap.add_argument("--max-sessions", type=int, default=None)
     ap.add_argument("--families", type=lambda s: [f for f in s.split(",") if f], default=[])
-    ap.add_argument("--magnitude-mode", choices=["own", "far"], default="own")
-    ap.add_argument("--magnitude-far-mult", type=float, default=5.0)
-    a = ap.parse_args(argv)
-    cfg = GenerateConfig(
-        seed=a.seed,
-        personas_dir=a.personas,
-        tasks_dir=a.tasks,
-        catalog_dir=a.catalog,
-        days=a.days,
-        max_sessions=a.max_sessions,
-        families=a.families,
-        magnitude_mode=a.magnitude_mode,
-        magnitude_far_mult=a.magnitude_far_mult,
+    fields = GenerateConfig.model_fields  # the config holds the defaults; the CLI repeats none
+    ap.add_argument(
+        "--magnitude-mode", choices=["own", "far"], default=fields["magnitude_mode"].default
     )
+    ap.add_argument(
+        "--magnitude-far-mult", type=float, default=fields["magnitude_far_mult"].default
+    )
+    a = ap.parse_args(argv)
+    try:
+        cfg = GenerateConfig(
+            seed=a.seed,
+            personas_dir=a.personas,
+            tasks_dir=a.tasks,
+            catalog_dir=a.catalog,
+            days=a.days,
+            max_sessions=a.max_sessions,
+            families=a.families,
+            magnitude_mode=a.magnitude_mode,
+            magnitude_far_mult=a.magnitude_far_mult,
+        )
+    except ValidationError as e:  # a usage error (exit 2), not a traceback
+        ap.error("; ".join(f"{'.'.join(map(str, x['loc']))}: {x['msg']}" for x in e.errors()))
     m = generate(cfg, a.out)
     print(f"wrote {m.counts['envelopes']} envelopes in {m.counts['sessions']} sessions to {a.out}")
     return 0

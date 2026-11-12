@@ -19,6 +19,8 @@ from agentfw.synth.load import (
     load_personas,
 )
 
+from .conftest import World
+
 START = 1_767_225_600_000
 DAY_MS = 86_400_000
 
@@ -241,7 +243,9 @@ def _spiked_values(d: Data, benign: Data) -> list[tuple[str, str, str, float, fl
     return out
 
 
-def test_far_mode_leaves_other_families_and_controls_byte_identical(trio: Trio) -> None:
+def test_far_mode_leaves_other_families_and_controls_byte_identical(
+    trio: Trio, world: World
+) -> None:
     own, far = trio.own, trio.far
     sess = own.session_of()
     assert [t["envelope_id"] for t in far.traces] == [t["envelope_id"] for t in own.traces]
@@ -293,7 +297,8 @@ def test_far_mode_leaves_other_families_and_controls_byte_identical(trio: Trio) 
         for t, lab in zip(far.traces, far.labels, strict=True)
         if lab["control_type"] == "benign_unusual" and t["tool_id"] == "stripe.create_refund"
     }
-    assert control == {round(5.0 * math.exp(3.6 + 2.326 * 0.7), 2)}  # 5 x the declared p99
+    # 5 x the persona's declared p99
+    assert control == {round(CONTROL_P99_MULT * world.declared_p99("support-refunds-a"), 2)}
     (level,) = control
 
     def at_or_below_control(d: Data) -> int:
@@ -391,6 +396,8 @@ def test_magnitude_config_is_validated() -> None:
         {"magnitude_mode": "near"},
         {"magnitude_far_mult": 0.0},
         {"magnitude_far_mult": -5},
+        {"magnitude_far_mult": math.inf},  # the bound would be inf and the manifest value null
+        {"magnitude_far_mult": math.nan},
     ):
         with pytest.raises(ValueError):
             cfg(**bad)
@@ -416,3 +423,34 @@ def test_cli_magnitude_flags(tmp_path: Path, capsys: pytest.CaptureFixture[str])
     with pytest.raises(SystemExit):
         main([*base, "--out", str(tmp_path / "x"), "--magnitude-mode", "near"])
     assert "--magnitude-mode" in capsys.readouterr().err
+
+
+def test_cli_rejects_a_bad_config_with_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    base = ["--seed", "0", "--days", "1", "--max-sessions", "6", "--families", SPIKE]
+    out = tmp_path / "x"
+    for bad in ("0", "-1", "inf", "nan"):
+        with pytest.raises(SystemExit) as exc:
+            main([*base, "--out", str(out), "--magnitude-mode", "far", "--magnitude-far-mult", bad])
+        assert exc.value.code == 2  # an argparse usage error, not a pydantic traceback
+        err = capsys.readouterr().err
+        assert "magnitude_far_mult" in err and "Traceback" not in err
+        assert not out.exists()  # nothing is written
+    with pytest.raises(SystemExit) as exc:
+        main(["--days", "-1", "--out", str(out)])
+    assert exc.value.code == 2 and "days" in capsys.readouterr().err
+
+
+def test_cli_magnitude_defaults_are_the_config_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fields = GenerateConfig.model_fields
+    assert fields["magnitude_mode"].default == "own"
+    assert fields["magnitude_far_mult"].default == CONTROL_P99_MULT
+    # the CLI holds no copy of the defaults: it reads the config fields when it builds its parser
+    monkeypatch.setattr(fields["magnitude_mode"], "default", "far")
+    monkeypatch.setattr(fields["magnitude_far_mult"], "default", 7.5)
+    assert main(["--days", "1", "--max-sessions", "3", "--out", str(tmp_path)]) == 0
+    m = orjson.loads((tmp_path / "manifest.json").read_bytes())
+    assert m["config"]["magnitude_mode"] == "far" and m["config"]["magnitude_far_mult"] == 7.5

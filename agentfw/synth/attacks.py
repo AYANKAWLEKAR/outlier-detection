@@ -129,6 +129,10 @@ class AttackResult:
 
 
 AttackFn = Callable[[list[RawCall], np.random.Generator, AttackContext], AttackResult | None]
+# ``(agent_id, attack_id, persona_sessions, session_index) -> context``. ``inject`` calls it once
+# per attack or control it tries. In mode "far" with ``magnitude_spike`` enabled it also calls it
+# once per persona before that persona's first session, with ``attack_id=""`` and index 0, only
+# to read the persona and catalog: a factory must not count on one call per attack.
 CtxFactory = Callable[[str, str, Sequence[list[RawCall]], int], AttackContext]
 
 
@@ -156,6 +160,11 @@ def mutate_replace(raw: RawCall, path: str, value: JsonValue) -> RawCall:
     return _with_args(raw, args)
 
 
+def _scaled(v: int | float, factor: float) -> int | float:
+    """``v x factor`` as a spike writes it: a whole number for an int field, cents otherwise."""
+    return int(round(v * factor)) if isinstance(v, int) else round(v * factor, 2)
+
+
 def mutate_scale(raw: RawCall, path: str, factor: float) -> RawCall:
     """Copy of ``raw`` with the numeric arg at ``path`` multiplied by ``factor``."""
     args: dict[str, Any] = copy.deepcopy(raw.args)
@@ -163,7 +172,7 @@ def mutate_scale(raw: RawCall, path: str, factor: float) -> RawCall:
     v = parent[key]
     if isinstance(v, bool) or not isinstance(v, int | float):
         raise TypeError(f"{raw.tool_id}.{path} is not numeric: {v!r}")
-    parent[key] = int(round(v * factor)) if isinstance(v, int) else round(v * factor, 2)
+    parent[key] = _scaled(v, factor)
     return _with_args(raw, args)
 
 
@@ -407,14 +416,31 @@ def far_bounds(
 
 
 def _far_feasible(session: list[RawCall], ctx: AttackContext) -> list[tuple[int, str]]:
-    """Spike candidates whose own value x ``M_MAX`` reaches the field's far bound (A1.4 step 1)."""
+    """Spike candidates whose own value x ``M_MAX`` reaches the field's far bound (A1.4 step 1).
+
+    "Value x ``M_MAX``" is the value the largest multiplier really writes (``_scaled``: whole
+    numbers or cents), not the raw float product: ``4.11 * 100.0`` is ``411.00000000000006``, but
+    no spike of 4.11 within ``M_MAX`` lands above 411.0. A bound in that one-ulp gap is out of
+    reach, so the candidate is infeasible (and ``0.29 * 100.0``, one ulp BELOW 29, reaches 29.0)."""
     far = ctx.far or {}
     return [
         (i, name)
         for i, name in _magnitude_cands(session, ctx)
         if (bound := far.get((session[i].tool_id, name))) is not None
-        and float(session[i].args[name]) * M_MAX >= bound  # type: ignore[arg-type]
+        and _scaled(session[i].args[name], M_MAX) >= bound  # type: ignore[arg-type]
     ]
+
+
+def _far_fix(old: int | float, bound: float) -> int | float:
+    """The lowest value of ``old``'s kind at or beyond ``bound`` (A1.4 step 3): ``ceil(bound)`` for
+    an int field, ``bound`` rounded up to cents otherwise. For a feasible candidate it is never
+    above ``_scaled(old, M_MAX)``, which is itself such a value at or beyond the bound."""
+    if isinstance(old, int):
+        return math.ceil(bound)
+    fix = math.ceil(bound * 100.0) / 100.0
+    # ``bound * 100.0`` can round DOWN to a whole number of cents (a bound one ulp above a cent
+    # value); the quotient is then that cent value, one ulp short of the bound.
+    return fix if fix >= bound else round(fix + 0.01, 2)
 
 
 def magnitude_spike(
@@ -448,8 +474,7 @@ def magnitude_spike(
         m = min(math.exp(lo + t * (math.log(M_MAX) - lo)), M_MAX)
         new = mutate_scale(session[i], name, m)
         if float(new.args[name]) < bound:  # type: ignore[arg-type]  # rounding fell short
-            fix = math.ceil(bound) if isinstance(old, int) else math.ceil(bound * 100.0) / 100.0
-            new = mutate_replace(session[i], name, fix)
+            new = mutate_replace(session[i], name, _far_fix(old, bound))  # type: ignore[arg-type]
     old_v, new_v = float(session[i].args[name]), float(new.args[name])  # type: ignore[arg-type]
     return AttackResult(
         _replace_call(session, i, new),
@@ -833,12 +858,14 @@ def inject(
     attack: its draw is independent of attack selection (a session is a control candidate only if it
     was not attacked), and with it disabled no control draw is made (streams are unchanged).
 
-    ``cfg.magnitude_mode == "far"`` (A1.4): each persona's far bounds are computed once, from its
-    untouched sessions (one extra ``ctx_factory`` call per persona, with an empty attack id, gives
-    the persona and catalog), and handed to the attack on a new context. A chosen
-    ``magnitude_spike`` with no feasible candidate leaves the session benign: its attack id is
-    consumed and the session gets no control, exactly as if the spike had taken it, so the attack
-    stream makes the draws it makes in mode "own" and every other attack and control is unchanged.
+    ``cfg.magnitude_mode == "far"`` (A1.4) with ``magnitude_spike`` enabled: each persona's far
+    bounds are computed once, from its untouched sessions (one extra ``ctx_factory`` call per
+    persona, with an empty attack id, gives the persona and catalog), and handed to the attack on
+    a new context. A chosen ``magnitude_spike`` with no feasible candidate leaves the session
+    benign: its attack id is consumed and the session gets no control, exactly as if the spike had
+    taken it, so the attack stream makes the draws it makes in mode "own" and every other attack
+    and control is unchanged. Only that case is a dropped spike; a ``None`` from any other family
+    or mode (none returns one once ``applicable`` found a candidate) falls through to the control.
     ``stats``, when given, receives ``magnitude_first_pass`` (spikes injected),
     ``magnitude_dropped`` (those left benign) and ``magnitude_topup`` (0).
     """
@@ -848,13 +875,14 @@ def inject(
         raise ValueError(f"unknown attack family: {unknown}")
     controls = CONTROL in families
     attack_fams = [f for f in families if f != CONTROL]
+    far_spikes = cfg.magnitude_mode == "far" and "magnitude_spike" in attack_fams
     out: dict[str, list[list[RawCall]]] = {}
     labels: list[Label] = []
     n_dropped = 0
     for agent in sorted(sessions_by_persona):
         sessions = list(sessions_by_persona[agent])
         far: dict[tuple[str, str], float] | None = None
-        if cfg.magnitude_mode == "far":  # from the untouched sessions, before any injection
+        if far_spikes:  # from the untouched sessions, before any injection
             base = ctx_factory(agent, "", sessions, 0)
             far = far_bounds(
                 sessions_by_persona[agent], base.persona, base.catalog, cfg.magnitude_far_mult
@@ -877,21 +905,26 @@ def inject(
                     if eligible(f, ctx.persona, ctx.catalog) and applicable(f, sessions[idx], ctx)
                 ]
                 if fams:
-                    res = ATTACKS[fams[int(rng.integers(len(fams)))]](sessions[idx], rng, ctx)
-                    if res is not None:  # None only for a far-mode spike with no feasible
-                        sessions[idx] = res.session  # candidate: applicable() found a candidate
+                    family = fams[int(rng.integers(len(fams)))]
+                    res = ATTACKS[family](sessions[idx], rng, ctx)
+                    # applicable() found a candidate, so ``None`` is a far-mode spike with no
+                    # feasible one; no other family or mode returns it here.
+                    if res is not None:
+                        sessions[idx] = res.session
                         for j, extra in enumerate(res.extra_sessions, start=1):
                             sessions[idx + j] = extra
                         labels += res.labels
                         n_attacks += 1
                         idx += 1 + len(res.extra_sessions)
                         continue
-                    # Dropped spike (A1.4 step 4): the session stays benign and takes no control,
-                    # and its attack id is consumed, so later attacks keep their mode-"own" ids.
-                    n_attacks += 1
-                    n_dropped += 1
-                    idx += 1
-                    continue
+                    if far_spikes and family == "magnitude_spike":
+                        # Dropped spike (A1.4 step 4): the session stays benign and takes no
+                        # control, and its attack id is consumed, so later attacks keep their
+                        # mode-"own" ids.
+                        n_attacks += 1
+                        n_dropped += 1
+                        idx += 1
+                        continue
             if u_control < cfg.control_rate:
                 ctx = ctx_factory(agent, f"ctl-{agent}-{n_controls:05d}", sessions, idx)
                 if eligible(CONTROL, ctx.persona, ctx.catalog) and applicable(

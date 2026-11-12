@@ -429,24 +429,28 @@ def test_prereq_skip_labels_dependent_whose_id_came_from_deleted_read(
 # --- far-mode magnitude_spike (Amendment A1.4) ----------------------------------------------------
 
 REFUND = ("stripe.create_refund", "amount")
+SPIKE_FAMILY = "magnitude_spike"
 Far = Mapping[tuple[str, str], float]
 
 
-def declared_p99(world: World) -> float:
-    d = world.persona(PERSONA).fields["stripe.create_refund.amount"]
-    assert d.mu is not None and d.sigma is not None
-    return math.exp(d.mu + 2.326 * d.sigma)
+def declared_p99(world: World, agent: str = PERSONA) -> float:
+    return world.declared_p99(agent)
 
 
-def refund_sessions(world: World, amounts: list[float]) -> list[list[RawCall]]:
-    """One copy of the benign refund session per amount (unique envelope and session ids)."""
+def refund_sessions(
+    world: World, amounts: list[float], agent: str = PERSONA
+) -> list[list[RawCall]]:
+    """One copy of the benign refund session per amount (unique envelope and session ids), as
+    sessions of ``agent``."""
     base = _session(world)
+    tag = "" if agent == PERSONA else f"{agent}-"
     return [
         [
             c.model_copy(
                 update={
-                    "envelope_id": f"{c.envelope_id}-{n}",
-                    "session_id": f"sess-{n}",
+                    "envelope_id": f"{tag}{c.envelope_id}-{n}",
+                    "session_id": f"{tag}sess-{n}",
+                    "agent_id": agent,
                     "args": {**c.args, "amount": amt}
                     if c.tool_id == "stripe.create_refund"
                     else c.args,
@@ -522,8 +526,14 @@ def test_far_bounds_is_mult_times_benign_p99(world: World) -> None:
         far[REFUND]
     )
     assert far_bounds([], persona, world.catalog) == {}
-    # only (write tool, money/count arg) pairs get a bound
-    assert set(far) == {REFUND}
+    # only (write tool, money/count arg) pairs get a bound: a read's count arg (``limit``) has none
+    listing = sessions[0][0].model_copy(
+        update={"envelope_id": "env-list", "tool_id": "stripe.list_charges", "args": {"limit": 25}}
+    )
+    assert world.catalog["stripe.list_charges"].kind == "read"
+    assert world.catalog["stripe.list_charges"].args["limit"].shape == "count"
+    with_read = [[listing, *sessions[0]], *sessions[1:]]
+    assert far_bounds(with_read, persona, world.catalog) == far and set(far) == {REFUND}
     # the sampled p99 wins when it is above the declared one (linear interpolation: 990.1)
     big = refund_sessions(world, amounts=[10.0 * a for a in range(1, 101)])
     assert declared_p99(world) < 990.1
@@ -613,6 +623,80 @@ def test_far_float_field_fixup_rounds_the_bound_up_to_cents(world: World) -> Non
     new, old, _ = _spiked(session, res)
     assert new == 932.04 and new >= bound
     assert res.labels[0].strength == pytest.approx(93.204) and new / old <= M_MAX
+
+
+def test_far_float_spike_never_passes_m_max_at_the_one_ulp_edge(world: World) -> None:
+    lo, hi = math.log(M_MIN), math.log(M_MAX)
+
+    def spike(amount: float, bound: float, log_m: float) -> tuple[float, float] | None:
+        (session,) = refund_sessions(world, amounts=[amount])
+        res = magnitude_spike(session, _fixed(0, log_m), far_ctx(world, {REFUND: bound}))
+        if res is None:
+            return None
+        assert res.labels[0].strength is not None
+        return _spiked(session, res)[0], res.labels[0].strength
+
+    # 4.11 * 100.0 is 411.00000000000006 in floating point, one ulp above the exact 411. The
+    # largest value a spike can give 4.11 is 411.0 (m = 100, in cents), which is below that bound:
+    # infeasible. Rounding the bound up to 411.01 would be a multiplier of 100.002.
+    for amount, reach in ((4.11, 411.0), (0.07, 7.0), (1.1, 110.0)):
+        bound = amount * 100.0
+        assert bound > reach and math.ceil(bound * 100.0) / 100.0 == round(reach + 0.01, 2)
+        for log_m in (lo, (lo + hi) / 2, hi):
+            assert spike(amount, bound, log_m) is None, (amount, log_m)
+            # the bound AT the largest reachable value is feasible and lands exactly on it
+            at = spike(amount, reach, log_m)
+            assert at is not None and at[0] == reach and at[1] == pytest.approx(M_MAX, abs=1e-9)
+    # 0.29 * 100.0 is 28.999999999999996, one ulp BELOW the exact 29: m = 100 gives 29.0, which
+    # is at or beyond both that bound and the bound 29.0 itself
+    assert 0.29 * 100.0 < 29.0
+    for bound in (0.29 * 100.0, 29.0):
+        for log_m in (lo, hi):
+            at = spike(0.29, bound, log_m)
+            assert at is not None and at[0] == 29.0 and at[1] == pytest.approx(M_MAX, abs=1e-9)
+    assert spike(0.29, 29.01, lo) is None
+
+
+def test_far_float_fixup_is_never_below_the_bound(world: World) -> None:
+    lo = math.log(M_MIN)
+    # a bound one ulp above a cent value: bound * 100.0 rounds to the whole number of cents, so
+    # the plain round-up gives 8132702.39, which is below the bound
+    amount, bound = 162654.05, 8132702.390000001
+    assert math.ceil(bound * 100.0) / 100.0 == 8132702.39 < bound
+    (session,) = refund_sessions(world, amounts=[amount])
+    res = magnitude_spike(session, _fixed(0, lo), far_ctx(world, {REFUND: bound}))
+    assert res is not None
+    new, old, _ = _spiked(session, res)
+    assert new == 8132702.4 and new >= bound and old == amount
+    assert res.labels[0].strength == pytest.approx(new / old) and new / old <= M_MAX
+    # the same over many bounds one and two ulps above a cent value: feasible exactly when
+    # value x 100 (in cents) reaches the bound, and then bound <= new value <= value x 100
+    rng = np.random.default_rng(0)
+    short = spiked = dropped = 0
+    for cents in rng.integers(1, 10**9, size=600):
+        above = math.nextafter(int(cents) / 100.0, math.inf)
+        for bound in (above, math.nextafter(above, math.inf)):
+            short += math.ceil(bound * 100.0) / 100.0 < bound
+            for amount in (round(bound / 50.0, 2), round(bound / 100.0, 2)):
+                s = [
+                    c.model_copy(update={"args": {**c.args, "amount": amount}})
+                    if c.tool_id == "stripe.create_refund"
+                    else c
+                    for c in session
+                ]
+                reach = round(amount * M_MAX, 2)
+                r = magnitude_spike(s, _fixed(0, lo), far_ctx(world, {REFUND: bound}))
+                assert (r is not None) == (reach >= bound), (amount, bound)
+                if r is None:
+                    dropped += 1
+                    continue
+                new = _spiked(s, r)[0]
+                assert bound <= new <= reach, (amount, bound, new)
+                assert r.labels[0].strength is not None
+                assert M_MIN <= r.labels[0].strength <= M_MAX + 1e-9
+                spiked += 1
+    # the sweep does hit the short round-up, and both sides of the feasibility edge
+    assert short >= 20 and spiked >= 1200 and dropped >= 200, (short, spiked, dropped)
 
 
 def test_far_picks_the_first_feasible_candidate_in_cyclic_order_from_k(world: World) -> None:
@@ -798,3 +882,95 @@ def test_inject_stats_is_keyword_only_and_optional(world: World) -> None:
     spiked = {lab.envelope_id for lab in b[1] if lab.attack_family == "magnitude_spike"}
     news = [_f(c.args["amount"]) for s in b[0][PERSONA] for c in s if c.envelope_id in spiked]
     assert news and min(news) >= bound
+
+
+def test_a_none_that_is_not_a_far_mode_spike_is_not_a_dropped_spike(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # No family returns None once applicable() found a candidate; if one ever does, it must not be
+    # counted as a dropped far spike: the session falls through to the control draw and keeps the
+    # attack id free, as before magnitude_mode existed.
+    both = [SPIKE_FAMILY, "novel_target", "benign_unusual"]
+    cases: list[tuple[str, str, list[str], float]] = [
+        ("novel_target", "far", ["novel_target", "benign_unusual"], 100.0),
+        ("novel_target", "own", ["novel_target", "benign_unusual"], 100.0),
+        (SPIKE_FAMILY, "own", [SPIKE_FAMILY, "benign_unusual"], 100.0),
+        # far mode WITH the spike family enabled, on sessions it cannot touch (a refund of 0 is no
+        # spike candidate): the None still comes from another family
+        ("novel_target", "far", both, 0.0),
+    ]
+    for family, mode, families, amount in cases:
+        amounts = [amount] * 6
+        (session,) = refund_sessions(world, [amount])
+        fams = [f for f in families if applicable(f, session, far_ctx(world, None))]
+        assert fams == [family, "benign_unusual"], (family, mode)  # the only attack that applies
+        _, want, _, _ = _inject_refunds(
+            world, amounts, families=["benign_unusual"], control_rate=1.0, attack_rate=0.0
+        )
+        with monkeypatch.context() as mp:
+            mp.setitem(ATTACKS, family, lambda s, r, c: None)
+            _, labels, stats, seen = _inject_refunds(
+                world, amounts, families=families, magnitude_mode=mode, control_rate=1.0
+            )
+        assert stats == {"magnitude_first_pass": 0, "magnitude_dropped": 0, "magnitude_topup": 0}
+        # every session took the control it would take with no attack draw at all
+        assert [lab.control_type for lab in labels] == ["benign_unusual"] * 6, (family, mode)
+        assert [lab.envelope_id for lab in labels] == [lab.envelope_id for lab in want]
+        # ... and no attack id was consumed
+        atk = [c.attack_id for c in seen if c.attack_id.startswith("atk-")]
+        assert atk == [f"atk-{PERSONA}-00000"] * 6, (family, mode)
+
+
+def test_far_bounds_are_computed_only_when_the_spike_family_is_enabled(world: World) -> None:
+    amounts = [100.0] * 8
+
+    def empty_id_calls(**kw: object) -> list[int]:
+        _, _, stats, seen = _inject_refunds(world, amounts, **kw)
+        assert stats["magnitude_dropped"] == 0
+        return [n for n, c in enumerate(seen) if c.attack_id == ""]
+
+    # the one extra ctx_factory call (empty attack id) is the persona's first, and the only one
+    assert empty_id_calls(magnitude_mode="far") == [0]
+    assert empty_id_calls(magnitude_mode="far", families=[SPIKE_FAMILY, "novel_target"]) == [0]
+    # no spike family, or mode "own": the factory sees exactly the calls it always saw
+    assert empty_id_calls(magnitude_mode="far", families=["novel_target"]) == []
+    assert empty_id_calls(magnitude_mode="far", families=["benign_unusual"]) == []
+    assert empty_id_calls(magnitude_mode="own") == []
+
+
+def test_far_bounds_are_each_personas_own_over_all_its_sessions(world: World) -> None:
+    # Two personas share stripe.create_refund at very different levels, and the first one's
+    # warm-up sessions hold its largest refunds. Each bound is the persona's OWN p99 (not the
+    # pooled one) over ALL its sessions (warm-up included, although no warm-up session is attacked).
+    other, warm = "support-refunds-c", 10
+    amounts = {PERSONA: [10_000.0] * warm + [1_000.0] * 40, other: [20.0] * 50}
+    sessions = {a: refund_sessions(world, xs, agent=a) for a, xs in amounts.items()}
+    own = {a: far_bounds(sessions[a], world.persona(a), world.catalog)[REFUND] for a in sessions}
+    assert own[PERSONA] == pytest.approx(5.0 * 10_000.0)  # p99 of 10 x 10000 and 40 x 1000
+    assert own[other] == pytest.approx(5.0 * declared_p99(world, other))  # about 332
+    pooled = far_bounds(sum(sessions.values(), []), world.persona(other), world.catalog)[REFUND]
+    assert pooled > 20.0 * M_MAX  # under the pooled bound no refund of 20 could be spiked
+    post_warmup = far_bounds(sessions[PERSONA][warm:], world.persona(PERSONA), world.catalog)
+    assert post_warmup[REFUND] == pytest.approx(5.0 * 1_000.0)
+
+    def factory(agent: str, aid: str, ps: object, idx: int) -> AttackContext:
+        return replace(far_ctx(world, None, agent), attack_id=aid)
+
+    cfg = _cfg(attack_rate=1.0, warmup_sessions=warm, families=[SPIKE_FAMILY], magnitude_mode="far")
+    stats: dict[str, int] = {}
+    before = copy.deepcopy(sessions)
+    out, labels = inject(sessions, cfg, np.random.default_rng(11), factory, stats=stats)
+    assert sessions == before
+    assert stats == {"magnitude_first_pass": 80, "magnitude_dropped": 0, "magnitude_topup": 0}
+    news: dict[str, list[float]] = {}
+    for a in sessions:
+        assert out[a][:warm] == sessions[a][:warm]  # warm-up sessions are never attacked
+        news[a] = [
+            _f(c.args["amount"])
+            for s in out[a][warm:]
+            for c in s
+            if c.tool_id == "stripe.create_refund"
+        ]
+        assert len(news[a]) == 40 and min(news[a]) >= own[a], a
+    assert min(news[PERSONA]) < 1.5 * own[PERSONA]  # the range starts AT the persona's own bound
+    assert max(news[other]) <= 20.0 * M_MAX < own[PERSONA]
