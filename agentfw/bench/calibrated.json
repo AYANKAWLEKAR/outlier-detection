@@ -7,7 +7,8 @@
     "z0": 3.0
   },
   "history": [
-    "2026-11-11 initial stamp: tiers 0-2 constants"
+    "2026-11-11 initial stamp: tiers 0-2 constants",
+    "2026-11-11 rebase onto feat/tiers-0-2 a6d5f51: detectors/base.py changed by 94501da (A1.2 magnitude log-scale tail, behind mag_score); no calibrated constant depends on it"
   ],
-  "normalizer_hash": "318ff62eba26cdd0c35d279ed9ce67ced47641166318c57682694751bb59b8d7"
+  "normalizer_hash": "b40d92cdaab34d59a5902271504c2c472326093b634298b53b50ef7ba72bf687"
 }
