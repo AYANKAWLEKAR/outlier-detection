@@ -661,3 +661,32 @@ def test_gate_section_reads_real_reports(tiny_dataset: Path, tmp_path: Path) -> 
     for rep in reports.values():
         c = rep["gate"]["cells"]["prereq_skip"]
         assert f"({c['n_detected']}/{c['n_total']})" in md
+
+
+# --- final review: the gate section says where its companion rows come from (ruling A1-27) ------
+
+_COMPANION_PREFIX = (
+    "The magnitude_spike cell is shown only with its two companion rows (spec A1.5 rule 4): "
+)
+
+
+def _companion_paragraph(md: str) -> str:
+    return next(ln for ln in md.splitlines() if ln.startswith(_COMPANION_PREFIX))
+
+
+def test_gate_section_names_its_own_companion_sources(reports: dict[str, Any]) -> None:
+    sens = {name: {**rep, "gate": _gate(False, (51, 64))} for name, rep in _reports().items()}
+    for rep in sens.values():
+        rep["meta"] = {**rep["meta"], "dataset_sha": "e" * 64}
+    md = render_gate_section(reports, sensitivity=sens, sensitivity_source="rows copied from `x`")
+    para = _companion_paragraph(md)
+    assert "CLI" not in para and "--sensitivity-traces" not in para
+    assert "runs `engine-pre-a1` and `engine-pre-a1-allow-all`" in para
+    assert "rows copied from `x`" in para
+
+
+def test_doc_companion_paragraph_names_matrix_json(reports: dict[str, Any]) -> None:
+    para = _companion_paragraph(build_leaderboard_script._doc([], SHA, reports))
+    assert "CLI" not in para
+    assert "runs `engine-pre-a1` and `engine-pre-a1-allow-all`" in para
+    assert "copied from `docs/decisions/evidence/a1-gate/matrix.json`" in para

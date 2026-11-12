@@ -53,6 +53,7 @@ import orjson
 
 from agentfw.bench.ablation import replay_detector
 from agentfw.bench.gate import (
+    CLI_COMPANION_SOURCE,
     ENGINE_ROW,
     ORIGINAL_CRITERION_LABEL,
     PRE_A1_ROW,
@@ -622,9 +623,9 @@ def render(m: dict[str, Any]) -> str:
             f"dataset and, after the main blocks, both engines on the seed-0 sensitivity dataset "
             f"(`{sp}`; the sensitivity dataset exists for seed 0 only).",
             "",
-            _label_sens_seed(_demote(render_gate_matrix(res, sensitivity=sens_rows)))
+            _label_sens_seed(_demote(_gate_md(res, sens_rows)))
             if sens_rows
-            else _demote(render_gate_matrix(res, sensitivity=sens_rows)),
+            else _demote(_gate_md(res, sens_rows)),
             "",
         ]
     lines += _shares_md(m)
@@ -685,6 +686,12 @@ def _label_sens_seed(md: str) -> str:
     if md.count(SENS_HEADING) != 1:
         raise SystemExit(f"render: expected one {SENS_HEADING!r} heading in the gate block")
     return md.replace(SENS_HEADING, SENS_HEADING.replace("(", "(seed 0, ", 1))
+
+
+def _gate_md(res: dict[str, dict[Any, GatePreview]], sens: Any) -> str:
+    """The gate tables of one seed. The companion-source text is the gate CLI's, as when
+    ``matrix.md`` was rendered (the cells here are what ``gate_matrix`` computes, see ``cell``)."""
+    return render_gate_matrix(res, sensitivity=sens, companion_source=CLI_COMPANION_SOURCE)
 
 
 def _demote(md: str) -> str:

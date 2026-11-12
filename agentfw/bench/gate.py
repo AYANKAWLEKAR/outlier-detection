@@ -41,6 +41,7 @@ from agentfw.bench.sweeps import PRE_A1_SWITCHES
 from agentfw.core.config import EngineConfig
 
 __all__ = [
+    "CLI_COMPANION_SOURCE",
     "ENGINE_ROW",
     "ORIGINAL_CRITERION_LABEL",
     "PRE_A1_ROW",
@@ -60,6 +61,16 @@ _REQUIRED: tuple[OutcomeMode, OutcomeMode] = ("review", "allow")
 _MAGNITUDE = "magnitude_spike"
 _COMPANION_HEADER = "## Companion: sensitivity dataset (magnitude_far_mult = 1.0)"
 _COMPANION_VERDICT = "companion row (spec A1.5 rule 4), not a gate result"
+#: Where the CLI's companion rows come from (:func:`main` passes it as ``companion_source``).
+CLI_COMPANION_SOURCE = (
+    f"the engine before Amendment A1 on the same dataset (`{PRE_A1_ROW}`, always computed by the "
+    "CLI) and the amended engine on the sensitivity dataset (`magnitude_far_mult = 1.0`, CLI "
+    "option `--sensitivity-traces DIR`), printed after the main blocks."
+)
+_PLAIN_COMPANION_SOURCE = (
+    f"the engine before Amendment A1 on the same dataset (`{PRE_A1_ROW}`) and the amended engine "
+    "on the sensitivity dataset (`magnitude_far_mult = 1.0`), printed after the main blocks."
+)
 
 _Rows = dict[str, dict[OutcomeMode, GatePreview]]
 
@@ -144,6 +155,7 @@ def render_gate_matrix(
     results: Mapping[str, Mapping[OutcomeMode, GatePreview]],
     *,
     sensitivity: Mapping[str, Mapping[OutcomeMode, GatePreview]] | None = None,
+    companion_source: str | None = None,
 ) -> str:
     """Markdown: one block per named engine row, one line per protocol under its label verbatim.
 
@@ -160,6 +172,10 @@ def render_gate_matrix(
     ``sensitivity`` rows follow the main blocks under a companion header, their last column saying
     they are companion rows, not gate results. Raises ``ValueError`` when a row of ``results`` or
     ``sensitivity`` lacks either protocol (spec A1.5 rule 1).
+
+    ``companion_source`` ends the intro's sentence "The magnitude_spike cell is shown only with
+    its two companion rows (spec A1.5 rule 4): ...": the caller names the two rows and where they
+    come from (the CLI passes :data:`CLI_COMPANION_SOURCE`). ``None`` names the rows only.
     """
     _require_both(results)
     if sensitivity is not None:
@@ -206,10 +222,8 @@ def render_gate_matrix(
         "result under one protocol; the two lines are shown together and neither alone is the "
         "Tier-1 gate result. Which protocol closes Tier 1 is the user's open decision (D-028).",
         "",
-        f"The {_MAGNITUDE} cell is shown only with its two companion rows (spec A1.5 rule 4): the "
-        f"engine before Amendment A1 on the same dataset (`{PRE_A1_ROW}`, always computed by the "
-        "CLI) and the amended engine on the sensitivity dataset (`magnitude_far_mult = 1.0`, CLI "
-        "option `--sensitivity-traces DIR`), printed after the main blocks.",
+        f"The {_MAGNITUDE} cell is shown only with its two companion rows (spec A1.5 rule 4): "
+        + (_PLAIN_COMPANION_SOURCE if companion_source is None else companion_source),
         "",
     ]
     if gaps:
@@ -317,7 +331,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     head = f"# Tier-1 gate on `{a.traces}`\n\n"
     if a.sensitivity_traces is not None:
         head += f"Sensitivity dataset: `{a.sensitivity_traces}`\n\n"
-    md = head + render_gate_matrix(results, sensitivity=sensitivity)
+    md = head + render_gate_matrix(
+        results, sensitivity=sensitivity, companion_source=CLI_COMPANION_SOURCE
+    )
     print(md)
     if a.out is not None:
         a.out.parent.mkdir(parents=True, exist_ok=True)

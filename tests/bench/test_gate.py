@@ -406,3 +406,42 @@ def test_preview_from_json_is_public_and_reads_a_written_gate(
     assert not hasattr(gate_mod, "_preview_from")  # one name for the one reader
     for g in matrix.values():
         _assert_same(gate_mod.preview_from_json(orjson.loads(_dump(g))), g)
+
+
+# --- final review: the companion-source sentence is the caller's (ruling A1-27) ------------------
+
+_COMPANION_PREFIX = (
+    "The magnitude_spike cell is shown only with its two companion rows (spec A1.5 rule 4): "
+)
+#: The CLI's wording, unchanged since Task 1.22a.
+_CLI_COMPANION_PARAGRAPH = (
+    _COMPANION_PREFIX + f"the engine before Amendment A1 on the same dataset (`{PRE_A1_ROW}`, "
+    "always computed by the CLI) and the amended engine on the sensitivity dataset "
+    "(`magnitude_far_mult = 1.0`, CLI option `--sensitivity-traces DIR`), printed after the main "
+    "blocks."
+)
+
+
+def _companion_paragraph(md: str) -> str:
+    return next(ln for ln in md.splitlines() if ln.startswith(_COMPANION_PREFIX))
+
+
+def test_companion_source_is_the_callers_text() -> None:
+    g = _both(_preview())
+    rows = {ENGINE_ROW: g, PRE_A1_ROW: g}
+    # Without a source the paragraph names the two rows and no caller (it is not CLI-only).
+    plain = _companion_paragraph(render_gate_matrix(rows, sensitivity=rows))
+    assert "CLI" not in plain and "--sensitivity-traces" not in plain
+    assert f"(`{PRE_A1_ROW}`)" in plain and "(`magnitude_far_mult = 1.0`)" in plain
+    own = "rows a caller describes, printed after the main blocks."
+    md = render_gate_matrix(rows, sensitivity=rows, companion_source=own)
+    assert _companion_paragraph(md) == _COMPANION_PREFIX + own
+    assert md.count(own) == 1
+    # The CLI's own wording is a constant the CLI passes.
+    assert _COMPANION_PREFIX + gate_mod.CLI_COMPANION_SOURCE == _CLI_COMPANION_PARAGRAPH
+
+
+def test_cli_companion_paragraph_is_unchanged(tiny_dataset: Path, tmp_path: Path) -> None:
+    md_path = tmp_path / "gate.md"
+    assert main(["--traces", str(tiny_dataset), "--out", str(md_path)]) == 0
+    assert _companion_paragraph(md_path.read_text()) == _CLI_COMPANION_PARAGRAPH

@@ -203,7 +203,9 @@ def _doc(
     own level-2 heading (so the outline never files the SW1 tables under the companion block)."""
     sens = _sensitivity_reports(matrix)
     sens_sha = str(next(iter(sens.values()))["meta"]["dataset_sha"])
-    gate = render_gate_section(reports, sensitivity=sens)
+    gate = render_gate_section(
+        reports, sensitivity=sens, sensitivity_source=f"rows copied from `{_EVIDENCE_REL}`"
+    )
     personas = len(load_personas(SW1.personas_dir))
     head = [
         "# Leaderboard: synthetic benchmark (SW1)",

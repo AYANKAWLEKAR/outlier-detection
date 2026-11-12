@@ -306,6 +306,7 @@ def render_gate_section(
     reports: Mapping[str, Mapping[str, Any]],
     *,
     sensitivity: Mapping[str, Mapping[str, Any]] | None = None,
+    sensitivity_source: str | None = None,
 ) -> str:
     """The Tier-1 gate of the engine runs under both protocols, side by side (spec A1.5).
 
@@ -316,14 +317,26 @@ def render_gate_section(
     (``original spec §9 criterion``) per gated family, as
     :func:`agentfw.bench.gate.render_gate_matrix` prints them.
     ``sensitivity`` holds the same runs on the sensitivity dataset (``magnitude_far_mult = 1.0``);
-    without it every ``magnitude_spike`` cell is withheld (spec A1.5 rule 4). Raises
+    without it every ``magnitude_spike`` cell is withheld (spec A1.5 rule 4). The intro names the
+    companion rows' sources: the pre-A1 pair of :data:`GATE_RUNS` and ``sensitivity_source`` (where
+    the caller took ``sensitivity`` from, e.g. "rows copied from `matrix.json`"). Raises
     ``ValueError`` when either protocol of a pair is missing, a run has no gate section or no
     dataset / split in its meta, a run is not an engine replay, the two runs of a pair recorded
     different engine configurations, or the runs of one mapping mix datasets or splits.
     """
     results, split = _gate_rows(reports, "reports")
     sens = None if sensitivity is None else _gate_rows(sensitivity, "sensitivity")[0]
-    head, _, rest = render_gate_matrix(results, sensitivity=sens).partition("\n\n")
+    pre_review, pre_allow = GATE_RUNS[PRE_A1_ROW]
+    source = (
+        f"the engine before Amendment A1 on the same dataset (`{PRE_A1_ROW}`, the leaderboard runs "
+        f"`{pre_review}` and `{pre_allow}`) and the amended engine on the sensitivity dataset "
+        "(`magnitude_far_mult = 1.0`"
+        + ("" if sensitivity_source is None else f", {sensitivity_source}")
+        + "), printed after the main blocks."
+    )
+    head, _, rest = render_gate_matrix(
+        results, sensitivity=sens, companion_source=source
+    ).partition("\n\n")
     runs = "; ".join(
         f"`{row}`: runs `{review}` ({PROTOCOL_LABELS['review']}) and `{allow}` "
         f"({PROTOCOL_LABELS['allow']})"

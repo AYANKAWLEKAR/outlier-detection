@@ -170,3 +170,10 @@ def test_matrix_md_shows_what_was_measured() -> None:
         assert md.count(labelled) == 3
         assert "Companion: sensitivity dataset (magnitude_far_mult" not in md
         assert seed2_pre in md
+
+
+def test_matrix_md_is_the_rendering_of_matrix_json() -> None:
+    """The committed ``matrix.md`` is ``measure.py``'s rendering of the committed ``matrix.json``,
+    byte for byte (a change to ``render_gate_matrix``'s defaults does not drift it silently)."""
+    m = orjson.loads((EVIDENCE / "matrix.json").read_bytes())
+    assert _measure().render(m) == (EVIDENCE / "matrix.md").read_text()
