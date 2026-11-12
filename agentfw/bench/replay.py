@@ -121,6 +121,7 @@ class ScoreRow:
     n_key_obs: int
     latency_us: float
     threshold: float | None
+    decision: str | None = None  # the detector's Decision value; None when unscored
 
 
 def _order(r: RawCall) -> tuple[int, str, int]:
@@ -211,6 +212,7 @@ def replay(
         per_json = "[]"
         latency = 0.0
         threshold: float | None = None
+        decision: str | None = None
         outcome = Outcome.ALLOWED
         flagged = False
         if scored:
@@ -223,6 +225,7 @@ def replay(
             fused = res.fused_score
             per_json = _per_detector_json(res.per_detector)
             threshold = res.threshold
+            decision = None if res.decision is None else res.decision.value
             flagged = res.decision in _FLAGGED
             if outcomes == "enforce" and res.decision is Decision.BLOCK:
                 outcome = Outcome.BLOCKED
@@ -253,6 +256,7 @@ def replay(
                 n_key_obs=n_obs,
                 latency_us=latency,
                 threshold=threshold,
+                decision=decision,
             )
         )
         detector.update(env, outcome)
