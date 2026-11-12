@@ -208,6 +208,152 @@ def test_008_appended_section_supersedes_the_one_protocol_lines() -> None:
     assert OLD_SW1_SHA in a1 and sha12("sw1", 0) in a1
 
 
+FAMILIES = (
+    "magnitude_spike",
+    "scope_blowup",
+    "exfil_volume",
+    "prereq_skip",
+    "novel_target",
+    "velocity_burst",
+)
+SENS_VERDICT = "companion row (spec A1.5 rule 4), not a gate result"
+# Measured numbers: shares and scores (0.938, 0.0058) and percentages (3.52 %); not task numbers.
+MEASURED = re.compile(r"\b0\.\d{2,}\b|\b\d+(?:\.\d+)? ?%")
+# A protocol named by anything other than its verbatim label (checked after the labels are removed).
+SHORT_PROTOCOL = re.compile(
+    r"(?i)(?<![\w-])allow-all\b|oracle-reviewer|\breview(?:er)? (?:loop|run)\b"
+)
+EXPECTED_TABLE_ROWS = {"README.md": 8, "writeup": 16, "008": 16}
+
+
+def gate_scope(name: str) -> str:
+    """The part of a document that A1.5 binds: the README above its generated report block, the
+    whole writeup, decision 008's header (Status) and its appended Amendment A1 section."""
+    text = DOCS[name].read_text()
+    if name == "README.md":
+        return text[: text.index(README_START)]
+    if name == "008":
+        return (
+            text[: text.index("\n## Context\n")]
+            + text[text.index("\n## Amendment A1 (2026-11-11)\n") :]
+        )
+    return text
+
+
+def prose_units(text: str) -> list[str]:
+    """Paragraphs (split on blank lines) with table lines dropped and each list item a unit of its
+    own, whitespace collapsed: a bullet list is not one block that its first bullet can qualify."""
+    units: list[str] = []
+    for para in re.split(r"\n\s*\n", text):
+        lines = "\n".join(ln for ln in para.splitlines() if not ln.lstrip().startswith("|"))
+        for item in re.split(r"\n(?=\s*(?:[-*]|\d+\.) )", lines):
+            unit = " ".join(item.split())
+            if unit:
+                units.append(unit)
+    return units
+
+
+def _row(dataset: str, seed: int, engine: str, protocol: str) -> dict[str, Any]:
+    r: dict[str, Any]
+    [r] = [
+        r
+        for r in _matrix()["rows"]
+        if (r["dataset"], r["seed"], r["engine"], r["protocol"])
+        == (dataset, seed, engine, protocol)
+    ]
+    return r
+
+
+def expected_table_cells(r: dict[str, Any]) -> list[str]:
+    """A dual-protocol table row as ``matrix.md`` prints it, after the protocol column."""
+    out = [
+        f"{cell(r['families'][f])}; {r['families'][f]['among']:.2f}; {r['families'][f]['top1']:.2f}"
+        for f in FAMILIES
+    ]
+    out += [f"{r['benign_fpr']:.4f}", f"{r['control_fpr']:.3f}"]
+    if r["dataset"] == "sens":
+        out.append(SENS_VERDICT)
+    else:
+        out.append("PASS" if r["passed"] else "FAIL: " + ", ".join(r["failures"]))
+    return out
+
+
+@pytest.mark.parametrize("name", DOCS)
+def test_every_quoted_gate_cell_is_a_matrix_cell(name: str) -> None:
+    cells = {cell(c) for r in _matrix()["rows"] for c in r["families"].values()}
+    quoted = re.findall(r"\d\.\d{3} \(\d+/\d+\)", gate_scope(name))
+    assert quoted
+    assert [q for q in quoted if q not in cells] == [], name
+
+
+@pytest.mark.parametrize("name", DOCS)
+def test_dual_protocol_table_rows_match_the_matrix(name: str) -> None:
+    """Every table line that carries a protocol label is the ``matrix.json`` row it names, cell by
+    cell (recall n/N, among, top-1, benign FPR, control FPR, verdict)."""
+    proto_of = {label: proto for proto, label in PROTOCOL_LABELS.items()}
+    by_sha = {r["dataset_sha"]: (r["dataset"], r["seed"]) for r in _matrix()["rows"]}
+    checked = 0
+    for line in gate_scope(name).splitlines():
+        if not line.startswith("|"):
+            continue
+        parts = [p.strip() for p in line.strip().strip("|").split("|")]
+        at = [i for i, p in enumerate(parts) if p in proto_of]
+        if not at or not re.match(r"\d\.\d{3} \(\d+/\d+\);", "".join(parts[at[0] + 1 : at[0] + 2])):
+            continue  # not a gate row (e.g. a leaderboard row carries the label too)
+        i = at[0]
+        key = parts[:i]
+        if len(key) == 1 and key[0].isdigit():  # seed tables: the amended engine on SW1
+            dataset, seed, engine = "sw1", int(key[0]), "a1"
+        else:
+            assert len(key) == 2, (name, line)
+            sha = re.search(r"`(\w{12})`", key[0])
+            assert sha, (name, line)
+            dataset, seed = by_sha[sha.group(1)]
+            engine = {"pre-A1": "pre-a1", "amended (A1)": "a1"}[key[1]]
+        r = _row(dataset, seed, engine, proto_of[parts[i]])
+        assert parts[i + 1 :] == expected_table_cells(r), (name, dataset, seed, engine, parts[i])
+        checked += 1
+    assert checked == EXPECTED_TABLE_ROWS[name]
+
+
+@pytest.mark.parametrize("name", DOCS)
+def test_measured_numbers_name_the_protocol_by_its_verbatim_label(name: str) -> None:
+    """Spec A1.5 rule 1: a paragraph or list item that quotes a measured number never names a
+    protocol by a shortened name ("under allow-all", "the oracle-reviewer loop")."""
+    bad = []
+    for unit in prose_units(gate_scope(name)):
+        rest = unit.replace(PROTOCOL_LABELS["allow"], "").replace(PROTOCOL_LABELS["review"], "")
+        if MEASURED.search(rest) and SHORT_PROTOCOL.search(rest):
+            bad.append(unit)
+    assert bad == [], name
+
+
+@pytest.mark.parametrize("name", DOCS)
+def test_magnitude_cell_in_prose_stands_with_its_companions(name: str) -> None:
+    """Spec A1.5 rule 4 in prose: a list item or paragraph that quotes an amended-engine SW1
+    ``magnitude_spike`` cell also quotes both companions (the pre-A1 cell of the same seed and
+    protocol, and the sensitivity cell of the same protocol) or points to the companion rows."""
+    companions: dict[str, list[tuple[str, str]]] = {}
+    for r in _matrix()["rows"]:
+        if (r["dataset"], r["engine"]) == ("sw1", "a1"):
+            pre = _row("sw1", r["seed"], "pre-a1", r["protocol"])
+            sens = _row("sens", 0, "a1", r["protocol"])
+            companions.setdefault(cell(r["families"]["magnitude_spike"]), []).append(
+                (
+                    cell(pre["families"]["magnitude_spike"]),
+                    cell(sens["families"]["magnitude_spike"]),
+                )
+            )
+    bad = []
+    for unit in prose_units(gate_scope(name)):
+        for c, pairs in companions.items():
+            if c not in unit or "companion" in unit.lower():
+                continue
+            if not any(pre in unit and sens in unit for pre, sens in pairs):
+                bad.append((c, unit))
+    assert bad == [], name
+
+
 @pytest.mark.parametrize("name", DOCS)
 def test_docs_hold_no_absolute_paths(name: str) -> None:
     assert not re.search(r"(?<![\w.])/(Users|home|private|tmp)/", DOCS[name].read_text()), name

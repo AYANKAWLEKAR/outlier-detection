@@ -172,13 +172,14 @@ How to read these numbers:
   engine itself still learns each held-out agent online during the test period, so the by-agent
   split tests the pooled priors only for the first observations of each key. The gate is
   evaluated by time only.
-- **Drift and cold start (oracle-reviewer run, by time, per-agent operating point).** All 11
-  `slow_drift` attacks are caught, with a median delay of 3 sessions and p90 of 7. Every warm test
-  envelope has ≥ 30 key observations by construction; the 230 envelopes with 30–100 observations
-  show recall 0.929 at FPR 0.529 (0.951 at 0.484 for the rest).
-- **Latency.** The latencies in these leaderboard runs (engine p99 about 0.3 ms in the
-  oracle-reviewer run) were measured with four replays running in parallel and are not a latency
-  result.
+- **Drift and cold start (run under the oracle-reviewer approval loop (labels act as a perfect
+  human reviewer → optimistic), by time, per-agent operating point).** All 11 `slow_drift` attacks
+  are caught, with a median delay of 3 sessions and p90 of 7. Every warm test envelope has ≥ 30
+  key observations by construction; the 230 envelopes with 30–100 observations show recall 0.929
+  at FPR 0.529 (0.951 at 0.484 for the rest).
+- **Latency.** The latencies in these leaderboard runs (engine p99 about 0.3 ms in the run under
+  the oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)) were
+  measured with four replays running in parallel and are not a latency result.
 
 ## 6. Tier-1 status
 
@@ -224,28 +225,34 @@ the benign p99; seed 0 only). The sensitivity rows are not gate results.
   oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic).** It fails
   on seeds 0 and 2 (velocity_burst 0.880 (44/50) and 0.864 (38/44); exfil_volume's among-the-reasons
   share 0.89 and 0.88), and under spec §5.2 allow-all on all three.
-- Under the oracle-reviewer loop the pre-A1 engine already catches 0.975 (79/81), 0.988 (84/85) and
-  0.953 (81/85) of the far spikes. The magnitude cell under that protocol is decided by the
-  generator correction more than by the scoring change.
+- Under the oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)
+  the pre-A1 engine already catches 0.975 (79/81), 0.988 (84/85) and 0.953 (81/85) of the far
+  spikes. The magnitude cell under that protocol is decided by the generator correction more than
+  by the scoring change.
 - On the sensitivity dataset neither engine reaches 0.90 in the magnitude cell under either
   protocol.
-- The control FPR under the oracle-reviewer loop falls from 0.134 / 0.087 / 0.108 (pre-A1) to
-  0.035 / 0.028 / 0.050. The drop comes from the velocity change: flat keys no longer over-score
-  windows of 3 to 6 calls. Seed 2's 5.01 % is above the 5 % Tier-3 bound.
+- The control FPR under the oracle-reviewer approval loop (labels act as a perfect human reviewer
+  → optimistic) falls from 0.134 / 0.087 / 0.108 (pre-A1) to 0.035 / 0.028 / 0.050. The drop comes
+  from the velocity change: flat keys no longer over-score windows of 3 to 6 calls. Seed 2's
+  5.01 % is above the 5 % Tier-3 bound.
 
-**Root causes (decision 008) and what Amendment A1 changed.** Decision 008 traced the gap to
-(a) the allow-all replay learning the attacks (91 of 121 misses), (b) magnitude spikes that were
-not extreme, scored on a squash that was too flat, (c) velocity bursts on agents whose traffic is
-already bursty, and too few magnitude attacks in the gate cell (13 on seed 0). Amendment A1
-changed the magnitude score (b), the velocity count score (c), the benchmark's spikes and their
-number (b, sample size) and the attribution criterion. Nothing in it addresses (a): under spec
-§5.2 allow-all every attack row is learned, and in the seed-0 leaderboard run the median live
-threshold is ≥ 0.999 on 18 of 20 agents, so only fused scores of about 1.0 are flagged.
+**Root causes (decision 008) and what Amendment A1 changed.** Decision 008 traced the gap to (a)
+the spec §5.2 allow-all replay learning the attacks (91 of 121 misses), (b) magnitude spikes that
+were not extreme, scored on a squash that was too flat, (c) velocity bursts on agents whose
+traffic is already bursty, and too few magnitude attacks in the gate cell (13 on seed 0).
+Amendment A1 changed the magnitude score (b), the velocity count score (c), the benchmark's spikes
+and their number (b, sample size) and the attribution criterion. Nothing in it addresses (a):
+under spec §5.2 allow-all every attack row is learned, and in the seed-0 leaderboard run the
+median live threshold is ≥ 0.999 on 18 of 20 agents *(manual inspection, §7)*, so only fused
+scores of about 1.0 are flagged.
 
 ## 7. Failure cases
 
 From the SW1 seed-0 leaderboard runs (by time, warm test rows, the engine's live thresholds),
-read from `results/synth-v1/time/{engine,engine-allow-all}/scores.parquet`.
+read from `results/synth-v1/time/{engine,engine-allow-all}/scores.parquet`. Every count and score
+range in this section that is not a gate cell is *(manual inspection)*: it was read from those
+files (which are not committed) by a script that is not committed either, as decision 008 marks
+such numbers. The gate cells are those of `docs/decisions/evidence/a1-gate/matrix.json`.
 
 - **Under spec §5.2 allow-all, saturated thresholds hide near-certain anomalies.** The median
   live threshold is ≥ 0.999 on 18 of 20 agents (2 of 20 under the oracle-reviewer approval loop
@@ -253,27 +260,31 @@ read from `results/synth-v1/time/{engine,engine-allow-all}/scores.parquet`.
   missed: their best rows score 0.983–0.9999 against thresholds of 0.9993–1.0. The engine ranks
   them near the top, yet the calibrator, having learned earlier attacks as benign, sets the bar
   just above them.
-- **The new velocity score makes this worse under allow-all.** Bursts now score near 1 and are
-  learned, so helpdesk-triage-b and slack-notifier-a saturate; 9 of the 10 missed bursts are on
-  those two agents, and novel_target falls from 0.469 (23/49) with the engine before Amendment A1
-  to 0.163 (8/49) (spec A1.12 item 2). The old number existed because the old velocity score
-  failed on those agents.
-- **Magnitude spikes under allow-all.** The 5 missed far spikes (0.938 (76/81)) are on two refund
-  personas (support-refunds-b and support-refunds-c) and score 0.93–0.97 against thresholds of
-  0.9998–1.0.
-- **Weak exfil response signal.** 4 of the 8 exfil_volume misses under allow-all are on
-  helpdesk-triage-a, whose response-count key scores them only 0.44–0.57. Decision 008 §1 traced
-  the same key's weak score to the inflated item counts of earlier exfil reads in its baseline; that
-  was not re-checked on this dataset.
-- **False positives under the oracle-reviewer loop concentrate on sequence.** 297 of 50,884 warm
-  benign calls are flagged (0.58 %). 24 are `benign_unusual` controls (control FPR 3.5 %; top
-  detector magnitude 11, velocity 8, sequence 5). Of the other 273, sequence is the top detector
-  151 times, novelty 56, velocity 52, magnitude 14; sales-ops-a (48), finance-reconcile-a (35) and
-  sales-ops-b (29) have the most.
+- **The new velocity score makes this worse under spec §5.2 allow-all.** Bursts now score near 1
+  and are learned, so helpdesk-triage-b and slack-notifier-a saturate; 9 of the 10 missed bursts
+  are on those two agents, and novel_target falls from 0.469 (23/49) with the engine before
+  Amendment A1 to 0.163 (8/49) (spec A1.12 item 2). The old number existed because the old
+  velocity score failed on those agents.
+- **Magnitude spikes under spec §5.2 allow-all.** The 5 missed far spikes (0.938 (76/81); the
+  engine before Amendment A1 catches 0.753 (61/81) on the same data, and the amended engine
+  0.656 (42/64) on the sensitivity dataset, companion rows in §6) are on two refund personas
+  (support-refunds-b and support-refunds-c) and score 0.93–0.97 against thresholds of 0.9998–1.0.
+- **Weak exfil response signal.** 4 of the 8 exfil_volume misses under spec §5.2 allow-all are on
+  helpdesk-triage-a. Their response-count key (`__resp__.item_count`) scores at most 0.035, and
+  their best rows (0.44–0.57, from sequence and from novelty on `text`) stay far below thresholds
+  of 0.9998–1.0. Decision 008 §1 traced the same key's weak score to the inflated item counts of
+  earlier exfil reads in its baseline; that was not re-checked on this dataset.
+- **False positives under the oracle-reviewer approval loop (labels act as a perfect human
+  reviewer → optimistic) concentrate on sequence.** 297 of 50,884 warm benign calls are flagged
+  (0.58 %). 24 are `benign_unusual` controls (control FPR 3.5 %; top detector magnitude 11,
+  velocity 8, sequence 5). Of the other 273, sequence is the top detector 151 times, novelty 56,
+  velocity 52, magnitude 14; sales-ops-a (48), finance-reconcile-a (35) and sales-ops-b (29) have
+  the most.
 - **Spikes just outside the benign range are missed.** On the sensitivity dataset the amended
-  engine catches 0.797 (51/64) of the gated spikes under the oracle-reviewer loop and 0.656 (42/64)
-  under allow-all. Some of those spikes are at or below a benign value of the same field and
-  should not be caught by any honest score.
+  engine catches 0.797 (51/64) of the gated spikes under the oracle-reviewer approval loop (labels
+  act as a perfect human reviewer → optimistic) and 0.656 (42/64) under spec §5.2 allow-all. Some
+  of those spikes are at or below a benign value of the same field and should not be caught by any
+  honest score.
 - **Attribution.** For detected velocity bursts, velocity is the top reason in 0.40 of cases on
   seed 0: sequence reaches 1.0 on the third or fourth duplicated write, before velocity can. It is
   among the reasons of a flagged row in every detected burst.

@@ -463,18 +463,22 @@ What the companion rows show:
   approval loop (labels act as a perfect human reviewer → optimistic).** On that seed the corrected
   data and the among-the-reasons criterion are enough; the scoring change is not needed. Under
   spec §5.2 allow-all the pre-A1 engine fails on seed 1 in six families.
-- On seeds 0 and 2 the pre-A1 engine fails under the oracle-reviewer loop: seed 0 on
-  velocity_burst 0.880 (44/50) and the exfil_volume among-the-reasons share 0.89; seed 2 on
-  exfil_volume 0.895 (34/38), its share 0.88, and velocity_burst 0.864 (38/44). These are the
-  cells the scoring change closes.
-- The pre-A1 engine already catches most far spikes under the oracle-reviewer loop
-  (0.975 (79/81), 0.988 (84/85), 0.953 (81/85)). The magnitude cell under that protocol is decided
-  by the generator correction more than by the scoring change (spec A1.12 item 4).
+- On seeds 0 and 2 the pre-A1 engine fails under the oracle-reviewer approval loop (labels act as
+  a perfect human reviewer → optimistic): seed 0 on velocity_burst 0.880 (44/50) and the
+  exfil_volume among-the-reasons share 0.89; seed 2 on exfil_volume 0.895 (34/38), its share 0.88,
+  and velocity_burst 0.864 (38/44). These are the cells the scoring change closes.
+- The pre-A1 engine already catches most far spikes under the oracle-reviewer approval loop
+  (labels act as a perfect human reviewer → optimistic): 0.975 (79/81), 0.988 (84/85),
+  0.953 (81/85). The magnitude cell under that protocol is decided by the generator correction
+  more than by the scoring change (spec A1.12 item 4).
 - On the sensitivity dataset neither engine reaches 0.90 in the magnitude cell under either
-  protocol (amended 0.797 (51/64) and 0.656 (42/64); pre-A1 0.688 (44/64) and 0.578 (37/64)).
-- The control FPR drop under the oracle-reviewer loop (pre-A1 0.134 / 0.087 / 0.108, amended
-  0.035 / 0.028 / 0.050 on seeds 0 / 1 / 2) comes from the velocity change: flat keys no longer
-  over-score windows of 3 to 6 calls (spec A1.11).
+  protocol: amended 0.797 (51/64) under the oracle-reviewer approval loop (labels act as a perfect
+  human reviewer → optimistic) and 0.656 (42/64) under spec §5.2 allow-all; pre-A1 0.688 (44/64)
+  and 0.578 (37/64) under the same two protocols.
+- The control FPR drop under the oracle-reviewer approval loop (labels act as a perfect human
+  reviewer → optimistic) (pre-A1 0.134 / 0.087 / 0.108, amended 0.035 / 0.028 / 0.050 on
+  seeds 0 / 1 / 2) comes from the velocity change: flat keys no longer over-score windows of 3 to
+  6 calls (spec A1.11).
 
 ### Old → new record
 
@@ -519,15 +523,17 @@ benign range, 97 to 99 % of them have strength ≥ 10, so the 3-10 bucket is nea
 Spec A1.12, with the numbers measured on the implementation (`matrix.json`, `matrix.md`).
 
 1. **The amended criterion fails under spec §5.2 allow-all on seeds 0, 1 and 2.** Seed 0:
-   exfil_volume 0.579 (11/19), prereq_skip 0.533 (8/15), novel_target 0.163 (8/49),
-   velocity_burst 0.800 (40/50). Seed 1: those four (0.655 (19/29), 0.667 (12/18), 0.222 (8/36),
-   0.808 (42/52)) and magnitude_spike 0.824 (70/85). Seed 2: exfil_volume 0.711 (27/38),
-   prereq_skip 0.846 (11/13), novel_target 0.211 (8/38), velocity_burst 0.682 (30/44). This is
-   cause (a) of this decision, and no scoring change in Amendment A1 addresses it: every attack row
-   is learned. In the seed-0 leaderboard runs the median live threshold over the warm test rows is
-   ≥ 0.999 on 18 of 20 agents under spec §5.2 allow-all and on 2 of 20 under the oracle-reviewer
-   approval loop (labels act as a perfect human reviewer → optimistic), where every gated family
-   passes on every seed. That loop is called "the oracle-reviewer loop" below.
+   exfil_volume 0.579 (11/19), prereq_skip 0.533 (8/15), novel_target 0.163 (8/49), velocity_burst
+   0.800 (40/50). Seed 1: those four (0.655 (19/29), 0.667 (12/18), 0.222 (8/36), 0.808 (42/52))
+   and magnitude_spike 0.824 (70/85) (pre-A1 0.788 (67/85) on the same data; companion rows above).
+   Seed 2: exfil_volume 0.711 (27/38), prereq_skip 0.846 (11/13), novel_target 0.211 (8/38),
+   velocity_burst 0.682 (30/44). This is cause (a) of this decision, and no scoring change in
+   Amendment A1 addresses it: every attack row is learned. In the seed-0 leaderboard runs the
+   median live threshold over the warm test rows is ≥ 0.999 on 18 of 20 agents under spec §5.2
+   allow-all and on 2 of 20 under the oracle-reviewer approval loop (labels act as a perfect human
+   reviewer → optimistic) *(manual inspection: read from the runs' `scores.parquet`, which is not
+   committed)*. Under the oracle-reviewer approval loop (labels act as a perfect human reviewer →
+   optimistic) every gated family passes on every seed.
 2. **Under spec §5.2 allow-all, recall gets worse for novel_target** on the same data: pre-A1 →
    amended 0.469 (23/49) → 0.163 (8/49) on seed 0, 0.444 (16/36) → 0.222 (8/36) on seed 1,
    0.474 (18/38) → 0.211 (8/38) on seed 2. prereq_skip on seed 0 goes 0.667 (10/15) → 0.533 (8/15).
@@ -535,28 +541,35 @@ Spec A1.12, with the numbers measured on the implementation (`matrix.json`, `mat
    helpdesk-triage-b and slack-notifier-a saturate. The old number existed because the old velocity
    score failed on those agents. It must not be "fixed" by capping velocity or magnitude scores.
 3. **The original spec §9 criterion (top-1 share ≥ 0.90) is not met under either protocol.** Under
-   the oracle-reviewer loop: velocity_burst 0.40 / 0.24 / 0.43, exfil_volume 0.84 / 0.79 / 0.82,
-   scope_blowup 0.85 on seed 0. On a duplicated write, sequence reaches 1.0 on the third or fourth
-   duplicate, before velocity can. The gate no longer requires top-1; it stays reported.
-4. **Under the oracle-reviewer loop the magnitude cell is decided mostly by the generator
-   correction**, and on seed 1 the pre-A1 engine passes the amended criterion (companion rows above).
+   the oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic):
+   velocity_burst 0.40 / 0.24 / 0.43, exfil_volume 0.84 / 0.79 / 0.82, scope_blowup 0.85 on seed 0.
+   On a duplicated write, sequence reaches 1.0 on the third or fourth duplicate, before velocity
+   can. The gate no longer requires top-1; it stays reported.
+4. **Under the oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)
+   the magnitude cell is decided mostly by the generator correction**, and on seed 1 the pre-A1
+   engine passes the amended criterion (companion rows above).
 5. **On the sensitivity dataset the amended engine does not reach 0.90:** 0.797 (51/64) under the
-   oracle-reviewer loop, 0.656 (42/64) under spec §5.2 allow-all (pre-A1 0.688 (44/64) /
-   0.578 (37/64)). Spec A1.12 counted 12 of the prototype's 64 gated spikes at or below the field's
-   largest benign value; that count was not repeated on the implementation's sensitivity dataset.
-6. **One velocity burst is still missed under the oracle-reviewer loop on seed 1:** 0.981 (51/52).
-7. **Control FPR under the oracle-reviewer loop is 3.52 % / 2.78 % / 5.01 %** on seeds 0 / 1 / 2.
-   Seed 2 is above the 5 % Tier-3 bound that spec A1.12 item 7 states for seeds 0 and 1. Nothing was
-   retuned (ruling A1-22).
+   oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic),
+   0.656 (42/64) under spec §5.2 allow-all (pre-A1 0.688 (44/64) / 0.578 (37/64)). Spec A1.12
+   counted 12 of the prototype's 64 gated spikes at or below the field's largest benign value; that
+   count was not repeated on the implementation's sensitivity dataset.
+6. **One velocity burst is still missed under the oracle-reviewer approval loop (labels act as a
+   perfect human reviewer → optimistic) on seed 1:** 0.981 (51/52). Under spec §5.2 allow-all
+   seed 1 misses 10 of 52 (0.808 (42/52)).
+7. **Control FPR under the oracle-reviewer approval loop (labels act as a perfect human reviewer →
+   optimistic) is 3.52 % / 2.78 % / 5.01 %** on seeds 0 / 1 / 2 (under spec §5.2 allow-all 0.73 % /
+   1.31 % / 3.08 %). Seed 2 is above the 5 % Tier-3 bound that spec A1.12 item 7 states for seeds 0
+   and 1. Nothing was retuned (ruling A1-22).
 8. **Known over-scoring cases of the magnitude tail score** (spec A1.12 item 8, measured on the
    prototype and not re-measured): power-law tails; small integer fields with tied markers; a field
    that never varied (any change of about 14 % scores 0.5); `q95`'s 5 % breakdown point under
-   allow-all.
+   spec §5.2 allow-all.
 9. **Velocity's over-dispersion correction is weak** (`disp` 1.0 to 1.15 on keys whose
    variance-to-mean ratio is above 2). The share of benign velocity scores ≥ 0.5 under the
-   oracle-reviewer loop is 0.76 % / 1.22 % / 0.92 % on seeds 0 / 1 / 2 (pre-A1 1.11 % / 1.42 % /
-   1.27 %), above the 0.5 % prior. The per-agent shares are now recorded in `matrix.md` with no
-   threshold; the highest is payouts-ops-a at 3.53 % (seed 2).
+   oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic) is 0.76 % /
+   1.22 % / 0.92 % on seeds 0 / 1 / 2 (pre-A1 1.11 % / 1.42 % / 1.27 %), above the 0.5 % prior. The
+   per-agent shares are now recorded in `matrix.md` with no threshold; the highest is payouts-ops-a
+   at 3.53 % (seed 2).
 10. **Not measured:** `Engine.score` latency p99 on an idle machine (`latency_p99_us` is null in
     `matrix.json`; three runs under load stayed below the 200 µs budget and are not pinned); seed 1
     and seed 2 on the sensitivity dataset; Go parity of `erfc` and the cube root; the cause of the

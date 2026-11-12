@@ -111,9 +111,10 @@ protocol. The Tier-2 exit is not reached. In `tests/acceptance/test_tier1_exit.p
 `test_tier1_exit[review]` passes and `test_tier1_exit[allow]` is a strict xfail.
 
 Details, seeds 1 and 2, and what is still not met (including a seed-2 control FPR of 5.01 % under
-the oracle-reviewer loop, above the 5 % Tier-3 bound) are in
+the oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic), above the
+5 % Tier-3 bound; 3.08 % under spec §5.2 allow-all) are in
 [docs/decisions/008-tier1-gate.md](docs/decisions/008-tier1-gate.md), section "Amendment A1
-(2026-11-11)". Every number below is a cell of
+(2026-11-11)". Every number in the table below is a cell of
 [`docs/decisions/evidence/a1-gate/matrix.json`](docs/decisions/evidence/a1-gate/matrix.json).
 
 ## Tier-1 gate under both protocols, SW1 seed 0
@@ -124,7 +125,8 @@ together, and neither alone is the Tier-1 gate result. The `magnitude_spike` cel
 its two companions (spec A1.5 rule 4): the engine before Amendment A1
 (`EngineConfig().replace(**PRE_A1_SWITCHES)`) on the same data, and both engines on the sensitivity
 dataset (`magnitude_far_mult = 1.0`). The sensitivity rows are not gate results. On seed 1 the
-pre-A1 engine also passes the amended criterion under the oracle-reviewer loop (decision 008).
+pre-A1 engine also passes the amended criterion under the oracle-reviewer approval loop (labels act
+as a perfect human reviewer → optimistic) and fails it under spec §5.2 allow-all (decision 008).
 
 | dataset | engine | Protocol | magnitude_spike 10-100 | scope_blowup | exfil_volume | prereq_skip | novel_target | velocity_burst | benign FPR | control FPR | amended criterion |
 |---|---|---|---|---|---|---|---|---|---|---|---|
