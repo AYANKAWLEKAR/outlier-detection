@@ -364,10 +364,14 @@ def test_z0tau_note_is_printed_in_sweeps_md(tiny_dataset: Path, tmp_path: Path) 
     from agentfw.bench.sweeps import Z0TAU_NOTE, main
 
     assert "velocity only" in Z0TAU_NOTE and "A1.2" in Z0TAU_NOTE
-    args = ["--traces", str(tiny_dataset), "--out", str(tmp_path), "--suites", "z0tau"]
+    # A second suite in the same run: the note belongs to z0tau's section and no other.
+    args = ["--traces", str(tiny_dataset), "--out", str(tmp_path), "--suites", "z0tau,alpha"]
     assert main([*args, "--outcomes", "allow"]) == 0
     md = (tmp_path / "sweeps.md").read_text()
-    assert Z0TAU_NOTE in md.split("## z0tau", 1)[1]
+    sections = {s.split("\n", 1)[0]: s for s in md.split("\n## ")[1:]}
+    assert set(sections) == {"z0tau", "alpha"}
+    assert Z0TAU_NOTE in sections["z0tau"]
+    assert Z0TAU_NOTE not in sections["alpha"]
 
 
 def test_sweeps_cli_records_the_protocol_of_the_grid_suites(

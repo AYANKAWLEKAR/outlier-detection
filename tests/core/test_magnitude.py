@@ -87,6 +87,9 @@ def _lognormal(n: int = 500, seed: int = 0) -> list[float]:
 
 @pytest.fixture(scope="module")
 def trained_mag() -> Trained:
+    """Default config. Since Task 1.21 that is ``mag_score="tail"`` (A1.2), so the tests on this
+    fixture (warm spike, warm evidence, max over values, ...) run the tail rule, not §6.3's z
+    rule. The z rule is pinned by the tests that build with ``Z`` / ``PRE_A1_SWITCHES``."""
     return build(_lognormal())
 
 
@@ -177,7 +180,8 @@ def test_direction_hints_override_name() -> None:
 
 def test_warm_spike_and_normal(trained_mag: Trained) -> None:  # 500 lognormal(3.6,0.7) refunds
     assert score_amount(trained_mag, 37.0) < 0.1
-    # Brief asked 20x > 0.9; under the spec formula 20x gives z~4.2-4.9 (s~0.83-0.93 by seed).
+    # Default (tail) rule since Task 1.21. Thresholds date from the §6.3 z rule, where 20x gives
+    # z~4.2-4.9 (s~0.83-0.93 by seed); the brief asked 20x > 0.9.
     assert score_amount(trained_mag, 37.0 * 20) > 0.8
     assert score_amount(trained_mag, 37.0 * 50) > 0.9
     assert score_amount(trained_mag, 37.0 / 20) < 0.05  # direction=up ignores small
