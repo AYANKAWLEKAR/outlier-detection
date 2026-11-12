@@ -19,7 +19,8 @@ carries no mark. The top-1 share (original spec §9 criterion) is still computed
 beside the among-the-reasons share; it is no longer gated.
 
 The other tests are dataset validity (``magnitude_spike`` gate cell >= 50 attacks), the benign FPR
-guard, the report fields, the regression pins against the measured seed-0 rows of
+guard, the report fields, the test's cells equal to report.json's gate cells, the failure
+message's format, the regression pins against the measured seed-0 rows of
 ``docs/decisions/evidence/a1-gate/matrix.json`` (0.1 tolerance) and, on the review run, the
 ablation table, the cold-start curve and drift, and score latency. A failure message shows both
 protocols together and prints the ``magnitude_spike`` cell only next to its two companion rows
@@ -43,6 +44,7 @@ from agentfw.bench.metrics import (
     RecallCell,
     among_reasons_share,
     benign_fpr,
+    control_fpr,
     recall_by_family,
     top_reason_share,
 )
@@ -103,6 +105,8 @@ MEASURED: dict[OutcomeMode, dict[str, tuple[float, float]]] = {
 TOLERANCE = 0.1
 MIN_MAGNITUDE_N = 50  # dataset validity (spec A1.4, A1.7; D-026)
 MATRIX = Path(__file__).resolve().parents[2] / "docs/decisions/evidence/a1-gate/matrix.json"
+# (dataset, engine) of the two magnitude_spike companion rows in matrix.json (spec A1.5 rule 4).
+COMPANIONS = (("sw1", "pre-a1"), ("sens", "a1"))
 
 
 def _sw1_dir(tmp: pytest.TempPathFactory) -> Path:
@@ -183,30 +187,34 @@ def _among(rows: list[ScoreRow], fam: str) -> float:
 
 
 def _companions() -> list[str]:
-    """The two companion rows of the ``magnitude_spike`` cell (spec A1.5 rule 4), seed 0, from
-    ``matrix.json``: the pre-A1 engine on SW1 and the amended engine on the sensitivity dataset."""
+    """The two companion rows of the ``magnitude_spike`` cell (spec A1.5 rule 4) at SW1's seed,
+    from ``matrix.json``: the pre-A1 engine on SW1 and the amended engine on the sensitivity
+    dataset."""
     by_key = {
         (r["dataset"], r["engine"], r["protocol"], r["seed"]): r
         for r in orjson.loads(MATRIX.read_bytes())["rows"]
     }
+    names = {
+        ("sw1", "pre-a1"): "pre-A1 engine, SW1",
+        ("sens", "a1"): "amended engine, sensitivity dataset (magnitude_far_mult = 1.0)",
+    }
     out: list[str] = []
-    for dataset, engine, name in (
-        ("sw1", "pre-a1", "pre-A1 engine, SW1 seed 0"),
-        ("sens", "a1", "amended engine, sensitivity dataset (magnitude_far_mult = 1.0) seed 0"),
-    ):
+    for dataset, engine in COMPANIONS:
         parts = []
         for mode in PROTOCOLS:
-            c = by_key[dataset, engine, mode, 0]["families"]["magnitude_spike"]
+            c = by_key[dataset, engine, mode, SW1.seed]["families"]["magnitude_spike"]
             parts.append(
                 f"{PROTOCOL_LABELS[mode]}: {c['recall']:.3f} ({c['n_detected']}/{c['n_total']})"
             )
+        name = f"{names[dataset, engine]} seed {SW1.seed}"
         out.append(f"  companion ({name}, matrix.json): " + "; ".join(parts))
     return out
 
 
 def _summary(tier1_rows: dict[OutcomeMode, list[ScoreRow]], failed: str) -> str:
     """Failure message: the amended criterion's numbers under both protocols, each under its label
-    verbatim (spec A1.5 rules 1 and 3); the magnitude cell only with its companions (rule 4)."""
+    verbatim, then benign and control FPR (spec A1.5 rules 1 and 3); the magnitude cell only with
+    its companions (rule 4)."""
     lines = [f"failed: {failed}"]
     for mode in PROTOCOLS:
         rows = tier1_rows[mode]
@@ -219,7 +227,8 @@ def _summary(tier1_rows: dict[OutcomeMode, list[ScoreRow]], failed: str) -> str:
                 f"  {fam} {_bucket(fam)}: recall {c.recall:.3f} ({c.n_detected}/{c.n_total}); "
                 f"among {_among(rows, fam):.2f}; top-1 {top1:.2f} ({ORIGINAL_CRITERION_LABEL})"
             )
-        lines.append(f"  benign FPR {benign_fpr(warm, 'row'):.4f}")
+        b, ctl = benign_fpr(warm, "row"), control_fpr(warm, "row")
+        lines.append(f"  benign FPR {b:.4f}; control FPR {ctl:.4f}")
     return "\n".join([*lines, *_companions()])
 
 
@@ -275,6 +284,64 @@ def test_tier1_report_shows_both_shares(
         assert {"among_reasons_share", "top_reason_share"} <= gate["cells"][fam].keys()
     # The report.json field; not a rendered claim (spec A1.5).
     assert gate["passed"] is (mode == "review")
+
+
+@pytest.mark.parametrize("mode", PROTOCOLS)
+def test_tier1_cells_match_report(
+    tier1_rows: dict[OutcomeMode, list[ScoreRow]],
+    tier1_reports: dict[OutcomeMode, dict[str, Any]],
+    mode: OutcomeMode,
+) -> None:
+    """The test's own population (warm test rows, gate bucket) is the one report.json's gate cells
+    (``gate_preview``) were computed on, so the test's numbers and the report's PASS/FAIL cannot
+    drift apart (spec A1.7)."""
+    rows = tier1_rows[mode]
+    gate = tier1_reports[mode]["gate"]
+    for fam in TARGETS:
+        c, want = _cell(rows, fam), gate["cells"][fam]
+        assert (c.n_detected, c.n_total) == (want["n_detected"], want["n_total"]), (mode, fam)
+        assert c.recall == want["recall"], (mode, fam)
+        assert _among(rows, fam) == want["among_reasons_share"], (mode, fam)
+    warm = _warm_test(rows)
+    assert benign_fpr(warm, "row") == gate["benign_fpr"], mode
+    assert control_fpr(warm, "row") == gate["control_fpr"], mode
+
+
+def test_tier1_failure_summary_follows_a1_5(
+    tier1_rows: dict[OutcomeMode, list[ScoreRow]],
+) -> None:
+    """Every failure message (``_summary``) meets spec A1.5 rules 1, 3 and 4: both protocols in
+    order, each under its label verbatim; per family recall (n/N), among share and top-1 share
+    labelled as the original criterion; then benign FPR and control FPR; then the two
+    ``magnitude_spike`` companion rows of SW1's seed from matrix.json."""
+    matrix = {
+        (r["dataset"], r["engine"], r["protocol"], r["seed"]): r
+        for r in orjson.loads(MATRIX.read_bytes())["rows"]
+    }
+    for key in [(d, e, m, SW1.seed) for d, e in COMPANIONS for m in PROTOCOLS]:
+        assert key in matrix, f"matrix.json has no companion row {key}"
+    lines = _summary(tier1_rows, "probe").splitlines()
+    assert lines[0] == "failed: probe"
+    block = 1 + len(TARGETS) + 1
+    for i, mode in enumerate(PROTOCOLS):
+        head, *fams, fpr = lines[1 + i * block : 1 + (i + 1) * block]
+        assert head == f"{PROTOCOL_LABELS[mode]}:"
+        for fam, line in zip(TARGETS, fams, strict=True):
+            c = _cell(tier1_rows[mode], fam)
+            assert line.startswith(f"  {fam} {_bucket(fam)}: recall {c.recall:.3f} "), line
+            assert f"({c.n_detected}/{c.n_total}); among " in line, line
+            assert line.endswith(f" ({ORIGINAL_CRITERION_LABEL})") and "top-1 " in line, line
+        warm = _warm_test(tier1_rows[mode])
+        b, ctl = benign_fpr(warm, "row"), control_fpr(warm, "row")
+        assert fpr == f"  benign FPR {b:.4f}; control FPR {ctl:.4f}", fpr
+    companions = lines[1 + len(PROTOCOLS) * block :]
+    assert len(companions) == len(COMPANIONS)
+    for line, (dataset, engine) in zip(companions, COMPANIONS, strict=True):
+        assert f"seed {SW1.seed}, matrix.json): " in line, line
+        for mode in PROTOCOLS:
+            c = matrix[dataset, engine, mode, SW1.seed]["families"]["magnitude_spike"]
+            want = f"{PROTOCOL_LABELS[mode]}: {c['recall']:.3f} ({c['n_detected']}/{c['n_total']})"
+            assert want in line, line
 
 
 @pytest.mark.parametrize("mode", PROTOCOLS)
