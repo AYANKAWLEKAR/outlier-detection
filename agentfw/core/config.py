@@ -101,6 +101,12 @@ class EngineConfig:
     # missing prerequisite instead of 1.0. Default on by user decision (2026-11-10, decision 008);
     # False = spec §6.6(b).
     seq_prereq_graded: bool = True
+    # Age discount (F6, Task 2.3): ``s_trans`` of a tool this agent has used fewer than ``age_h``
+    # times is scaled by ``ω = c0[tool] / age_h`` (0 at first use, 1 from the ``age_h``-th
+    # earlier use on), or by 1 once an irreversible call named it a producer (``ValidatedRecord``).
+    # Prereq, flow, magnitude and novelty are never discounted. False = no change at all.
+    seq_age_discount: bool = False
+    age_h: int = 3
     # Id flow (§6.7-6.8)
     flow_min_obs: int = 20
     # Task 1.4 switch (T-04): "present" = a ledger ref on the envelope or a session_ids_seen hit,

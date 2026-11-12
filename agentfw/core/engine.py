@@ -274,8 +274,12 @@ class Engine:
         if fused is None:
             fused = self._fuse(e, view)[1].fused  # pure: before any state below moves
             theta = self.calibrator.threshold(e.agent_id)
+        irr = self._irreversible(e) if self.cfg.seq_age_discount else False
         for d in self._detectors:
-            d.update(e, view)
+            if irr and d is self._sequence:
+                self._sequence.update(e, view, irreversible=True)
+            else:
+                d.update(e, view)
         self._observe_priors(e, view)
         if censor == "none" or fused < theta:
             self.calibrator.observe(e.agent_id, fused, outcome)
@@ -333,6 +337,14 @@ class Engine:
         if Flag.PROVISIONAL in traj.flags and outcome in _LEARN:
             provisional.open_entry(rec, e, fused, per, self.cfg)
         return (traj.flags - _LIFECYCLE) | flags
+
+    def _irreversible(self, e: ActionEnvelope) -> bool:
+        """Irreversibility of ``e`` from the blast radius whatever ``br_mode`` is (T-35); read
+        before any detector learns ``e``, so it matches what ``score`` saw."""
+        seq, hint = self._sequence, self.hints.get(e.tool_id)
+        is_write = seq.is_write(e.agent_id, e.tool_id)
+        b = blast_radius(e, hint, is_write, seq.has_item_count(e.agent_id, e.tool_id))
+        return irreversible(b, hint, is_write, self.cfg.irreversible_b)
 
     def _trajectory(self, e: ActionEnvelope, theta: float) -> TrajectoryInfo:
         cfg, seq = self.cfg, self._sequence

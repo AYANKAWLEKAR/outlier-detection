@@ -129,6 +129,9 @@ PROVISIONAL_DEFAULTS: dict[str, object] = {
     "prov_min_calls": 8,
 }
 
+# Task 2.3 age discount for transition surprise (feature spec F6).
+AGE_DEFAULTS: dict[str, object] = {"seq_age_discount": False, "age_h": 3}
+
 
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
@@ -142,6 +145,7 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | VITAL_DEFAULTS
         | SESSION_DEFAULTS
         | PROVISIONAL_DEFAULTS
+        | AGE_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
 

@@ -28,6 +28,10 @@ the same way and ``FlowRecord.producers`` tallies the producer tool of each ref
 (``usual_producer`` names the commonest). ``ref_source`` is the source of the first ref on the
 flagged path (or, when nothing is missing, on any ID-typed path); None without one or without the
 switch.
+Age discount (F6, Task 2.3, ``seq_age_discount``): ``s_trans`` is multiplied by
+``omega = 1`` if the tool is in the agent's ``ValidatedRecord`` (an irreversible call named it as
+a ledger producer), else ``min(1, c0[tool] / age_h)``; evidence gains ``age_weight``. Prereq,
+flow and the other detectors are untouched. Off: no record, no evidence, no change.
 A tool is a write if its hint says so, else if it has been seen with an ID-typed argument and never
 with a response ``item_count`` -- learned only from past ``update`` calls, so scoring is causal.
 
@@ -53,6 +57,7 @@ from agentfw.core.state import (
     key_kind,
     key_prereq,
     key_trans,
+    key_validated,
     register_record,
 )
 
@@ -63,6 +68,7 @@ __all__ = [
     "SequenceDetector",
     "ToolKindRecord",
     "TransRecord",
+    "ValidatedRecord",
 ]
 
 NAME = "sequence"
@@ -180,6 +186,22 @@ class FlowRecord:
         return cls(int(d["present"]), int(d["total"]), prod)
 
 
+@register_record
+@dataclass(slots=True)
+class ValidatedRecord:
+    """Tools whose output an irreversible call consumed (F6 age discount)."""
+
+    KIND: ClassVar[str] = "validated"
+    tools: set[str] = field(default_factory=set)
+
+    def to_dict(self) -> dict[str, object]:
+        return {"tools": sorted(self.tools)}
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Self:
+        return cls({str(t) for t in d["tools"]})
+
+
 def _contexts(prior: tuple[str, ...]) -> tuple[str, str]:
     """(k=2 key ``"a|b"``, k=1 key) from the last two prior tools, padded with ``<s>``."""
     last = prior[-2:]
@@ -206,9 +228,20 @@ class SequenceDetector:
         rec = self._store.get(key_trans(agent))
         return rec if isinstance(rec, TransRecord) else None
 
+    def _age_weight(self, agent: str, tool: str, rec: TransRecord | None) -> float:
+        vrec = self._store.get(key_validated(agent))
+        if isinstance(vrec, ValidatedRecord) and tool in vrec.tools:
+            return 1.0
+        n = 0 if rec is None else rec.c0.get(tool, 0)
+        return min(1.0, n / self._cfg.age_h)
+
     def _s_trans(self, e: ActionEnvelope) -> tuple[float, dict[str, object]]:
         rec = self._trans(e.agent_id)
         ev: dict[str, object] = {"k": 0, "p": 0.0, "entropy_ratio": 0.0}
+        omega = 1.0
+        if self._cfg.seq_age_discount:
+            omega = self._age_weight(e.agent_id, e.tool_id, rec)
+            ev["age_weight"] = omega
         if rec is None:
             return 0.0, ev
         v = len(rec.tools) + 1
@@ -234,7 +267,7 @@ class SequenceDetector:
             h -= zeros * q * math.log(q)
         ratio = min(1.0, max(0.0, h / math.log(v)))
         ev["entropy_ratio"] = ratio
-        return max(0.0, min(1.0, (1.0 - p) * (1.0 - ratio))), ev
+        return max(0.0, min(1.0, (1.0 - p) * (1.0 - ratio))) * omega, ev
 
     # --- prerequisites -----------------------------------------------------------------
 
@@ -357,7 +390,9 @@ class SequenceDetector:
         evidence["fired"] = fired[0] if fired[1] > 0.0 else None
         return [DetectorScore(NAME, None, fired[1], evidence)]
 
-    def update(self, e: ActionEnvelope, types: TypeView) -> None:
+    def update(self, e: ActionEnvelope, types: TypeView, *, irreversible: bool = False) -> None:
+        if irreversible and self._cfg.seq_age_discount:
+            self._validate(e)
         key = key_trans(e.agent_id)
         trec = self._trans(e.agent_id)
         if trec is None:
@@ -383,6 +418,18 @@ class SequenceDetector:
         prec.cached = (prec.n_y, self._mine(prec))
 
         self._update_flow(e, types)
+
+    def _validate(self, e: ActionEnvelope) -> None:
+        """An irreversible call consumed these producers' output: lift their age discount."""
+        producers = {r.producer_tool for r in e.ledger_refs if r.producer_tool is not None}
+        if not producers:
+            return
+        key = key_validated(e.agent_id)
+        vrec = self._store.get(key)
+        if not isinstance(vrec, ValidatedRecord):
+            vrec = ValidatedRecord()
+            self._store.put(key, vrec)
+        vrec.tools |= producers
 
     def _update_flow(self, e: ActionEnvelope, types: TypeView) -> None:
         kkey = key_kind(e.agent_id, e.tool_id)

@@ -37,6 +37,7 @@ __all__ = [
     "key_prior_nov",
     "key_sess",
     "key_trans",
+    "key_validated",
     "key_type",
     "key_vel",
     "register_record",
@@ -172,6 +173,10 @@ def key_trans(a: str) -> str:
 
 def key_prereq(a: str, t: str) -> str:
     return f"s:{_esc(a)}:prereq:{_esc(t)}"
+
+
+def key_validated(a: str) -> str:
+    return f"s:{_esc(a)}:validated"
 
 
 def key_flow(a: str, t: str, p: str) -> str:
