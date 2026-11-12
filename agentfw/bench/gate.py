@@ -60,7 +60,7 @@ _MAGNITUDE = "magnitude_spike"
 _COMPANION_HEADER = "## Companion: sensitivity dataset (magnitude_far_mult = 1.0)"
 _COMPANION_VERDICT = "companion row (spec A1.5 rule 4), not a gate result"
 
-Rows = dict[str, dict[OutcomeMode, GatePreview]]
+_Rows = dict[str, dict[OutcomeMode, GatePreview]]
 
 
 def gate_matrix(
@@ -163,12 +163,27 @@ def render_gate_matrix(
     _require_both(results)
     if sensitivity is not None:
         _require_both(sensitivity)
-    missing = []
+    # (what is missing, how to supply it); the hint names only the caller's actual gap.
+    gaps: list[tuple[str, str]] = []
     if PRE_A1_ROW not in results:
-        missing.append("pre-A1 row")
+        gaps.append(
+            (
+                "pre-A1 row",
+                f"add the `{PRE_A1_ROW}` row to the results (the engine with `PRE_A1_SWITCHES` "
+                "on the same dataset; the CLI always computes it)",
+            )
+        )
     if sensitivity is None or ENGINE_ROW not in sensitivity:
-        missing.append("sensitivity row")
-    withheld = f"withheld (spec A1.5 rule 4: missing {' and '.join(missing)})" if missing else None
+        gaps.append(
+            (
+                "sensitivity row",
+                f"pass the `{ENGINE_ROW}` row replayed on a dataset generated with "
+                "`magnitude_far_mult = 1.0` as `sensitivity` (CLI option "
+                "`--sensitivity-traces DIR`)",
+            )
+        )
+    missing = " and ".join(what for what, _ in gaps)
+    withheld = f"withheld (spec A1.5 rule 4: missing {missing})" if gaps else None
     head = [
         "Protocol",
         *(
@@ -196,16 +211,16 @@ def render_gate_matrix(
         "option `--sensitivity-traces DIR`), printed after the main blocks.",
         "",
     ]
-    if missing:
+    if gaps:
         lines += [
-            f"Every {_MAGNITUDE} cell is withheld: missing {' and '.join(missing)}. To show it, "
-            "run `python -m agentfw.bench.gate` with `--sensitivity-traces DIR` (a dataset "
-            "generated with `magnitude_far_mult = 1.0`); the CLI adds the pre-A1 row itself.",
+            f"Every {_MAGNITUDE} cell is withheld: missing {missing}. To show it, "
+            + " and ".join(fix for _, fix in gaps)
+            + ".",
             "",
         ]
     for name, by_mode in results.items():
         lines += _block(name, by_mode, head, withheld, companion=False)
-    if sensitivity is not None:
+    if sensitivity:  # an empty mapping holds no companion row: no empty companion section
         lines += [
             _COMPANION_HEADER,
             "",
@@ -247,8 +262,8 @@ def _preview_from(d: dict[str, Any]) -> GatePreview:
     )
 
 
-def _rows_from(d: dict[str, dict[str, Any]]) -> Rows:
-    out: Rows = {}
+def _rows_from(d: dict[str, dict[str, Any]]) -> _Rows:
+    out: _Rows = {}
     for name, by_mode in d.items():
         row: dict[OutcomeMode, GatePreview] = {}
         for mode, g in by_mode.items():
@@ -259,7 +274,7 @@ def _rows_from(d: dict[str, dict[str, Any]]) -> Rows:
     return out
 
 
-def load_gate_json(path: Path) -> tuple[Rows, Rows | None]:
+def load_gate_json(path: Path) -> tuple[_Rows, _Rows | None]:
     """``(results, sensitivity)`` of a file written by ``--json``, as ``GatePreview`` objects.
 
     ``null`` floats come back as ``float("nan")`` and lists as tuples, so the round trip equals

@@ -186,25 +186,58 @@ def test_magnitude_cell_withheld_without_companions() -> None:
     assert "--sensitivity-traces" in md
 
 
+def _withheld_note(md: str) -> str:
+    """The paragraph that says why the magnitude cells are withheld and how to get them."""
+    return next(ln for ln in md.splitlines() if ln.startswith("Every magnitude_spike cell"))
+
+
 @pytest.mark.parametrize(
-    ("with_pre", "with_sens", "missing"),
-    [(True, False, "sensitivity row"), (False, True, "pre-A1 row")],
-    ids=["pre-A1-present", "sensitivity-present"],
+    ("result_rows", "sens_rows", "missing"),
+    [
+        ((ENGINE_ROW, PRE_A1_ROW), None, "sensitivity row"),
+        # The sensitivity companion is the engine row on that dataset, not any sensitivity row.
+        ((ENGINE_ROW, PRE_A1_ROW), (PRE_A1_ROW,), "sensitivity row"),
+        # The pre-A1 companion is the row named PRE_A1_ROW, not any second row.
+        ((ENGINE_ROW, "other engine"), (ENGINE_ROW,), "pre-A1 row"),
+    ],
+    ids=["pre-A1-present", "sensitivity-lacks-engine-row", "sensitivity-present"],
 )
 def test_magnitude_cell_withheld_names_the_one_missing_companion(
-    with_pre: bool, with_sens: bool, missing: str
+    result_rows: tuple[str, ...], sens_rows: tuple[str, ...] | None, missing: str
 ) -> None:
     g = _both(_preview())
-    results = {ENGINE_ROW: g, **({PRE_A1_ROW: g} if with_pre else {})}
-    sens = {ENGINE_ROW: g} if with_sens else None
+    results = dict.fromkeys(result_rows, g)
+    sens = None if sens_rows is None else dict.fromkeys(sens_rows, g)
     md = render_gate_matrix(results, sensitivity=sens)
     rows = [_strip(r) for r in _table_rows(md)]
     # Every block, the companion block included, withholds the cell.
-    assert len(rows) == 2 * (len(results) + (1 if with_sens else 0))
+    assert len(rows) == 2 * (len(results) + len(sens or {}))
     for cols in rows:
         assert cols[_MAG_COL] == _withheld(missing)
     assert _MAG_TEXT not in md and "(7/9)" not in md
-    assert (_COMPANION_HEAD in md) is with_sens
+    assert (_COMPANION_HEAD in md) is (sens is not None)
+    # The withheld note says how to get what is missing, and only that.
+    note = _withheld_note(md)
+    assert ("--sensitivity-traces" in note) is (missing == "sensitivity row")
+    assert (f"`{PRE_A1_ROW}`" in note) is (missing == "pre-A1 row")
+
+
+def test_empty_sensitivity_mapping_renders_as_none() -> None:
+    # An empty mapping holds no companion row: no empty companion section, same output as None.
+    g = _both(_preview())
+    results = {ENGINE_ROW: g, PRE_A1_ROW: g}
+    md = render_gate_matrix(results, sensitivity={})
+    assert md == render_gate_matrix(results)
+    assert _COMPANION_HEAD not in md
+    assert all(
+        cols[_MAG_COL] == _withheld("sensitivity row") for cols in map(_strip, _table_rows(md))
+    )
+
+
+def test_withheld_note_names_both_fixes_when_both_companions_are_missing() -> None:
+    note = _withheld_note(render_gate_matrix({ENGINE_ROW: _both(_preview())}))
+    assert "missing pre-A1 row and sensitivity row" in note
+    assert "--sensitivity-traces" in note and f"`{PRE_A1_ROW}`" in note
 
 
 def test_magnitude_cell_shown_with_both_companions() -> None:
