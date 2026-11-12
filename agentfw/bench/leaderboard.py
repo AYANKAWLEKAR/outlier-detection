@@ -254,11 +254,15 @@ def _gate_rows(
     reports: Mapping[str, Mapping[str, Any]], what: str
 ) -> tuple[dict[str, dict[OutcomeMode, GatePreview]], str]:
     """The ``GATE_RUNS`` pairs of ``reports`` as gate rows, and their split kind; refuses a pair
-    missing a protocol, a run without a gate section and runs of different datasets or splits."""
+    missing a protocol, a run without a gate section or without ``meta.dataset_sha`` /
+    ``meta.split.kind``, a run that is not an engine replay, a pair whose two runs recorded
+    different engine configurations (``meta.detector_config.cfg``; spec A1.5: same engine
+    configuration, same dataset) and runs of different datasets or splits."""
     rows: dict[str, dict[OutcomeMode, GatePreview]] = {}
     seen: set[tuple[str, str]] = set()
     for row, runs in GATE_RUNS.items():
         by_mode: dict[OutcomeMode, GatePreview] = {}
+        cfgs: list[object] = []
         for run, mode in zip(runs, _GATE_MODES, strict=True):
             rep = reports.get(run)
             if rep is None or (rep.get("extras") or {}).get("outcomes") != mode:
@@ -272,9 +276,27 @@ def _gate_rows(
             gate = rep.get("gate")
             if not isinstance(gate, Mapping):
                 raise ValueError(f"{what}: run {run!r} has no gate section in its report")
-            meta = rep["meta"]
-            seen.add((str(meta["dataset_sha"]), str(meta["split"]["kind"])))
+            meta = rep.get("meta")
+            meta = meta if isinstance(meta, Mapping) else {}
+            sha, split = meta.get("dataset_sha"), (meta.get("split") or {}).get("kind")
+            if sha is None or split is None:
+                raise ValueError(
+                    f"{what}: run {run!r} has no meta.dataset_sha or meta.split.kind in its report"
+                )
+            if meta.get("detector") != "engine":
+                raise ValueError(
+                    f"{what}: run {run!r} is not an engine replay (meta.detector "
+                    f"{meta.get('detector')!r})"
+                )
+            cfgs.append((meta.get("detector_config") or {}).get("cfg"))
+            seen.add((str(sha), str(split)))
             by_mode[mode] = _gate_from_json(dict(gate))
+        if cfgs[0] != cfgs[1]:
+            raise ValueError(
+                f"{what}: runs {runs[0]!r} and {runs[1]!r} replayed different engine "
+                "configurations; both protocols of a gate row need the same engine configuration "
+                "(spec A1.5)"
+            )
         rows[row] = by_mode
     if len(seen) != 1:
         raise ValueError(f"{what}: the gate runs mix datasets or splits {sorted(seen)}")
@@ -296,8 +318,9 @@ def render_gate_section(
     :func:`agentfw.bench.gate.render_gate_matrix` prints them.
     ``sensitivity`` holds the same runs on the sensitivity dataset (``magnitude_far_mult = 1.0``);
     without it every ``magnitude_spike`` cell is withheld (spec A1.5 rule 4). Raises
-    ``ValueError`` when either protocol of a pair is missing, a run has no gate section, or the
-    runs of one mapping mix datasets or splits.
+    ``ValueError`` when either protocol of a pair is missing, a run has no gate section or no
+    dataset / split in its meta, a run is not an engine replay, the two runs of a pair recorded
+    different engine configurations, or the runs of one mapping mix datasets or splits.
     """
     results, split = _gate_rows(reports, "reports")
     sens = None if sensitivity is None else _gate_rows(sensitivity, "sensitivity")[0]

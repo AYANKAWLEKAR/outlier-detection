@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
 import importlib.util
+import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -24,6 +26,7 @@ from agentfw.bench.sweeps import PRE_A1_SWITCHES
 from agentfw.core.config import EngineConfig
 from agentfw.sandbox.llm import ChatTurn, ScriptedChatClient, Usage
 from agentfw.synth.generate import sw1_config
+from agentfw.synth.load import load_personas
 
 SHA = "a" * 64
 
@@ -295,7 +298,6 @@ ROOT = Path(__file__).resolve().parents[2]
 MATRIX_JSON = ROOT / "docs/decisions/evidence/a1-gate/matrix.json"
 REVIEW = PROTOCOL_LABELS["review"]
 ALLOW = PROTOCOL_LABELS["allow"]
-GATE_RUNS = ("engine", "engine-allow-all", "engine-pre-a1", "engine-pre-a1-allow-all")
 
 
 def _load_script() -> ModuleType:
@@ -408,6 +410,76 @@ def test_gate_section_withholds_magnitude_without_the_sensitivity_rows(
     assert "not a gate result" in md
 
 
+def test_gate_section_pre_a1_block_shows_the_pre_a1_runs(reports: dict[str, Any]) -> None:
+    sens = {name: {**rep, "gate": _gate(False, (51, 64))} for name, rep in _reports().items()}
+    md = render_gate_section(reports, sensitivity=sens)
+    # engine-pre-a1 is (73/78), engine-pre-a1-allow-all is (59/78) in the fixture.
+    assert "0.936 (73/78)" in md and "0.756 (59/78)" in md
+    assert (
+        md.index("### engine")
+        < md.index("(77/78)")
+        < md.index("(71/78)")
+        < md.index("### pre-A1")
+        < md.index("(73/78)")
+        < md.index("(59/78)")
+        < md.index("(51/64)")
+    )
+
+
+@pytest.mark.parametrize(
+    ("run_name", "meta"),
+    [
+        ("engine-pre-a1", {"dataset_sha": "b" * 64}),  # another dataset
+        ("engine-allow-all", {"split": {"kind": "agent"}}),  # another split
+    ],
+)
+def test_gate_section_refuses_runs_mixing_datasets_or_splits(
+    reports: dict[str, Any], run_name: str, meta: dict[str, Any]
+) -> None:
+    mixed = {**reports, run_name: {**reports[run_name]}}
+    mixed[run_name]["meta"] = {**reports[run_name]["meta"], **meta}
+    with pytest.raises(ValueError, match="mix datasets or splits"):
+        render_gate_section(mixed)
+
+
+@pytest.mark.parametrize("drop", ["meta", "dataset_sha", "split"])
+def test_gate_section_refuses_a_report_without_meta(reports: dict[str, Any], drop: str) -> None:
+    bad = {**reports, "engine-pre-a1": {**reports["engine-pre-a1"]}}
+    if drop == "meta":
+        del bad["engine-pre-a1"]["meta"]
+    else:
+        bad["engine-pre-a1"]["meta"] = {
+            k: v for k, v in reports["engine-pre-a1"]["meta"].items() if k != drop
+        }
+    with pytest.raises(ValueError, match="'engine-pre-a1'"):
+        render_gate_section(bad)
+
+
+def test_gate_section_refuses_a_pair_of_different_engine_configs(
+    reports: dict[str, Any],
+) -> None:
+    """Spec A1.5: both protocols of a pair replay the same engine configuration."""
+    pre = orjson.loads(orjson.dumps(dataclasses.asdict(EngineConfig().replace(**PRE_A1_SWITCHES))))
+    bad = {**reports, "engine-allow-all": {**reports["engine-allow-all"]}}
+    bad["engine-allow-all"]["meta"] = {
+        **reports["engine-allow-all"]["meta"],
+        "detector_config": {"cfg": pre},
+    }
+    with pytest.raises(ValueError, match="engine configuration"):
+        render_gate_section(bad)
+    ok = {name: {**rep} for name, rep in reports.items()}
+    for name in ("engine-pre-a1", "engine-pre-a1-allow-all"):
+        ok[name]["meta"] = {**reports[name]["meta"], "detector_config": {"cfg": pre}}
+    assert "### pre-A1" in render_gate_section(ok)  # a pair sharing its config renders
+
+
+def test_gate_section_refuses_a_run_that_is_not_the_engine(reports: dict[str, Any]) -> None:
+    bad = {**reports, "engine": {**reports["engine"]}}
+    bad["engine"]["meta"] = {**reports["engine"]["meta"], "detector": "random"}
+    with pytest.raises(ValueError, match="'engine'.*not an engine replay"):
+        render_gate_section(bad)
+
+
 def test_build_leaderboard_uses_sw1_config() -> None:
     assert sw1_config() == build_leaderboard_script.SW1
     assert {n for n, *_ in build_leaderboard_script.RUNS} >= {
@@ -423,6 +495,8 @@ def test_build_leaderboard_uses_sw1_config() -> None:
     assert runs["engine"] == ["engine", "review", None]
     assert runs["engine-allow-all"] == ["engine", "allow", None]
     assert all(len(r) == 4 for r in build_leaderboard_script.RUNS)
+    # The gate section reads the gate's own split (matrix.json is computed with SplitSpec()).
+    assert SplitSpec().kind == build_leaderboard_script.GATE_SPLIT
 
 
 @pytest.mark.parametrize(
@@ -454,6 +528,17 @@ def test_doc_header_names_the_dataset_sw1_and_auprc_caveat(reports: dict[str, An
     assert md.index("SECTION-A") < md.index("SECTION-B")
     # The gate section is in the page with its magnitude cells (both companions present).
     assert "0.987 (77/78)" in md and "withheld" not in md
+    personas = len(load_personas(sw1.personas_dir))
+    assert f"{personas} personas" in md
+    # The SW1 claim names its one exception: the sensitivity companion rows.
+    assert "except the companion rows on the sensitivity dataset" in md
+    # The leaderboard sections get their own level-2 heading after the companion block, so
+    # the outline never puts the SW1 tables under the sensitivity dataset.
+    lines = md.splitlines()
+    comp = next(i for i, ln in enumerate(lines) if ln.startswith("## Companion"))
+    sec_a = lines.index("SECTION-A")
+    h2 = [i for i, ln in enumerate(lines) if ln.startswith("## ") and comp < i < sec_a]
+    assert h2 and "SW1" in lines[h2[0]], lines[comp:sec_a]
 
 
 def test_doc_copies_the_sensitivity_rows_from_matrix_json(reports: dict[str, Any]) -> None:
@@ -462,11 +547,27 @@ def test_doc_copies_the_sensitivity_rows_from_matrix_json(reports: dict[str, Any
     assert {(r["engine"], r["protocol"]) for r in rows} == {
         (e, p) for e in ("a1", "pre-a1") for p in ("review", "allow")
     }
+    # Rule 3: each sens row's whole table line, family cells (recall, among, top-1) then benign
+    # FPR (4 dp) and control FPR (3 dp), under the right engine block and protocol label.
+    comp = md.index("## Companion")
+    blocks = {"a1": md.index("### engine", comp), "pre-a1": md.index("### pre-A1", comp)}
+    assert blocks["a1"] < blocks["pre-a1"]
     for r in rows:
-        for fam, c in r["families"].items():
-            cell = f"{c['recall']:.3f} ({c['n_detected']}/{c['n_total']}); {c['among']:.2f}"
-            assert cell in md, (r["engine"], r["protocol"], fam)
-    assert rows[0]["dataset_sha"] in md
+        cells = [
+            f"{c['recall']:.3f} ({c['n_detected']}/{c['n_total']}); {c['among']:.2f}; "
+            f"{c['top1']:.2f}"
+            for c in (r["families"][fam] for fam in GATE_FAMILIES)
+        ]
+        line = (
+            f"| {PROTOCOL_LABELS[r['protocol']]} | "
+            + " | ".join(cells)
+            + f" | {r['benign_fpr']:.4f} | {r['control_fpr']:.3f} |"
+        )
+        at = md.find(line, comp)
+        assert at != -1, (r["engine"], r["protocol"])
+        end = blocks["pre-a1"] if r["engine"] == "a1" else len(md)
+        assert blocks[r["engine"]] < at < end, (r["engine"], r["protocol"])
+    assert f"`{rows[0]['dataset_sha'][:12]}`" in md
 
 
 def test_doc_refuses_a_matrix_without_the_sensitivity_rows(
@@ -480,6 +581,53 @@ def test_doc_refuses_a_matrix_without_the_sensitivity_rows(
     bad.write_bytes(orjson.dumps(payload))
     with pytest.raises(ValueError, match="sensitivity"):
         build_leaderboard_script._doc([], SHA, reports, matrix=bad)
+
+
+class _NoJobs:
+    """Stands in for ProcessPoolExecutor: main() must not replay anything in this test."""
+
+    def __init__(self, max_workers: int) -> None:
+        pass
+
+    def __enter__(self) -> _NoJobs:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        pass
+
+    def map(self, *a: object) -> list[str]:
+        raise AssertionError("--reuse with fresh reports must not schedule a run")
+
+
+def test_main_feeds_the_gate_section_from_the_time_split(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """main(): the gate rows come from results/<GATE_SPLIT>, never from the agent split."""
+    mod = build_leaderboard_script
+    results = tmp_path / "results"
+    # Distinct magnitude cells per split: the time split's engine is (77/78), the agent's (11/78).
+    mag = {"time": (77, 78), "agent": (11, 78)}
+    for split in mod.SPLITS:
+        gates = _reports()
+        gates["engine"]["gate"] = _gate(True, mag[split])
+        for name, det, oc, cfg in mod.RUNS:
+            want = None if cfg is None else orjson.loads(orjson.dumps(dataclasses.asdict(cfg)))
+            p = _report(results / split, name, split=split, detector=det, extras={"outcomes": oc})
+            rep = orjson.loads(p.read_bytes())
+            rep["meta"]["detector_config"] = {} if want is None else {"cfg": want}
+            rep["extras"]["n_boot"] = 0
+            if name in gates:
+                rep["gate"] = gates[name]["gate"]
+            p.write_bytes(orjson.dumps(rep))
+    monkeypatch.setattr(mod, "_dataset", lambda d: SHA)
+    monkeypatch.setattr(mod, "ProcessPoolExecutor", _NoJobs)
+    out = tmp_path / "leaderboard.md"
+    argv = ["build_leaderboard.py", "--results", str(results), "--out", str(out)]
+    monkeypatch.setattr(sys, "argv", [*argv, "--reuse", "--n-boot", "0"])
+    mod.main()
+    md = out.read_text()
+    assert "0.987 (77/78)" in md and "(11/78)" not in md
+    assert "split `time`" in md and "split `agent`" in md  # both leaderboard tables
 
 
 def test_job_and_fresh_carry_the_engine_config(tiny_dataset: Path, tmp_path: Path) -> None:
