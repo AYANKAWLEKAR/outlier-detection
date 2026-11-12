@@ -35,6 +35,8 @@ __all__ = [
     "JsonValue",
     "Label",
     "LedgerRef",
+    "Maturity",
+    "Notice",
     "Outcome",
     "PrevResponse",
     "RawCall",
@@ -51,6 +53,11 @@ Scalar = str | int | float | bool | None
 #: What a decision was based on (F3, T-06): per-key history (>= ``mag_cold_n`` observations of the
 #: (agent, tool)) and/or a captured tool schema.
 Regime = Literal["history+schemas", "history_only", "schemas_only", "bare"]
+#: How much evidence a decision rests on (F8, T-14; ``core.trajectory.authority``).
+Maturity = Literal["mature", "warm", "cold", "bare"]
+#: What the authority ceiling leaves of a capped decision (F8, T-14): a notice in the tool result
+#: (``warn``) or an audit entry only (``inform``).
+Notice = Literal["warn", "inform"]
 
 
 class FieldType(StrEnum):
@@ -247,6 +254,9 @@ class Reason:
     blast_radius: float | None
     prereq_missing: str | None
     prior_used: bool = False
+    #: The call's maturity and regime (F8, T-44): set by the engine on every reason it emits.
+    maturity: Maturity | None = None
+    regime: Regime | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -277,6 +287,17 @@ class TrajectoryInfo:
     #: thresholded. Both ``None`` while the session gate is shut (like ``density``).
     session_verdict: SessionVerdict | None = None
     session_mass: float | None = None
+    #: Verdict authority (F8, Task 3.4, T-14 / T-44): the call's evidence ``maturity`` (set by
+    #: the engine on every call, ``None`` only on a hand-built info); with ``authority`` on, the
+    #: decision before the ceiling when the ceiling lowered it (``capped_from``) and the notice
+    #: the capped call carries (``warn`` from a cold maturity, ``inform`` from a bare one).
+    maturity: Maturity | None = None
+    capped_from: Decision | None = None
+    notice: Notice | None = None
+    #: The evidence count that set ``maturity`` (``authority.Grade.n``; T-48) and whether F4's
+    #: prerequisite block was kept above the ceiling that would otherwise have capped it (T-44).
+    maturity_n: int | None = None
+    ceiling_exempt: bool = False
 
 
 @dataclass(slots=True, frozen=True)

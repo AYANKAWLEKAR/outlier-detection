@@ -150,6 +150,13 @@ SESSION_VERDICT_DEFAULTS: dict[str, object] = {
     "session_enforce": False,
 }
 
+# Task 3.4 verdict authority scaled by evidence maturity (feature spec F8; T-14, T-44).
+AUTHORITY_DEFAULTS: dict[str, object] = {
+    "authority": False,
+    "mat_warm_n": 30,
+    "mat_mature_n": 300,
+}
+
 
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
@@ -167,6 +174,7 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | PREEXEC_GATE_DEFAULTS
         | ESCALATION_DEFAULTS
         | SESSION_VERDICT_DEFAULTS
+        | AUTHORITY_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
 

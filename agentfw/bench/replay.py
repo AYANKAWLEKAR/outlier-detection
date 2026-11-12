@@ -135,6 +135,14 @@ class ScoreRow:
     # The call's session verdict (F7, Task 3.3: ``TrajectoryInfo.session_verdict`` -- ok /
     # warn_session / halt_session, T-43); None when unscored or the session gate is shut.
     session_verdict: str | None = None
+    # The call's evidence maturity and regime (F8, Task 3.4: ``TrajectoryInfo.maturity`` /
+    # ``regime``, T-14, T-06); None when unscored or the detector has no trajectory.
+    maturity: str | None = None
+    regime: str | None = None
+    # The threshold the decision used (``TrajectoryInfo.threshold_eff``: θ, or θ_eff under
+    # ``br_mode="modulate"``); None when unscored or the detector has no trajectory. With
+    # ``per_detector_json`` it recomputes the call's contributors (F8 audit, T-50).
+    threshold_eff: float | None = None
 
 
 def _order(r: RawCall) -> tuple[int, str, int]:
@@ -230,6 +238,9 @@ def replay(
         density: float | None = None
         escalated = False
         session_verdict: str | None = None
+        maturity: str | None = None
+        regime: str | None = None
+        threshold_eff: float | None = None
         outcome = Outcome.ALLOWED
         flagged = False
         if scored:
@@ -250,6 +261,8 @@ def replay(
                 escalated = res.trajectory.escalated
                 verdict = res.trajectory.session_verdict
                 session_verdict = None if verdict is None else verdict.value
+                maturity, regime = res.trajectory.maturity, res.trajectory.regime
+                threshold_eff = res.trajectory.threshold_eff
             if outcomes == "enforce" and res.decision is Decision.BLOCK:
                 outcome = Outcome.BLOCKED
         lab = labels.get(env.envelope_id)
@@ -284,6 +297,9 @@ def replay(
                 density=density,
                 escalated=escalated,
                 session_verdict=session_verdict,
+                maturity=maturity,
+                regime=regime,
+                threshold_eff=threshold_eff,
             )
         )
         detector.update(env, outcome)

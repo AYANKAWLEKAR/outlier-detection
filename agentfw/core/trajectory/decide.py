@@ -1,7 +1,7 @@
 """The post-fusion decision pipeline (feature spec F4-F8): ``decide`` is what the engine calls.
 
-Stages, in order (later tasks insert theirs at the marked points; the final order is set by
-Task 3.4: bands on θ_eff -> gate -> escalation -> provisional -> ceiling -> session overlay):
+Stages, in order -- final since Task 3.4: **bands on θ_eff -> gate (irreversible) -> escalation
+-> provisional (reversible) -> ceiling -> session overlay**:
 
 1. **Bands** (spec §6.8, ``core.calibration.band``) on the effective threshold
    ``TrajectoryInfo.threshold_eff`` (the agent's θ, or θ_eff under ``br_mode="modulate"``):
@@ -27,10 +27,22 @@ Task 3.4: bands on θ_eff -> gate -> escalation -> provisional -> ceiling -> ses
    ``ProvEntry`` in ``update`` (``core.trajectory.provisional``). ``REQUIRE_APPROVAL`` is left as
    it is. Escalation touches irreversible calls only, so the two never meet.
 
-5. *(Task 3.4: the authority ceiling.)*
+5. **Ceiling** (F8, ``authority``; ``core.trajectory.authority``, T-14, T-44 - T-50). The call's
+   evidence maturity (``TrajectoryInfo.maturity``, which the engine grades on every call from
+   the scores its decision rests on) caps what is left: mature -> ``BLOCK``; warm ->
+   ``REQUIRE_APPROVAL``; cold -> ``ALLOW`` with ``notice="warn"``; bare -> ``ALLOW`` with
+   ``notice="inform"``. The decision before a cap is ``TrajectoryInfo.capped_from``; a gate
+   ``block`` is exempt when the regime has schemas; a cold call also gets flag ``COLD_START``
+   (weight 0, never counted). It runs after the provisional stage (a provisional call is
+   ``ALLOW`` already) and before the overlay, which it does not cap (T-47, pending a user
+   decision: the literal F8 audit counts overlay blocks). The engine derives the call's flags
+   from the decision *before* the cap (``capped_from``), so given the same outcomes the session
+   window, densities and verdicts are the same with ``authority`` on and off (T-46). Off:
+   maturity is still reported, nothing is capped.
 6. **Session overlay** (F7, ``session_enforce``; ``session_overlay``, T-43): a call whose session
    was already halted *before* it (``SessionRecord.halted``) is ``BLOCK``ed, and is no longer
-   ``PROVISIONAL`` (a blocked call opens no entry); the engine adds ``HALT_REASON``. It is the
+   ``PROVISIONAL`` (a blocked call opens no entry) nor carries the ceiling's notice; the engine
+   adds ``HALT_REASON``. It is the
    last stage and the engine applies it to what ``decide`` returns, once it has derived the
    call's flags and density from that decision: the flag window counts the call's own evidence,
    never the session block (no ``BLOCK`` flag from the overlay), so given the same outcomes the
@@ -53,7 +65,8 @@ from agentfw.core.config import EngineConfig
 from agentfw.core.detectors.sequence import SequenceDetector
 from agentfw.core.envelope import ActionEnvelope, Decision, Reason, TrajectoryInfo
 from agentfw.core.schema_infer import TypeView
-from agentfw.core.trajectory.escalate import Judge, escalate
+from agentfw.core.trajectory.authority import CEILING, apply_ceiling, ceiling_exempt
+from agentfw.core.trajectory.escalate import SEVERITY, Judge, escalate
 from agentfw.core.trajectory.flags import Flag
 from agentfw.core.trajectory.gate import gate
 
@@ -120,6 +133,20 @@ def _escalation_stage(
     return decision, out
 
 
+def _ceiling_stage(decision: Decision, traj: TrajectoryInfo) -> tuple[Decision, TrajectoryInfo]:
+    maturity = traj.maturity
+    if maturity is None:
+        raise ValueError("ceiling: authority needs TrajectoryInfo.maturity")
+    exempt = ceiling_exempt(traj.gate, traj.regime)
+    held = exempt and SEVERITY[decision] > SEVERITY[CEILING[maturity]]  # a cap was in play
+    decision, capped_from, notice = apply_ceiling(decision, maturity, traj.gate, traj.regime)
+    flags = (traj.flags | {Flag.COLD_START}) if maturity == "cold" else traj.flags
+    out = dataclasses.replace(
+        traj, flags=flags, capped_from=capped_from, notice=notice, ceiling_exempt=held
+    )
+    return decision, out
+
+
 def decide(
     fused: float,
     traj: TrajectoryInfo,
@@ -135,7 +162,8 @@ def decide(
     """``(decision, trajectory)`` of one call after fusion (module docstring). ``e``, ``types``
     and ``seq`` are needed only by the gate (``gate`` on and ``traj.irreversible``); ``e`` and
     ``rescore`` only by the escalation stage (``escalate`` on and an irreversible candidate),
-    which shows ``judge`` the call and its ``reasons``."""
+    which shows ``judge`` the call and its ``reasons``; ``traj.maturity`` only by the ceiling
+    (``authority`` on)."""
     decision = band(fused, traj.threshold_eff, cfg.cal_delta)
     if cfg.gate:
         decision, traj = _gate_stage(fused, decision, traj, cfg, e, types, seq)
@@ -144,15 +172,20 @@ def decide(
     if cfg.provisional and decision is Decision.BLOCK and not traj.irreversible:
         decision = Decision.ALLOW
         traj = dataclasses.replace(traj, flags=traj.flags | {Flag.PROVISIONAL})
-    # -- ceiling (Task 3.4); the session overlay follows in the engine (session_overlay) --
+    if cfg.authority:
+        decision, traj = _ceiling_stage(decision, traj)
+    # the session overlay follows in the engine (session_overlay), once flags are derived
     return decision, traj
 
 
 def session_overlay(
     decision: Decision, traj: TrajectoryInfo, halted: bool, cfg: EngineConfig
 ) -> tuple[Decision, TrajectoryInfo]:
-    """Stage 6 (module docstring): ``BLOCK`` without ``PROVISIONAL`` when ``session_enforce`` is
-    on and the session was ``halted`` before this call; otherwise unchanged."""
+    """Stage 6 (module docstring): ``BLOCK`` without ``PROVISIONAL`` and without the ceiling's
+    notice (a blocked call is not allowed with one; ``capped_from`` stays for the audit) when
+    ``session_enforce`` is on and the session was ``halted`` before this call; otherwise
+    unchanged."""
     if not (cfg.session_enforce and halted):
         return decision, traj
-    return Decision.BLOCK, dataclasses.replace(traj, flags=traj.flags - {Flag.PROVISIONAL})
+    flags = traj.flags - {Flag.PROVISIONAL}
+    return Decision.BLOCK, dataclasses.replace(traj, flags=flags, notice=None)

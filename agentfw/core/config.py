@@ -185,6 +185,15 @@ class EngineConfig:
     escalate: bool = False
     judge_block: float = 0.8
     judge_allow: float = 0.2
+    # Verdict authority (F8, Task 3.4; core.trajectory.authority; T-14, T-44 - T-50). Every call
+    # gets a maturity from the evidence counts of the scores that fused into its decision:
+    # ``cold`` n < ``mat_warm_n``, ``warm`` n < ``mat_mature_n``, else ``mature`` (``bare`` when
+    # the regime is ``bare``). With ``authority`` the decision is capped by it (mature -> block,
+    # warm -> require_approval, cold -> allow + warn notice, bare -> allow + inform notice; F4's
+    # prerequisite block in a schema regime is exempt) and a cold call gets flag ``COLD_START``.
+    authority: bool = False
+    mat_warm_n: int = 30
+    mat_mature_n: int = 300
     # Fusion (§6.11)
     fusion_bonus: float = 0.15
     fusion_bonus_gate: float = 0.5

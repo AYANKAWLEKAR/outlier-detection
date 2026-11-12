@@ -97,6 +97,16 @@ flags, density and verdict never see the overlay. ``update`` records the same fl
 the same verdict (sticky ``halted``) and mass (``SessionBook.record``), so what ``score`` reports
 is what the record holds; ``release_session`` clears a halt. The mass is reported, never
 thresholded.
+
+Verdict authority (F8, Task 3.4; ``core.trajectory.authority``, T-14, T-44 - T-50): every call's
+``TrajectoryInfo.maturity`` (and the count that set it, ``maturity_n``) is graded from the scores
+its decision rests on (``grade``; the contributor floor drops to ``θ_eff - cal_delta`` when that
+is under 0.3, so θ_eff is computed first: T-50), and every reason the engine emits carries that
+maturity and the regime (``fusion.annotate``), whatever ``authority`` says. With ``authority``,
+``decide``'s ceiling caps the decision by it (before the session overlay, which it does not cap,
+T-47); the flags are derived from the decision before the cap (``TrajectoryInfo.capped_from``),
+so given the same outcomes the session window, densities and verdicts do not depend on the
+switch. Off: decisions are unchanged.
 """
 
 from __future__ import annotations
@@ -126,13 +136,14 @@ from agentfw.core.envelope import (
     Reason,
     TrajectoryInfo,
 )
-from agentfw.core.fusion import FusionResult, fuse
+from agentfw.core.fusion import FusionResult, annotate, fuse
 from agentfw.core.hints import ToolHint
 from agentfw.core.patterns import try_number
 from agentfw.core.priors import PooledPriors
 from agentfw.core.schema_infer import TypeInference, TypeView
 from agentfw.core.state import DictStore, StateStore
 from agentfw.core.trajectory import provisional
+from agentfw.core.trajectory.authority import grade
 from agentfw.core.trajectory.decide import HALT_REASON, decide, session_overlay
 from agentfw.core.trajectory.escalate import Judge
 from agentfw.core.trajectory.flags import Flag, derive_flags
@@ -156,13 +167,6 @@ def _finite_y(v: object) -> float | None:
     """``signed_log1p(x)`` of a finite numeric value, else ``None`` (NaN/±inf/non-numbers)."""
     x = try_number(v)
     return signed_log1p(x) if x is not None and math.isfinite(x) else None
-
-
-def _with_b(reasons: tuple[Reason, ...], b: float | None) -> tuple[Reason, ...]:
-    """Every reason with ``blast_radius=b`` (unchanged while ``b`` is None)."""
-    if b is None:
-        return reasons
-    return tuple(dataclasses.replace(r, blast_radius=b) for r in reasons)
 
 
 _Scored = tuple[str, float, float, TrajectoryInfo, tuple[DetectorScore, ...]]
@@ -209,6 +213,11 @@ class Engine:
             raise ValueError(
                 "need 0 <= judge_allow < judge_block <= 1, got "
                 f"judge_allow={cfg.judge_allow}, judge_block={cfg.judge_block}"
+            )
+        if cfg.authority and not 0 < cfg.mat_warm_n <= cfg.mat_mature_n:
+            raise ValueError(
+                "need 0 < mat_warm_n <= mat_mature_n, got "
+                f"mat_warm_n={cfg.mat_warm_n}, mat_mature_n={cfg.mat_mature_n}"
             )
         self.cfg = cfg
         self.store: StateStore = DictStore() if store is None else store
@@ -266,7 +275,7 @@ class Engine:
         return DetectorResult(
             fused_score=fr.fused,
             per_detector=per,
-            reasons=_with_b(fr.reasons, traj.blast_radius),
+            reasons=annotate(fr.reasons, traj.blast_radius, traj.maturity, traj.regime),
             latency_us=(perf_counter_ns() - t0) / 1000.0,
             threshold=theta,
             decision=decision,
@@ -350,8 +359,10 @@ class Engine:
         view = self._view(e)
         per, fr = self._fuse(e, view)
         theta = self.calibrator.threshold(e.agent_id)
-        traj0 = self._trajectory(e, theta)
-        reasons = _with_b(fr.reasons, traj0.blast_radius) if self.judge is not None else ()
+        traj0 = self._trajectory(e, theta, per)
+        reasons: tuple[Reason, ...] = ()
+        if self.judge is not None:
+            reasons = annotate(fr.reasons, traj0.blast_radius, traj0.maturity, traj0.regime)
         decision, traj = decide(
             fr.fused,
             traj0,
@@ -364,7 +375,9 @@ class Engine:
             reasons=reasons,
         )
         hint = self.hints.get(e.tool_id)
-        flags = traj.flags | derive_flags(per, decision, traj.irreversible, hint, self.cfg)
+        # flags from the decision before the authority ceiling (T-46): the call's own evidence
+        pre_cap = decision if traj.capped_from is None else traj.capped_from
+        flags = traj.flags | derive_flags(per, pre_cap, traj.irreversible, hint, self.cfg)
         book = self._book
         if book is None:
             traj = dataclasses.replace(traj, flags=frozenset(flags))
@@ -419,21 +432,29 @@ class Engine:
         b = blast_radius(e, hint, is_write, seq.has_item_count(e.agent_id, e.tool_id))
         return irreversible(b, hint, is_write, self.cfg.irreversible_b)
 
-    def _trajectory(self, e: ActionEnvelope, theta: float) -> TrajectoryInfo:
+    def _trajectory(
+        self, e: ActionEnvelope, theta: float, per: tuple[DetectorScore, ...]
+    ) -> TrajectoryInfo:
         cfg, seq = self.cfg, self._sequence
         agent, tool = e.agent_id, e.tool_id
         hint = self.hints.get(tool)
         has_schema = hint is not None and hint.has_schema
         regime = regime_of(has_schema, seq.n_tool(agent, tool), cfg.mag_cold_n)
+        b: float | None = None
+        theta_eff = theta
         if cfg.br_mode == "off" and not (cfg.provisional or cfg.gate or cfg.escalate):
-            return TrajectoryInfo(regime, None, irreversible(None, hint, False), theta)
-        is_write = seq.is_write(agent, tool)
-        b = blast_radius(e, hint, is_write, seq.has_item_count(agent, tool))
-        irr = irreversible(b, hint, is_write, cfg.irreversible_b)
-        if cfg.br_mode == "off":  # b for the irreversibility of F4-F6 only (T-35, T-41, T-42)
-            return TrajectoryInfo(regime, None, irr, theta)
-        theta_eff = theta * (1.0 - cfg.br_k * b) if cfg.br_mode == "modulate" else theta
-        return TrajectoryInfo(regime, b, irr, theta_eff)
+            irr = irreversible(None, hint, False)
+        else:
+            is_write = seq.is_write(agent, tool)
+            b_val = blast_radius(e, hint, is_write, seq.has_item_count(agent, tool))
+            irr = irreversible(b_val, hint, is_write, cfg.irreversible_b)
+            if cfg.br_mode != "off":  # else b serves the irreversibility of F4-F6 only (T-35)
+                b = b_val
+            if cfg.br_mode == "modulate":
+                theta_eff = theta * (1.0 - cfg.br_k * b_val)
+        # graded against θ_eff: the contributor floor is where a band can intervene (T-50)
+        g = grade(per, regime, cfg, theta_eff)
+        return TrajectoryInfo(regime, b, irr, theta_eff, maturity=g.maturity, maturity_n=g.n)
 
     def _view(self, e: ActionEnvelope) -> _CallTypes:
         base = TypeView(self.inference, e.agent_id, e.tool_id)

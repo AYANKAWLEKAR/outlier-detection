@@ -5,16 +5,16 @@ Transitions (a): the context is the last ``k`` entries of ``prior_tools`` (left-
 else k=0 (unigram). With ``V = len(tools) + 1`` (the +1 is an "unseen" slot) the smoothed
 probability is ``P = (c + a) / (total + a*V)``; ``H`` is the entropy of that distribution over the
 V outcomes and ``s_trans = (1 - P) * (1 - H / ln V)`` (0 when ``V <= 2``). Evidence: ``k``, ``p``,
-``entropy_ratio``.
+``entropy_ratio``, ``n_trans`` (the backed-off context's ``total``, 0 without a record).
 
 Prerequisites (b): per (agent, tool Y) we count Y-observations in which tool X was anywhere in the
 ``prior_tools`` window (once per observation). X is a prerequisite when ``n_y >= prereq_min_n`` and
 ``cnt[X] / n_y >= prereq_rate``. ``s_prereq = 1`` if any prerequisite is absent from
-``prior_tools`` (evidence ``prereq_missing`` = first missing tool, sorted) under the spec's
-``seq_prereq_graded=False``; with ``seq_prereq_graded`` (Task 1.15, decision 008; the default by
-user decision 2026-11-10) it is instead the highest ``cnt[X] / n_y`` among the missing
-prerequisites. The mined set is cached
-on the record; ``update`` refreshes it and ``score`` never writes (it recomputes if stale).
+``prior_tools`` (evidence ``prereq_missing`` = first missing tool, sorted; ``n_prereq`` = ``n_y``,
+0 without a record) under the spec's ``seq_prereq_graded=False``; with ``seq_prereq_graded``
+(Task 1.15, decision 008; the default by user decision 2026-11-10) it is instead the highest
+``cnt[X] / n_y`` among the missing prerequisites. The mined set is cached on the record;
+``update`` refreshes it and ``score`` never writes (it recomputes if stale).
 
 Id flow (c): for a *write* tool, each ID-typed flat value absent from ``session_ids_seen`` scores
 ``present / total`` of that (agent, tool, path)'s history (0 until ``total >= flow_min_obs``); the
@@ -36,7 +36,9 @@ A tool is a write if its hint says so, else if it has been seen with an ID-typed
 with a response ``item_count`` -- learned only from past ``update`` calls, so scoring is causal.
 
 ``score`` is pure; ``update`` is for allowed outcomes only. The emitted score is the max over the
-parts (first part wins ties); ``fired`` is None when that max is 0.
+parts (first part wins ties); ``fired`` is None when that max is 0. The parts' evidence is merged
+flat, so each part's history depth has its own key (T-45): ``n_trans``, ``n_prereq`` and the flow
+part's ``n``; F8's maturity reads the one of the part that fired.
 """
 
 from __future__ import annotations
@@ -237,7 +239,7 @@ class SequenceDetector:
 
     def _s_trans(self, e: ActionEnvelope) -> tuple[float, dict[str, object]]:
         rec = self._trans(e.agent_id)
-        ev: dict[str, object] = {"k": 0, "p": 0.0, "entropy_ratio": 0.0}
+        ev: dict[str, object] = {"k": 0, "p": 0.0, "entropy_ratio": 0.0, "n_trans": 0}
         omega = 1.0
         if self._cfg.seq_age_discount:
             omega = self._age_weight(e.agent_id, e.tool_id, rec)
@@ -257,7 +259,7 @@ class SequenceDetector:
         total = sum(dist.values())
         denom = total + a * v
         p = (dist.get(e.tool_id, 0) + a) / denom
-        ev["k"], ev["p"] = k, p
+        ev["k"], ev["p"], ev["n_trans"] = k, p, total
         if v <= 2:
             return 0.0, ev
         h = -sum(((c + a) / denom) * math.log((c + a) / denom) for c in dist.values())
@@ -285,15 +287,16 @@ class SequenceDetector:
         return self._mined(rec) if isinstance(rec, PrereqRecord) else frozenset()
 
     def _s_prereq(self, e: ActionEnvelope) -> tuple[float, dict[str, object]]:
-        missing = sorted(self.prerequisites(e.agent_id, e.tool_id) - set(e.prior_tools))
+        rec = self._store.get(key_prereq(e.agent_id, e.tool_id))
+        if not isinstance(rec, PrereqRecord):
+            return 0.0, {"prereq_missing": None, "n_prereq": 0}
+        missing = sorted(self._mined(rec) - set(e.prior_tools))
         if not missing:
-            return 0.0, {"prereq_missing": None}
+            return 0.0, {"prereq_missing": None, "n_prereq": rec.n_y}
         s = 1.0
         if self._cfg.seq_prereq_graded:  # decision 008: strongest missing rule
-            rec = self._store.get(key_prereq(e.agent_id, e.tool_id))
-            assert isinstance(rec, PrereqRecord)  # a mined prerequisite implies a record
             s = max(rec.cnt[x] / rec.n_y for x in missing)
-        return s, {"prereq_missing": missing[0]}
+        return s, {"prereq_missing": missing[0], "n_prereq": rec.n_y}
 
     # --- id flow -----------------------------------------------------------------------
 
