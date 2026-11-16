@@ -65,7 +65,9 @@ decisions and every other record are the same with and without the gate -- excep
 
 Provisional flags (F6, Task 2.2; ``core.trajectory.provisional``): with ``provisional``, ``decide``
 allows a reversible call the band would block, with flag ``PROVISIONAL``, and irreversibility
-always uses the blast radius (T-35). ``score`` runs the lifecycle step (``advance``) on a *copy*
+always uses the blast radius (T-35; also whenever the session gate is open or ``br_mode``,
+``gate`` or ``escalate`` is on, so the derived flags never depend on an unrelated switch: T-61).
+``score`` runs the lifecycle step (``advance``) on a *copy*
 of the session record, so its ``UNRESOLVED`` / ``OFF_TRACK`` flags and density are what ``update``
 then records; ``update`` runs the same step on the stored record, opens the call's ``ProvEntry``
 when it was provisional and executed (outcome ``ALLOWED`` / ``APPROVED``; a call refused outside
@@ -260,6 +262,16 @@ class Engine:
         # feature that needs the window ORs its switch into this expression.
         sessions_on = cfg.sessions or cfg.provisional or cfg.session_enforce
         self._book: SessionBook | None = SessionBook(self.store, cfg) if sessions_on else None
+        # Irreversibility from the blast radius (the full F3 rule) whenever a feature reads it
+        # (T-35, T-41, T-42) or the session gate is open (T-61): the flags it feeds
+        # (``NOVEL_READ``, ``ID_FLOW_VIOLATION``) then never depend on an unrelated switch.
+        self._irr_from_b = (
+            cfg.br_mode != "off"
+            or cfg.provisional
+            or cfg.gate
+            or cfg.escalate
+            or self._book is not None
+        )
         # (envelope_id, fused, threshold, trajectory, scores) of the last score
         self._cache: _Scored | None = None
 
@@ -441,7 +453,7 @@ class Engine:
         regime = regime_of(has_schema, seq.n_tool(agent, tool), cfg.mag_cold_n)
         b: float | None = None
         theta_eff = theta
-        if cfg.br_mode == "off" and not (cfg.provisional or cfg.gate or cfg.escalate):
+        if not self._irr_from_b:
             irr = irreversible(None, hint, False)
         else:
             is_write = seq.is_write(agent, tool)

@@ -386,3 +386,32 @@ def test_score_row_defaults() -> None:
         "regime",
         "threshold_eff",
     ]
+
+
+def test_flags_do_not_depend_on_unrelated_switches(tmp_path: Path) -> None:
+    """T-61 (final review m1, the reviewer's probe 2): with the session gate open, the derived
+    flags use the blast-radius irreversibility whatever ``br_mode`` / ``escalate`` say, so adding
+    an unrelated switch to ``sessions`` changes no flag (``br_mode="score"`` + ``sessions`` moved
+    ``NOVEL_READ`` 51 -> 28 on the CI dataset before). With every switch off the plain rule
+    stands (default outputs unchanged: the goldens)."""
+    from agentfw.bench.ci_regress import CI_DATASET
+    from agentfw.bench.dataset import load_dir, load_schema_hints
+    from agentfw.synth.generate import generate
+
+    generate(CI_DATASET.model_copy(update={"families": [*CI_DATASET.families, "loop"]}), tmp_path)
+    raws, labels, _ = load_dir(tmp_path)
+    hints = load_schema_hints(tmp_path)
+
+    def flags(cfg: EngineConfig) -> list[str]:
+        eng = Engine(cfg, enabled=KNOWN_DETECTORS, hints=hints)
+        return [r.flags for r in replay(raws, labels, eng, SplitSpec())]
+
+    base = flags(EngineConfig(sessions=True))
+    assert any("NOVEL_READ" in f for f in base)
+    for extra in ({"br_mode": "score"}, {"escalate": True}, {"br_mode": "modulate"}):
+        other = flags(EngineConfig(sessions=True, **extra))
+        moved = [(a, b) for a, b in zip(base, other, strict=True) if a != b]
+        # modulate and escalate change decisions; only flags read from the decision may move
+        decision_flags = {"BLOCK", "PROVISIONAL", "PREREQ_MISSING"}
+        for a, b in moved:
+            assert (set(a.split(",")) ^ set(b.split(","))) - {""} <= decision_flags, extra

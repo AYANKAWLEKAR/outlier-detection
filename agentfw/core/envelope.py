@@ -273,7 +273,8 @@ class TrajectoryInfo:
     irreversible: bool
     threshold_eff: float
     #: This call's flags (``core.trajectory.flags``) and its session's flag density including
-    #: this call (T-09; ``None`` unless ``EngineConfig.sessions``).
+    #: this call (T-09; ``None`` while the session gate is shut, i.e. none of
+    #: ``EngineConfig.sessions`` / ``provisional`` / ``session_enforce`` is on: T-34).
     flags: frozenset[Flag] = frozenset()
     density: float | None = None
     #: The pre-execution gate's outcome (F4): set only when ``EngineConfig.gate`` is on and the

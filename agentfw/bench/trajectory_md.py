@@ -238,15 +238,19 @@ def _seed_block(seed: str, b: Mapping[str, Any], label: str, theta_row: str) -> 
     return L
 
 
+def _short_sha(sha: object) -> str:
+    """12 hex digits, keeping the ``-dirty`` marker of a run on an uncommitted tree (T-63)."""
+    text = str(sha)
+    return text[:12] + ("-dirty" if text.endswith("-dirty") else "")
+
+
 def render_markdown(report: Mapping[str, Any]) -> str:
     """The report as markdown; every table carries its protocol label."""
     meta = report["meta"]
     L = ["# Trajectory benchmark", ""]
-    L.append(f"Numbers: git `{meta['git_sha'][:12]}`, created {meta['created']}. ")
+    L.append(f"Numbers: git `{_short_sha(meta['git_sha'])}`, created {meta['created']}. ")
     if meta.get("rendered_git_sha"):
-        sha = str(meta["rendered_git_sha"])
-        sha = sha[:12] + ("-dirty" if sha.endswith("-dirty") else "")
-        L[-1] += f"Re-rendered (no replay) by git `{sha}`. "
+        L[-1] += f"Re-rendered (no replay) by git `{_short_sha(meta['rendered_git_sha'])}`. "
     L[-1] += "Split: time, "
     L[-1] += f"calibration partition {meta['split']['calibration_frac']} of agents (F10)."
     L.append("")

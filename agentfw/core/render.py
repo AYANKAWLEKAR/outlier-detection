@@ -1,8 +1,10 @@
 """One readable line per reason (feature spec F8; T-48).
 
 ``render_reason(r, info, decision=...)`` reads, in order: the decision and the authority it rests
-on (maturity and the evidence count that set it, pooled prior, the decision before a cap, F4's
-prerequisite block when it was kept above a ceiling that would have capped it), what the reason
+on (maturity and the evidence count that set it, pooled prior, the decision before a cap -- or,
+when the session overlay blocked a call the ceiling had capped, that the halt overrode the cap
+(T-62) -- F4's prerequisite block when it was kept above a ceiling that would have capped it),
+what the reason
 says, the gate's missing producer when the gate blocked, and the regime::
 
     blocked (mature: 1,140 observations); amount at 99.97th percentile (history+schemas,
@@ -78,7 +80,10 @@ def _authority(r: Reason, info: TrajectoryInfo, decision: Decision | None) -> st
     if r.prior_used:
         parts.append("pooled prior")
     if info.capped_from is not None:
-        parts.append(f"capped from {info.capped_from.value}")
+        if decision is Decision.BLOCK:  # only the session overlay blocks over a cap (T-47)
+            parts.append(f"session halt over a cap from {info.capped_from.value}")
+        else:
+            parts.append(f"capped from {info.capped_from.value}")
     if decision is Decision.BLOCK and info.ceiling_exempt:
         parts.append("prerequisite exempt from the ceiling")
     if decision is None:

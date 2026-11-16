@@ -812,7 +812,7 @@ def build_report(
         }
     return {
         "meta": {
-            "git_sha": git_sha(),
+            "git_sha": _code_sha(),  # "-dirty" when agentfw/ had uncommitted changes (T-63)
             "created": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
             "split": dataclasses.asdict(SPLIT),
             "protocols": {m: PROTOCOL_LABELS[m] for m in PROTOCOLS},

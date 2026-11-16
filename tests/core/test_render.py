@@ -142,6 +142,21 @@ def test_exemption_shown_only_when_a_cap_was_in_play() -> None:
         assert ("exempt from the ceiling" in out) is exempt
 
 
+def test_overlay_block_over_a_cap_does_not_read_capped() -> None:
+    """T-62 (final review m5): ``session_overlay`` keeps ``capped_from`` for the audit and blocks
+    the call; the line must not say "blocked (..., capped from block)"."""
+    info = TrajectoryInfo(
+        "history_only", None, False, 0.6, maturity="cold", capped_from=Decision.BLOCK
+    )
+    out = render_reason(HALT_REASON, info, decision=Decision.BLOCK)
+    assert (
+        out == "blocked (cold, session halt over a cap from block); session halted (history_only)"
+    )
+    assert "capped from" not in out
+    held = render_reason(HALT_REASON, info, decision=Decision.ALLOW)
+    assert "capped from block" in held
+
+
 @pytest.mark.parametrize(
     ("p", "text"), [(0.5, "50th"), (0.01, "1st"), (0.22, "22nd"), (0.03, "3rd"), (0.113, "11.3th")]
 )

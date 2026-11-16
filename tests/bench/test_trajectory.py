@@ -340,3 +340,26 @@ def test_cli_end_to_end(tiny_traj: Path, tmp_path: Path) -> None:
     curve = [(c["theta"], c["benign_share"], c["n_benign"]) for c in h["calibration_curve"]]
     warn, halt = select_from_curve(curve)
     assert h["selected"] == {"theta_warn": warn, "theta_halt": halt}
+
+
+def test_report_sha_marks_a_dirty_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-63 (final review m6): the run's ``meta.git_sha`` is ``_code_sha()`` (``-dirty`` when
+    ``agentfw/`` had uncommitted changes), and the rendered header keeps the marker for both the
+    run's sha and the re-render's."""
+    import subprocess
+
+    from agentfw.bench import trajectory as T
+    from agentfw.bench.trajectory_md import _short_sha
+
+    class _Out:
+        stdout = " M agentfw/core/engine.py\n"
+
+    monkeypatch.setattr(T, "git_sha", lambda: "0123456789abcdef0123")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Out())
+    assert T._code_sha() == "0123456789abcdef0123-dirty"
+    _Out.stdout = ""
+    assert T._code_sha() == "0123456789abcdef0123"
+    assert _short_sha("0123456789abcdef0123-dirty") == "0123456789ab-dirty"
+    assert _short_sha("0123456789abcdef0123") == "0123456789ab"
+    src = Path(T.__file__).read_text()
+    assert '"git_sha": _code_sha()' in src
