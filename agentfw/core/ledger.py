@@ -7,7 +7,11 @@ the ledger lookup of Definition 1 in arXiv:2610.12375, paraphrased: a call's id 
 "grounded" when the session ledger already holds a producer for it, and ungrounded otherwise.
 
 Rules:
-* The first sighting wins; an entry is never overwritten, consumers only append.
+* The first sighting wins; consumers only append. One exception (T-59): an exact entry first
+  seen in a call's *args* has no producer, so when a response later returns that id (the same
+  call's included: a lookup that echoes the id it was given) the response becomes its producer
+  (source ``"response"``, that call's seq and tool; consumers kept). It is not a new artifact.
+  An id only ever used in args (e.g. a fabricated id whose lookup errored) stays ``"args"``.
 * An id first seen in a call's own args is not its own producer: refs are computed from the
   ledger state *before* the call is recorded (see ``normalize``).
 * At most ``max_entries`` exact entries per session; beyond that ids go to a Bloom filter
@@ -101,6 +105,11 @@ class ArtifactLedger:
                     created += self._first_sighting(v, e.seq_no, e.tool_id, "args")
         if e.response_meta is not None:
             for v in e.response_meta.ids:
+                entry = self._entries.get(v)
+                if entry is not None and entry.source == "args":  # now it has a producer
+                    entry.producer_seq, entry.producer_tool = e.seq_no, e.tool_id
+                    entry.source = "response"
+                    continue
                 created += self._first_sighting(v, e.seq_no, e.tool_id, "response")
         return created
 

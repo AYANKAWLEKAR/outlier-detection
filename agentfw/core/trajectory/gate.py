@@ -14,8 +14,13 @@ produced, so the gate re-reads everything it needs at call time.
 2. **Prerequisites** (only when the regime has schemas, ``history+schemas`` / ``schemas_only``;
    without schemas the gate is a distribution check only, G-d). Every id-like string value
    (``is_id_like``: an artifact the ledger can track) of an ID-typed flat path (the sequence
-   detector's id-flow paths) with no ``LedgerRef`` at that path and not in ``session_ids_seen``
-   (a Bloom-only id counts as present) is *missing*; a value inference types ID but that no
+   detector's id-flow paths) that is not *grounded* is *missing*. Grounded (T-59): a
+   ``LedgerRef`` at that path whose source is ``"response"`` (an earlier call returned it) or
+   ``"task_input"`` (the task seeded it); with no ref at all, membership in
+   ``session_ids_seen`` (a Bloom-only id: the ledger overflowed and keeps no producer, T-11). A
+   ref with source ``"args"`` is never grounding: an id first seen in an earlier call's
+   arguments has no producer (T-36), so a fabricated id cannot be laundered through a lookup
+   that used it. A value inference types ID but that no
    ledger could ever record (free text such as a short ``subject``) is never missing. A missing
    value on a warm key (``FlowRecord.total >= flow_min_obs``) whose historical presence rate
    ``present / total >= gate_flow_rate`` -> ``block``, naming the path and the key's usual
@@ -33,7 +38,7 @@ and a tool name only.
 
 from __future__ import annotations
 
-from collections.abc import Set
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -63,13 +68,24 @@ class GateOutcome:
 _PASS = GateOutcome("pass", None, None)
 
 
-def _missing(e: ActionEnvelope, path: str, ref_ids: Set[str]) -> bool:
-    """Does ``path`` carry an id-like value with no ledger ref and not in ``session_ids_seen``?"""
+#: Ledger sources that ground an id (T-59): produced by an earlier response or seeded by the task.
+_GROUNDING = frozenset({"response", "task_input"})
+
+
+def _missing(e: ActionEnvelope, path: str, refs: Mapping[str, str]) -> bool:
+    """Does ``path`` carry an id-like value that is not grounded (module docstring, step 2)?
+    ``refs`` maps the path's ref'd ids to their ledger source."""
     seen = e.session_ids_seen
-    return any(
-        isinstance(v, str) and is_id_like(v) and v not in ref_ids and v not in seen
-        for v in e.flat_args[path]
-    )
+    for v in e.flat_args[path]:
+        if not isinstance(v, str) or not is_id_like(v):
+            continue
+        src = refs.get(v)
+        if src is None:
+            if v not in seen:  # no ref: present only through bare (Bloom-only) membership
+                return True
+        elif src not in _GROUNDING:  # first seen in an earlier call's args: no producer
+            return True
+    return False
 
 
 def gate(
@@ -85,12 +101,12 @@ def gate(
     """The gate's verdict on irreversible call ``e`` (module docstring). Pure: reads only."""
     cold: str | None = None
     if regime in SCHEMA_REGIMES:
-        refs: dict[str, set[str]] = {}
+        refs: dict[str, dict[str, str]] = {}
         for r in e.ledger_refs:
-            refs.setdefault(r.path, set()).add(r.artifact_id)
+            refs.setdefault(r.path, {})[r.artifact_id] = r.source
         agent, tool = e.agent_id, e.tool_id
         for path in sorted(e.flat_args):
-            if types(path) != FieldType.ID or not _missing(e, path, refs.get(path, set())):
+            if types(path) != FieldType.ID or not _missing(e, path, refs.get(path, {})):
                 continue
             rec = seq.flow_record(agent, tool, path)
             if rec is None or rec.total == 0 or rec.total < cfg.flow_min_obs:

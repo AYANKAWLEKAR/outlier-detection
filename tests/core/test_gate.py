@@ -413,6 +413,49 @@ def test_bloom_only_id_is_present() -> None:
     assert gate_info(eng.score(bare)).action == "block"
 
 
+def _bad_lookup(clock: Clock, sid: str, seq: int, ch: str) -> RawCall:
+    """A lookup of ``ch`` that errors and returns nothing (the fabricated id has no producer)."""
+    return make_raw(
+        session_id=sid,
+        agent_id=AGENT,
+        seq_no=seq,
+        ts_unix_ms=clock.tick(),
+        tool_id=LOOKUP,
+        args={"charge_id": ch},
+        response_meta=ResponseMeta(ids=(), error=True),
+    )
+
+
+def test_fabricated_id_laundered_through_an_earlier_calls_args_still_blocks() -> None:
+    """T-59 (final review I2, the reviewer's probe): using a fabricated id in an earlier call's
+    args gives it a ledger entry with source ``"args"`` -- no producer -- and must not make it
+    present. Before T-59 the refund passed the gate and was allowed."""
+    eng, clock = warm()
+    assert gate_info(score_alone(eng, refund(clock, "fab", 0, FABRICATED))).action == "block"
+    tracker = SessionTracker()
+    run_session(eng, [_bad_lookup(clock, "lau", 0, FABRICATED)], tracker=tracker)
+    e = normalize(refund(clock, "lau", 1, FABRICATED), tracker)
+    assert [r.source for r in e.ledger_refs] == ["args"] and FABRICATED in e.session_ids_seen
+    r = eng.score(e)
+    assert gate_info(r) == GateOutcome("block", LOOKUP, "charge_id")
+    assert r.decision is Decision.BLOCK
+
+
+def test_lookup_that_returns_the_id_grounds_it() -> None:
+    """T-59: an id first seen in a lookup's args that the lookup's own response returns gets that
+    lookup as its producer (source ``"response"``), so the refund after it passes; the same
+    lookup erroring with nothing returned leaves it ungrounded (above)."""
+    eng, clock = warm()
+    tracker = SessionTracker()
+    ch = charge(777)
+    run_session(eng, [lookup(clock, "af", 0, ch)], tracker=tracker)  # args, then response: ch
+    e = normalize(refund(clock, "af", 1, ch), tracker)
+    assert [(r.source, r.producer_seq, r.producer_tool) for r in e.ledger_refs] == [
+        ("response", 0, LOOKUP)
+    ]
+    assert gate_info(eng.score(e)).action == "pass"
+
+
 # -- switches and purity ----------------------------------------------------------------------
 
 
