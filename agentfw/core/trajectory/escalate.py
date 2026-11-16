@@ -10,9 +10,11 @@ irreversible call whose decision so far is ``BLOCK`` or ``REQUIRE_APPROVAL`` -- 
 ``escalate`` (held at ``REQUIRE_APPROVAL``, T-41) or a band candidate -- unless the gate itself
 blocked it (a missing prerequisite is final, not a candidate). Reversible calls never escalate.
 
-1. **Fresh re-score.** ``rescore()`` recomputes the fused score from the store without the
-   engine's per-call cache (T-12: the Python fast path skips nothing, so this is the fast path's
-   computation run again on current state). It reads only, so ``score`` stays pure.
+1. **Fresh re-score.** ``rescore()`` returns the fused score the decision rests on. In the
+   Python engine it is the fused score of the same evaluation (T-60): the fast path skips
+   nothing (T-12) and the store and envelope do not change inside one pure ``score``, so a
+   recomputation could only repeat it. A port whose fast path takes shortcuts (the Go port)
+   passes a real re-score here.
 2. **Confirm.** The escalated decision is the more severe of the fast decision and the band of
    the fresh score against ``theta_eff`` (``ALLOW < REQUIRE_APPROVAL < BLOCK``): a fresh score at
    or above ``theta_eff`` confirms a block (a gate escalation becomes ``BLOCK`` again), and

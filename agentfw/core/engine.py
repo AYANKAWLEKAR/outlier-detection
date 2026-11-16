@@ -79,13 +79,16 @@ which the gate reads at call time (no snapshot is kept; ``score`` stays pure). I
 with ``gate`` on, since an escalation is ``REQUIRE_APPROVAL`` and a reversible call is capped
 there (or provisional).
 
-Escalation (F5, Task 3.2; ``core.trajectory.escalate``; T-12, T-42): with ``escalate``, ``decide``
-re-scores an irreversible call it would block or hold for approval (not a gate block) through
-``_rescore`` -- the fused score recomputed from the store, never from the per-call cache; read
-only, so ``score`` stays pure -- and the injected ``judge`` (``Engine(judge=...)``, default none)
-may break a tie inside the approval band, shown the envelope and the result's reasons only. A
-re-score that confirms a gate escalation blocks again. ``update`` on an envelope it did not just
-score evaluates it afresh, so the escalation (and the judge) runs again there.
+Escalation (F5, Task 3.2; ``core.trajectory.escalate``; T-12, T-42, T-60): with ``escalate``,
+``decide`` escalates an irreversible call it would block or hold for approval (not a gate block)
+and the injected ``judge`` (``Engine(judge=...)``, default none) may break a tie inside the
+approval band, shown the envelope and the result's reasons only. The escalation's "fresh
+re-score" is the fused score this evaluation just computed: within one pure ``score`` the store
+and the envelope are the same, and the Python fast path skips nothing (T-12), so recomputing it
+could only return the same number (T-60; the Go port, whose fast path takes shortcuts, keeps a
+real re-score). A re-score that confirms a gate escalation blocks again. ``update`` on an
+envelope it did not just score evaluates it afresh, so the escalation (and the judge) runs again
+there.
 
 Session verdicts (F7, Task 3.3; ``core.trajectory.session``, T-43): behind the session gate,
 ``_evaluate`` runs, in order: ``decide``; the call's flags from that decision; the provisional
@@ -370,7 +373,7 @@ class Engine:
             e=e,
             types=view,
             seq=self._sequence,
-            rescore=lambda: self._rescore(e),
+            rescore=lambda: fr.fused,  # T-60: the same computation on the same state
             judge=self.judge,
             reasons=reasons,
         )
@@ -400,11 +403,6 @@ class Engine:
         if self.cfg.session_enforce and halted:
             fr = FusionResult(fr.fused, (HALT_REASON, *fr.reasons))
         return view, per, fr, theta, traj, decision
-
-    def _rescore(self, e: ActionEnvelope) -> float:
-        """F5's fresh re-score (T-12): ``e``'s fused score recomputed from the store -- types
-        looked up again, every detector re-run -- never from the engine's per-call cache. Pure."""
-        return self._fuse(e, self._view(e))[1].fused
 
     def _advance(
         self,

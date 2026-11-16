@@ -177,19 +177,12 @@ def test_every_switch_stream_exercises_the_trajectory_paths(traj_run: TrajRun) -
     assert r.not_ok_verdicts > 0 and r.provisional > 0 and r.irreversible > 0
 
 
-TRAJ_XFAIL_REASON = (
-    "every-switch p99 over budget: 207-235 us in 6 runs (load average 4-6; p50 77-83 us). The tail "
-    "is F5's fresh re-score (T-12): 1,018 of the 10,000 timed calls escalate (br_mode=modulate "
-    "makes them candidates) and take p50 150 / p99 274 us; the other calls p99 122 us; the "
-    "default engine on the same calls p99 100 us (T-55)"
-)
-
-
 @pytest.mark.skipif(os.environ.get("AFW_SKIP_PERF") == "1", reason="AFW_SKIP_PERF=1 set")
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=TRAJ_XFAIL_REASON)
 def test_score_p99_under_budget_with_every_trajectory_switch_on(traj_run: TrajRun) -> None:
     """The same bound with every trajectory switch on (``engine-traj``: v1 + vital and
-    ``registry.TRAJ_SWITCHES``), on bench calls with their schemas."""
+    ``registry.TRAJ_SWITCHES``), on bench calls with their schemas. Was a strict xfail (p99
+    207-235 us, T-55) while F5's escalation re-ran the fusion; it reuses the fused score since
+    T-60 (same output), and the 1,018 escalated calls no longer pay twice."""
     p50, p99 = np.percentile(traj_run.lat, [50, 99])
     print(f"engine-traj Engine.score latency: p50={p50:.1f} us p99={p99:.1f} us (n={TRAJ_SCORED})")
     assert p99 < P99_BUDGET_US, f"p99={p99:.1f} us (p50={p50:.1f} us)"

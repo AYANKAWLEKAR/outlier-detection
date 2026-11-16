@@ -33,6 +33,7 @@ from agentfw.core.envelope import (
     ActionEnvelope,
     Decision,
     DetectorResult,
+    Outcome,
     RawCall,
     Reason,
     TrajectoryInfo,
@@ -40,7 +41,7 @@ from agentfw.core.envelope import (
 from agentfw.core.normalize import SessionTracker, normalize
 from agentfw.core.schema_infer import TypeView
 from agentfw.core.trajectory.decide import decide
-from agentfw.core.trajectory.escalate import SEVERITY, escalate
+from agentfw.core.trajectory.escalate import SEVERITY, Judge, escalate
 from agentfw.core.trajectory.flags import Flag
 from agentfw.core.trajectory.gate import GateOutcome
 from agentfw.synth.generate import generate
@@ -263,13 +264,16 @@ def test_rescore_confirms_gate_escalation() -> None:
     assert r_off.decision is RA and Flag.BLOCK not in traj(r_off).flags
 
 
-def test_rescore_runs_the_detectors_again(monkeypatch: pytest.MonkeyPatch) -> None:
-    """T-12: the re-score is a second fusion over freshly looked-up types, not the fast path's
-    result (nor the engine's per-call cache, which ``score`` never reads)."""
+def test_rescore_reuses_the_fused_score(monkeypatch: pytest.MonkeyPatch) -> None:
+    """T-60 (final review I5): the escalation's re-score is the evaluation's own fused score --
+    one fusion per ``score`` -- and equals a full recomputation from the store (T-12: the Python
+    fast path skips nothing), so reusing it changes no output."""
     eng, clock = warm_engine()
     tracker = SessionTracker()
     first, last = spike(clock)
     run_session(eng, [first], tracker=tracker)
+    e = normalize(last, tracker)
+    recomputed = eng._fuse(e, eng._view(e))[1].fused  # what the T-12 re-score returned
     views: list[object] = []
     fuse = eng._fuse
 
@@ -279,10 +283,43 @@ def test_rescore_runs_the_detectors_again(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(eng, "_fuse", counting)
     before = eng.state_bytes()
-    r = eng.score(normalize(last, tracker))
-    assert traj(r).escalated and len(views) == 2 and views[0] is not views[1]
-    assert traj(r).escalated_score == r.fused_score
+    r = eng.score(e)
+    assert traj(r).escalated and len(views) == 1
+    assert traj(r).escalated_score == traj(r).fast_score == r.fused_score == recomputed
     assert eng.state_bytes() == before
+
+
+class _ParityJudge:
+    """Deterministic: block, allow or abstain by ``seq_no`` (the reviewer's probe judge)."""
+
+    def __call__(self, e: ActionEnvelope, reasons: Sequence[Reason]) -> float | None:
+        return (0.9, 0.1, None)[e.seq_no % 3]
+
+
+@pytest.mark.parametrize("judge", [None, _ParityJudge()], ids=["no-judge", "judge"])
+def test_reused_score_equals_a_full_rescore_on_the_ci_dataset(
+    tmp_path: Path, judge: Judge | None
+) -> None:
+    """T-60: over the CI dataset (+ loop / spin / stall, schemas as hints) with ``gate``,
+    ``escalate`` and ``flow_ledger``, every escalated call's score equals a full recomputation
+    from the store at score time (the T-12 re-score), so its decision is the T-12 decision."""
+    families = [*CI_DATASET.families, "loop", "spin", "stall"]
+    generate(CI_DATASET.model_copy(update={"families": families}), tmp_path)
+    raws, _, _ = load_dir(tmp_path)
+    raws.sort(key=lambda r: (r.ts_unix_ms, r.session_id, r.seq_no))
+    eng = Engine(GATE.replace(escalate=True), hints=load_schema_hints(tmp_path), judge=judge)
+    tracker = SessionTracker()
+    escalated = 0
+    for raw in raws:
+        e = normalize(raw, tracker)
+        r = eng.score(e)
+        t = traj(r)
+        if t.escalated:
+            escalated += 1
+            assert t.escalated_score == t.fast_score == eng._fuse(e, eng._view(e))[1].fused
+        eng.update(e, Outcome.APPROVED if r.decision is not Decision.ALLOW else Outcome.ALLOWED)
+        tracker.observe(e)
+    assert escalated >= 30  # non-vacuous (T-42 measured 58 on the CI dataset)
 
 
 def test_audit_fields_filled() -> None:
