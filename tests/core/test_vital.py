@@ -143,6 +143,7 @@ def test_polling_needs_both_annotations() -> None:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="T-58 (final review I1): spin reads completed calls only, so it first fires at index 5, "
     "not <= 4: the response repeats from call 1, and calls 1-4 complete the window only when "
     "call 5 is scored. The bar assumed the current call's own response (T-27), which a proxy "

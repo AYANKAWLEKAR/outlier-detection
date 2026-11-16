@@ -2,11 +2,11 @@
 
 Branch `feat/trajectory-monitoring-impl` (worktree `.superpowers/worktrees/trajectory-monitoring`), cut from `feat/tiers-0-2` and last rebased onto it at `4d8878b` (`feat/tiers-0-2` has moved on since). It implements every task of [the plan](docs/superpowers/plans/2026-11-11-trajectory-monitoring.md) for [the feature spec](docs/feature-spec-trajectory-monitoring.md): F1–F8 and F10 (Tasks 0.1–4.1), plus one fix wave from the final whole-branch review (T-58 to T-64). F9 and Tier 4 are out of scope (T-01).
 
-**The default engine is unchanged.** Every feature sits behind an `EngineConfig` switch that defaults to off (T-03). `tests/golden/*.sha256` and `agentfw/bench/baseline_metrics.json` are byte-identical to the base, and nothing under `results/` is committed. Checks at the last change: `scripts/gate.sh` passes (ruff, format, mypy --strict; pytest 1788 passed, 1 skipped, 3 xfailed, slow tests deselected), `ci_regress` passes, and the slow files the final fixes touch pass: trajectory exit acceptance (9 passed, 7 strict xfails), the gate allow-side suite (2 passed), and the latency tests (3 passed on mains power; see section 2 for battery power).
+**The default engine is unchanged.** Every feature sits behind an `EngineConfig` switch that defaults to off (T-03). `tests/golden/*.sha256` and `agentfw/bench/baseline_metrics.json` are byte-identical to the base, and nothing under `results/` is committed. Checks at the last change: `scripts/gate.sh` passes (ruff, format, mypy --strict; pytest 1788 passed, 1 skipped, 3 xfailed, slow tests deselected), `ci_regress` passes, and the slow files the final fixes touch pass: trajectory exit acceptance (9 passed, 7 strict xfails), the gate allow-side suite (2 passed), and the latency tests. The mains-power latency numbers (3 passed) are from `ec35ccf`; the `engine-traj` scoring path is unchanged after it (later commits touch flags of engines that are not `engine-traj`, rendering, docs, and the R28 ledger revert, which leaves the timed stream's path counts identical: 1,018 escalated, 3,782 gate outcomes, 616 non-OK verdicts, 249 provisional). On battery power the latency results were mixed (section 2).
 
 The branch name differs from the plan's because the main checkout holds `feat/trajectory-monitoring`. That branch can be fast-forwarded to this one.
 
-Sources. Every number below comes from decision 010 ([`010-trajectory-defaults.md`](docs/decisions/010-trajectory-defaults.md)), from [the benchmark report](docs/trajectory-benchmark.md) (one run of `python -m agentfw.bench.trajectory` on committed sha `c7c123f`, both seeds, both protocols), or from the interpretation records in [`009-trajectory-clarifications.md`](docs/decisions/009-trajectory-clarifications.md) (the T-rows; not upstream's `009-a1-defaults-accepted.md`). Numbers under the oracle-reviewer approval loop are **optimistic**: labels act as a perfect human reviewer.
+Sources. Every number below comes from decision 010 ([`010-trajectory-defaults.md`](docs/decisions/010-trajectory-defaults.md)), from [the benchmark report](docs/trajectory-benchmark.md) (one run of `python -m agentfw.bench.trajectory` on committed sha `c7c123f`, both seeds, both protocols, with the rows that read ledger refs re-measured after ruling R28; its header says which), or from the interpretation records in [`009-trajectory-clarifications.md`](docs/decisions/009-trajectory-clarifications.md) (the T-rows; not upstream's `009-a1-defaults-accepted.md`). Numbers under the oracle-reviewer approval loop are **optimistic**: labels act as a perfect human reviewer.
 
 ## 1. What was built
 
@@ -41,7 +41,7 @@ Each task had a fresh implementer and a fresh reviewer: one commit per task, plu
 | Finding | Fix | Record |
 |---|---|---|
 | I1: spin read the current call's own response, so the proxy (which scores before the response) never raised `SPIN` | Spin is computed over completed calls only (one call of lag); `ActionEnvelope.delta_i` removed; proxy-style scoring now equals replay in every result field and in the stored state | T-58 |
-| I2: a fabricated id used first in an earlier call's arguments passed the F4 gate | The gate counts only refs from a response or the task input (or a Bloom-only id) as present; the ledger gives an args-first id a producer when a response returns it | T-59 |
+| I2: a fabricated id used first in an earlier call's arguments passed the F4 gate | The gate counts only refs from a response or the task input (or a Bloom-only id) as present. The ledger is unchanged: letting a later response ground an args-first id reopened the bypass through tools that echo their arguments (ruling R28); legitimate args-first flows are gated instead (reviewer load, not a bypass) | T-59 |
 | I3: this report was stale | Rewritten from 010 and the benchmark report | T-64 |
 | I4: 010 did not say that four read tools were learned as writes | Disclosed on the affected rows; kind hints listed as a prerequisite | T-64 |
 | I5: F5's re-score re-ran the same computation | Escalation reuses the fused score (output byte-identical); the every-switch p99 test passes | T-60 |
@@ -83,7 +83,7 @@ Both verdicts were measured without `kind` hints: four catalog read tools are le
 The other switches:
 
 - **`flow_ledger`**: decisions unchanged; per-agent FPR@95 0.578 → 0.601 and 0.682 → 0.583.
-- **`gate`**: blocks 510 → 6 and 631 → 13 (approvals instead); the flagged set is unchanged.
+- **`gate`**: blocks 510 → 7 and 631 → 13 (approvals instead); the flagged set moves by one benign call on seed 0, a legitimate flow that first used its charge id in arguments (the T-59 residual).
 - **`escalate`**: decisions unchanged without a judge; 0.67% / 0.73% of benign test rows escalate.
 - **`authority`**: blocks 510 → 485 and 631 → 588; it never raises a decision.
 - **`session_enforce`**: benign FPR +0.0027 / +0.0041.
@@ -116,7 +116,7 @@ Each is recorded with its reasoning in `009-trajectory-clarifications.md`. The o
 - **T-32.** Bench runs load `schemas.jsonl` as hints (annotations only, no `kind`; see I4).
 - **T-34.** One session gate (`Engine._book`), opened by `sessions`, `provisional` or `session_enforce`.
 - **T-35 / T-41 / T-42 / T-61.** Irreversibility comes from the blast radius whenever a feature needs it or the session gate is open, even with `br_mode="off"`.
-- **T-41 / T-59.** The gate counts only id-like values as missing, and only ids a response returned or the task supplied as present.
+- **T-41 / T-59.** The gate counts only id-like values as missing, and as present only ids whose first sighting in the session was a response or the task input (or a Bloom-only id).
 - **T-43.** The engine order is decide → flags → provisional → density → verdict → overlay; overlays read the halted state from before the call.
 - **T-50.** The maturity contributor floor is min(0.3, θ_eff − cal_delta).
 - **T-54.** The calibration-partition session thresholds (θ_halt 0.2, warn undefined) are recorded in `calibrated.json` but not used; the defaults stay 0.33 / 0.6.
@@ -129,4 +129,5 @@ Each is recorded with its reasoning in `009-trajectory-clarifications.md`. The o
 - **The F5 judge** is asked twice on an update that misses the cache, and judge exceptions are not caught. Both must be fixed before a real judge is wired in.
 - **The tracker's session state is never evicted** (deferred minor m7), so after the engine evicts an idle session, the tracker's ring still feeds spin on that session's next call.
 - **The default-engine latency test** fails on this shared machine under heavy load, as it did before this branch.
-- Deferred minor findings (m4, m7, m8 and the per-task minors) are listed in the SDD ledger (`.superpowers/sdd/2026-11-11-trajectory-monitoring/progress.md`).
+- **Gated args-first flows** (T-59 residual). A legitimate flow that first uses an id in arguments and only later sees it in a response (a charge the user named, looked up, then refunded, without `task_ids` capture) is blocked or held on a warm key: reviewer load, not a bypass.
+- Deferred minor findings (m4, m7, m8 and the per-task minors) are kept in the controller's ledger outside the repository.

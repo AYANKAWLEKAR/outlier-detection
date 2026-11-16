@@ -75,7 +75,10 @@ def charge(i: int) -> str:
     return f"ch_{i:06d}abcd"
 
 
-def lookup(clock: Clock, sid: str, seq: int, ch: str) -> RawCall:
+def lookup(clock: Clock, sid: str, seq: int, ch: str, task_ids: tuple[str, ...] = ()) -> RawCall:
+    """Look charge ``ch`` up (the response echoes it). An echo is not a producer of an id first
+    seen in the lookup's own args (T-21, T-59): a scenario whose refund must pass seeds ``ch``
+    through ``task_ids`` (the task supplied the charge)."""
     return make_raw(
         session_id=sid,
         agent_id=AGENT,
@@ -84,6 +87,7 @@ def lookup(clock: Clock, sid: str, seq: int, ch: str) -> RawCall:
         tool_id=LOOKUP,
         args={"charge_id": ch},
         response_meta=ResponseMeta(ids=(ch,)),
+        task_ids=task_ids,
     )
 
 
@@ -153,9 +157,8 @@ def test_g_b_missing_producer_blocks() -> None:
 
 def test_valid_refund_passes() -> None:
     eng, clock = warm()
-    out = run_session(
-        eng, [lookup(clock, "ok", 0, charge(500)), refund(clock, "ok", 1, charge(500))]
-    )
+    ch = charge(500)  # supplied by the task (T-59: a lookup's echo does not ground it)
+    out = run_session(eng, [lookup(clock, "ok", 0, ch, task_ids=(ch,)), refund(clock, "ok", 1, ch)])
     assert gate_info(out[1]) == GateOutcome("pass", None, None)
     assert out[1].decision is not Decision.BLOCK
     assert out[0].trajectory is not None and out[0].trajectory.gate is None  # reversible: no gate
@@ -210,7 +213,7 @@ def test_g_c_anomalous_distribution_escalates_not_blocks() -> None:
     ch = charge(777)
     tracker_on, tracker_off = SessionTracker(), SessionTracker()
     for eng_, tr in ((eng, tracker_on), (off, tracker_off)):
-        run_session(eng_, [lookup(clock, sid, 0, ch)], tracker=tr)
+        run_session(eng_, [lookup(clock, sid, 0, ch, task_ids=(ch,))], tracker=tr)
     spike = refund(clock, sid, 1, ch, amount=9_000_000.0)
     r_off = score_alone(off, spike, tracker_off)
     assert r_off.decision is Decision.BLOCK  # the fast path alone would block it
@@ -441,19 +444,61 @@ def test_fabricated_id_laundered_through_an_earlier_calls_args_still_blocks() ->
     assert r.decision is Decision.BLOCK
 
 
-def test_lookup_that_returns_the_id_grounds_it() -> None:
-    """T-59: an id first seen in a lookup's args that the lookup's own response returns gets that
-    lookup as its producer (source ``"response"``), so the refund after it passes; the same
-    lookup erroring with nothing returned leaves it ungrounded (above)."""
+def test_lookup_echo_does_not_ground_an_args_first_id() -> None:
+    """T-59 residual: the ledger keeps an id's first sighting (T-21), so a lookup that first uses
+    an id in its args and echoes it leaves source ``"args"``; on a warm key the refund after it
+    is gated. A legitimate flow pays reviewer load here, never a bypass (R28)."""
     eng, clock = warm()
     tracker = SessionTracker()
     ch = charge(777)
     run_session(eng, [lookup(clock, "af", 0, ch)], tracker=tracker)  # args, then response: ch
     e = normalize(refund(clock, "af", 1, ch), tracker)
-    assert [(r.source, r.producer_seq, r.producer_tool) for r in e.ledger_refs] == [
-        ("response", 0, LOOKUP)
-    ]
-    assert gate_info(eng.score(e)).action == "pass"
+    assert [(r.source, r.producer_tool) for r in e.ledger_refs] == [("args", LOOKUP)]
+    assert gate_info(eng.score(e)).action == "block"
+
+
+def _echo_then_refund(eng: Engine, clock: Clock, first: RawCall) -> DetectorResult:
+    tracker = SessionTracker()
+    run_session(eng, [first], tracker=tracker)
+    return eng.score(normalize(refund(clock, first.session_id, 1, FABRICATED), tracker))
+
+
+def test_fabricated_id_echoed_by_a_write_still_blocks() -> None:
+    """R28 (re-review echo probe, path a): ``zendesk.add_comment`` echoes its body, so a
+    fabricated charge id put in a comment comes back in the response. Its first sighting is the
+    comment's args; the echo must not make it grounded, and the refund is blocked."""
+    eng, clock = warm()
+    comment = make_raw(
+        session_id="echo",
+        agent_id=AGENT,
+        seq_no=0,
+        ts_unix_ms=clock.tick(),
+        tool_id="zendesk.add_comment",
+        args={"ticket_id": "T-00000001", "body": FABRICATED, "public": False},
+        response_meta=ResponseMeta(ids=("cm_00000001", "T-00000001", FABRICATED)),
+    )
+    r = _echo_then_refund(eng, clock, comment)
+    assert gate_info(r) == GateOutcome("block", LOOKUP, "charge_id")
+    assert r.decision is Decision.BLOCK
+
+
+def test_fabricated_id_echoed_by_a_per_record_failure_still_blocks() -> None:
+    """R28 (path b): ``salesforce.mass_update`` reports a missing record as
+    ``{"failed": [{"id": rid}]}`` without a tool-level error, so the fabricated id comes back in
+    a successful response. Still ungrounded: the refund is blocked."""
+    eng, clock = warm()
+    update = make_raw(
+        session_id="mu",
+        agent_id=AGENT,
+        seq_no=0,
+        ts_unix_ms=clock.tick(),
+        tool_id="salesforce.mass_update",
+        args={"obj": "Case", "record_ids": [FABRICATED], "fields": {"Status": "x"}},
+        response_meta=ResponseMeta(ids=(FABRICATED,), error=False),
+    )
+    r = _echo_then_refund(eng, clock, update)
+    assert gate_info(r) == GateOutcome("block", LOOKUP, "charge_id")
+    assert r.decision is Decision.BLOCK
 
 
 # -- switches and purity ----------------------------------------------------------------------

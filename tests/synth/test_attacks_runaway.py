@@ -317,6 +317,7 @@ def test_loop_injection_detected_within_one_event(tmp_path: Path) -> None:
 
 @pytest.mark.xfail(
     strict=True,
+    raises=AssertionError,
     reason="T-58 (final review I1): spin reads completed calls only (a proxy scores a call before "
     "its response), so it fires one call later: measured 1/91 runs within w_spin = 4 events of "
     "the onset, 90 at 5 (91/91 within 4 when spin read the current call's response, T-27). "

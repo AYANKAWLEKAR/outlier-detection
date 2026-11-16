@@ -43,38 +43,18 @@ def test_arg_id_first_seen_in_earlier_call_is_an_args_producer() -> None:
     assert entry is not None and entry.consumers == [1]
 
 
-def test_args_first_entry_gets_a_producer_when_a_response_returns_it() -> None:  # T-59
-    t = SessionTracker()
-    t.observe(make_env(make_raw(seq_no=0, tool_id="a.read", args={"charge_id": CH}), t))
-    t.observe(make_env(make_raw(seq_no=1, args={"c": CH}), t))  # consumer of the args entry
-    led = t.ledger("s1")
-    assert led is not None
-    back = make_raw(seq_no=2, tool_id="a.lookup", response_meta=ResponseMeta(ids=(CH,)))
-    assert led.record(make_env(back, t)) == 0  # not a new artifact
-    entry = led.lookup(CH)
-    assert entry is not None
-    assert (entry.producer_seq, entry.producer_tool, entry.source) == (2, "a.lookup", "response")
-    assert entry.consumers == [1]
-    later = make_raw(seq_no=3, tool_id="a.other", response_meta=ResponseMeta(ids=(CH,)))
-    led.record(make_env(later, t))  # a response producer is never replaced
-    assert (entry.producer_seq, entry.source) == (2, "response")
-
-
-def test_echoing_lookup_is_the_producer_and_an_errored_one_is_not() -> None:  # T-59
+def test_args_first_entry_stays_args_when_a_response_returns_it() -> None:  # T-21, R28
+    """The first sighting wins: an id first used in args stays ``"args"`` (no producer) when the
+    same or a later response returns it -- an echo is not a producer (T-59 / R28)."""
     t = SessionTracker()
     echo = make_raw(
         seq_no=0, tool_id="a.lookup", args={"id": CH}, response_meta=ResponseMeta(ids=(CH,))
     )
-    fail = make_raw(
-        seq_no=1, tool_id="a.lookup", args={"id": RE}, response_meta=ResponseMeta(error=True)
-    )
     t.observe(make_env(echo, t))
-    t.observe(make_env(fail, t))
-    e = make_env(make_raw(seq_no=2, args={"x": CH, "y": RE}), t)
-    assert [(r.artifact_id, r.source, r.producer_seq) for r in e.ledger_refs] == [
-        (CH, "response", 0),
-        (RE, "args", 1),
-    ]
+    later = make_raw(seq_no=1, tool_id="a.other", response_meta=ResponseMeta(ids=(CH,)))
+    t.observe(make_env(later, t))
+    e = make_env(make_raw(seq_no=2, args={"x": CH}), t)
+    assert e.ledger_refs == (LedgerRef(CH, "x", 0, "a.lookup", "args"),)
 
 
 def test_task_ids_seed_before_the_first_call() -> None:

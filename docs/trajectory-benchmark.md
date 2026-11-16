@@ -1,8 +1,8 @@
-<!-- Numbers: one run of `python -m agentfw.bench.trajectory --traces traces/bench --out results/trajectory-final --seeds 0,1 --workers 4` on committed sha c7c123f (clean tree: the meta sha carries no -dirty marker, T-63), 2026-11-16, 39 min wall (replays 2,181 s; latency 124 s, run last; load average 4.2 / 8.2 / 14.3 (1 / 5 / 15 min) when the run ended, so the absolute latencies are higher than on a quiet machine and the ratios to `engine` are the comparable figures). No re-render. `results/` is not committed (ruling R24, T-57). Summary and recommendations: docs/decisions/010-trajectory-defaults.md. -->
+<!-- Numbers: one run of `python -m agentfw.bench.trajectory --traces traces/bench --out results/trajectory-final --seeds 0,1 --workers 4` on committed sha c7c123f (clean tree), 2026-11-16, 39 min wall; latency run last, load average 4.2 / 8.2 / 14.3 (1 / 5 / 15 min) at its end, so the ratios to `engine` are the comparable latency figures. Ruling R28 then reverted the T-59 ledger change (an echoed args-first id no longer becomes grounded). The rows that read ledger refs were re-measured on that code (`--rows engine,flow_ledger,provisional,seq_age_discount,gate,engine-traj,gate+flow_ledger,escalate+gate+flow_ledger,engine-traj-shadow --latency-calls 0`, both seeds, both protocols, with attribution; agentfw/ byte-identical to the R28 commit; the run meta says 9413905-dirty because the revert was not yet committed): those rows and the attribution tables below are from that run, every other row and the latency table are carried over from c7c123f, and the report was re-rendered from the merged JSON (no replay; hence "Re-rendered by 94139055db32-dirty", the rendering code is unchanged). Effect of the revert: on seed 0 one more benign gate prerequisite block in every gate row (gate, gate+flow_ledger 6 -> 7 blocks; escalate+gate+flow_ledger 426 -> 427 under spec 5.2 allow-all, 657 -> 658 optimistic; engine-traj 2,795 -> 2,796 and 2,862 -> 2,863; engine-traj-shadow 2,548 -> 2,549 and 2,588 -> 2,589) and engine-traj false halts at theta <= 0.30 up by two benign sessions (of 40,840); seed 1, all scores, the other rows and the attribution are identical. `results/` is not committed (ruling R24, T-57). Summary and recommendations: docs/decisions/010-trajectory-defaults.md. -->
 
 # Trajectory benchmark
 
-Numbers: git `c7c123fd77e1`, created 2026-11-16T21:19:49+00:00. Split: time, calibration partition 0.15 of agents (F10).
+Numbers: git `c7c123fd77e1`, created 2026-11-16T21:19:49+00:00. Re-rendered (no replay) by git `94139055db32-dirty`. Split: time, calibration partition 0.15 of agents (F10).
 
 | seed | traces sha | envelopes | attacks | families | bench config |
 |---|---|---|---|---|---|
@@ -50,15 +50,15 @@ bootstrap 95% CI; bold where the interval excludes 0.
 | sessions | 0.659 [0.541, 0.756] | 0.578 [0.539, 0.660] | 0.032 | 0.0106 | +0.0000 [0.0000, 0.0000] | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.586 | 0.0000 | 510 / 575 | yes / yes |
 | provisional | 0.659 [0.541, 0.756] | 0.578 [0.539, 0.660] | 0.032 | 0.0095 | **-0.0011 [-0.0014, -0.0008]** | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.597 | 0.0000 | 426 / 575 | yes / no |
 | seq_age_discount | 0.659 [0.541, 0.756] | 0.578 [0.539, 0.660] | 0.032 | 0.0106 | +0.0000 [0.0000, 0.0000] | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.586 | 0.0000 | 510 / 575 | no / no |
-| gate | 0.659 [0.541, 0.756] | 0.578 [0.539, 0.660] | 0.032 | 0.0106 | +0.0000 [0.0000, 0.0000] | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.586 | 0.0000 | 6 / 1079 | yes / no |
+| gate | 0.659 [0.541, 0.756] | 0.578 [0.539, 0.660] | 0.032 | 0.0106 | +0.0000 [0.0000, 0.0001] | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.586 | 0.0000 | 7 / 1079 | yes / no |
 | escalate | 0.659 [0.541, 0.756] | 0.578 [0.539, 0.660] | 0.032 | 0.0106 | +0.0000 [0.0000, 0.0000] | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.586 | 0.0067 | 510 / 575 | yes / yes |
 | session_enforce | 0.659 [0.541, 0.756] | 0.578 [0.539, 0.660] | 0.032 | 0.0133 | **+0.0027 [0.0019, 0.0037]** | 0.0339 | +0.0074 [0.0000, 0.0176] | 0.530 | 0.0000 | 799 / 405 | yes / no |
 | authority | 0.659 [0.541, 0.756] | 0.578 [0.539, 0.660] | 0.032 | 0.0106 | +0.0000 [0.0000, 0.0000] | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.586 | 0.0000 | 485 / 600 | yes / no |
-| engine-traj | 0.658 [0.535, 0.755] | 0.601 [0.539, 0.665] | 0.031 | 0.1187 | **+0.1081 [0.1045, 0.1117]** | 0.2699 | **+0.2434 [0.2076, 0.2795]** | 0.123 | 0.0653 | 2795 / 2935 | no / no |
-| gate+flow_ledger | 0.658 [0.535, 0.755] | 0.601 [0.539, 0.665] | 0.031 | 0.0106 | +0.0000 [0.0000, 0.0000] | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.586 | 0.0000 | 6 / 1078 | no / no |
-| escalate+gate+flow_ledger | 0.658 [0.535, 0.755] | 0.601 [0.539, 0.665] | 0.031 | 0.0106 | +0.0000 [0.0000, 0.0000] | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.586 | 0.0066 | 426 / 658 | no / no |
+| engine-traj | 0.658 [0.535, 0.755] | 0.601 [0.539, 0.665] | 0.031 | 0.1187 | **+0.1081 [0.1045, 0.1117]** | 0.2699 | **+0.2434 [0.2076, 0.2795]** | 0.123 | 0.0653 | 2796 / 2935 | no / no |
+| gate+flow_ledger | 0.658 [0.535, 0.755] | 0.601 [0.539, 0.665] | 0.031 | 0.0106 | +0.0000 [0.0000, 0.0001] | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.585 | 0.0000 | 7 / 1078 | no / no |
+| escalate+gate+flow_ledger | 0.658 [0.535, 0.755] | 0.601 [0.539, 0.665] | 0.031 | 0.0106 | +0.0000 [0.0000, 0.0001] | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.585 | 0.0066 | 427 / 658 | no / no |
 | sessions+vital | 0.659 [0.541, 0.756] | 0.578 [0.539, 0.660] | 0.032 | 0.0106 | +0.0000 [0.0000, 0.0000] | 0.0265 | +0.0000 [0.0000, 0.0000] | 0.586 | 0.0000 | 510 / 575 | yes / yes |
-| engine-traj-shadow | 0.658 [0.535, 0.755] | 0.601 [0.539, 0.665] | 0.031 | 0.1147 | **+0.1041 [0.1005, 0.1075]** | 0.2566 | **+0.2301 [0.1967, 0.2635]** | 0.119 | 0.0653 | 2548 / 2965 | no / no |
+| engine-traj-shadow | 0.658 [0.535, 0.755] | 0.601 [0.539, 0.665] | 0.031 | 0.1147 | **+0.1041 [0.1005, 0.1075]** | 0.2566 | **+0.2301 [0.1967, 0.2635]** | 0.119 | 0.0653 | 2549 / 2965 | no / no |
 
 **Attack-level decision recall by family** (Δ vs engine with CI below each value).
 
@@ -90,9 +90,9 @@ sessions of all splits; precision at a 1.5% session base rate).
 | sessions | 0.0029 | 0.819 | 0.071 | 7.0 | 0.502 | 0.0377 | 0.935 | 0.0047 | – / 0.200 |
 | provisional | 0.0029 | 0.815 | 0.071 | 7.0 | 0.499 | 0.0350 | 0.918 | 0.0043 | – / 0.200 |
 | session_enforce | 0.0029 | 0.819 | 0.071 | 7.0 | 0.502 | 0.0377 | 0.935 | 0.0047 | – / 0.200 |
-| engine-traj † | 0.0040 | 0.948 | 0.074 | 7.0 | 0.449 | 0.2178 | 1.000 | 0.0167 | – / 0.200 |
+| engine-traj † | 0.0040 | 0.948 | 0.074 | 7.0 | 0.449 | 0.2178 | 1.000 | 0.0168 | – / 0.200 |
 | sessions+vital | 0.0030 | 0.944 | 0.071 | 7.0 | 0.520 | 0.0417 | 1.000 | 0.0050 | – / 0.200 |
-| engine-traj-shadow | 0.0040 | 0.948 | 0.074 | 7.0 | 0.449 | 0.2178 | 1.000 | 0.0167 | – / 0.200 |
+| engine-traj-shadow | 0.0040 | 0.948 | 0.074 | 7.0 | 0.449 | 0.2178 | 1.000 | 0.0168 | – / 0.200 |
 
 † enforcing replay with `provisional`: the sensitivity steps above θ = 0.6
 are approximate (T-43); the shadow rows are exact at every θ.
@@ -103,8 +103,8 @@ precision at base rate per θ; calibration-partition benign share).
 | θ | false-halt | runaway recall | attacked recall | prec@base | calibration benign share |
 |---|---|---|---|---|---|
 | 0.20 | 0.0285 | 0.996 | 0.135 | 0.127 | 0.0072 |
-| 0.25 | 0.0270 | 0.996 | 0.129 | 0.131 | 0.0072 |
-| 0.30 | 0.0270 | 0.996 | 0.129 | 0.131 | 0.0072 |
+| 0.25 | 0.0271 | 0.996 | 0.129 | 0.131 | 0.0072 |
+| 0.30 | 0.0271 | 0.996 | 0.129 | 0.131 | 0.0072 |
 | 0.35 | 0.0103 | 0.987 | 0.082 | 0.252 | 0.0011 |
 | 0.40 | 0.0082 | 0.974 | 0.081 | 0.295 | 0.0010 |
 | 0.45 | 0.0082 | 0.974 | 0.081 | 0.295 | 0.0010 |
@@ -308,15 +308,15 @@ bootstrap 95% CI; bold where the interval excludes 0.
 | sessions | 0.678 [0.563, 0.764] | 0.572 [0.517, 0.632] | 0.033 | 0.0396 | +0.0000 [0.0000, 0.0000] | 0.0737 | +0.0000 [0.0000, 0.0000] | 0.287 | 0.0000 | 889 / 1472 | yes / yes |
 | provisional | 0.672 [0.554, 0.761] | 0.558 [0.531, 0.614] | 0.034 | 0.0101 | **-0.0295 [-0.0313, -0.0277]** | 0.0265 | **-0.0472 [-0.0687, -0.0296]** | 0.587 | 0.0000 | 517 / 516 | no / no |
 | seq_age_discount | 0.678 [0.563, 0.764] | 0.572 [0.517, 0.632] | 0.033 | 0.0396 | +0.0001 [0.0000, 0.0002] | 0.0737 | +0.0000 [0.0000, 0.0000] | 0.286 | 0.0000 | 885 / 1479 | no / no |
-| gate | 0.678 [0.563, 0.764] | 0.572 [0.517, 0.632] | 0.033 | 0.0395 | -0.0000 [-0.0001, 0.0000] | 0.0723 | -0.0015 [-0.0048, 0.0000] | 0.287 | 0.0000 | 6 / 2354 | no / no |
+| gate | 0.678 [0.563, 0.764] | 0.572 [0.517, 0.632] | 0.033 | 0.0396 | +0.0000 [-0.0001, 0.0001] | 0.0723 | -0.0015 [-0.0048, 0.0000] | 0.287 | 0.0000 | 7 / 2354 | no / no |
 | escalate | 0.678 [0.563, 0.764] | 0.572 [0.517, 0.632] | 0.033 | 0.0396 | +0.0000 [0.0000, 0.0000] | 0.0737 | +0.0000 [0.0000, 0.0000] | 0.287 | 0.0147 | 889 / 1472 | yes / yes |
 | session_enforce | 0.678 [0.563, 0.764] | 0.572 [0.518, 0.632] | 0.033 | 0.0421 | **+0.0026 [0.0018, 0.0035]** | 0.0811 | +0.0074 [0.0000, 0.0176] | 0.274 | 0.0000 | 1015 / 1455 | no / no |
 | authority | 0.678 [0.563, 0.764] | 0.571 [0.517, 0.633] | 0.033 | 0.0395 | -0.0000 [-0.0001, 0.0000] | 0.0737 | +0.0000 [0.0000, 0.0000] | 0.287 | 0.0000 | 817 / 1543 | no / no |
-| engine-traj | 0.687 [0.580, 0.771] | 0.583 [0.537, 0.657] | 0.032 | 0.1142 | **+0.0747 [0.0710, 0.0786]** | 0.2699 | **+0.1962 [0.1623, 0.2294]** | 0.129 | 0.0638 | 2862 / 2697 | no / no |
-| gate+flow_ledger | 0.678 [0.563, 0.764] | 0.568 [0.511, 0.648] | 0.033 | 0.0397 | **+0.0001 [0.0000, 0.0003]** | 0.0723 | -0.0015 [-0.0048, 0.0000] | 0.286 | 0.0000 | 6 / 2360 | no / no |
-| escalate+gate+flow_ledger | 0.678 [0.563, 0.764] | 0.568 [0.511, 0.648] | 0.033 | 0.0397 | **+0.0001 [0.0000, 0.0003]** | 0.0723 | -0.0015 [-0.0048, 0.0000] | 0.286 | 0.0146 | 657 / 1709 | no / no |
+| engine-traj | 0.687 [0.580, 0.771] | 0.583 [0.537, 0.657] | 0.032 | 0.1143 | **+0.0747 [0.0710, 0.0787]** | 0.2699 | **+0.1962 [0.1623, 0.2294]** | 0.129 | 0.0638 | 2863 / 2697 | no / no |
+| gate+flow_ledger | 0.678 [0.563, 0.764] | 0.568 [0.511, 0.648] | 0.033 | 0.0397 | **+0.0001 [0.0000, 0.0003]** | 0.0723 | -0.0015 [-0.0048, 0.0000] | 0.286 | 0.0000 | 7 / 2360 | no / no |
+| escalate+gate+flow_ledger | 0.678 [0.563, 0.764] | 0.568 [0.511, 0.648] | 0.033 | 0.0397 | **+0.0001 [0.0000, 0.0003]** | 0.0723 | -0.0015 [-0.0048, 0.0000] | 0.286 | 0.0146 | 658 / 1709 | no / no |
 | sessions+vital | 0.678 [0.563, 0.764] | 0.572 [0.517, 0.632] | 0.033 | 0.0396 | +0.0000 [0.0000, 0.0000] | 0.0737 | +0.0000 [0.0000, 0.0000] | 0.287 | 0.0000 | 889 / 1472 | yes / yes |
-| engine-traj-shadow | 0.672 [0.552, 0.760] | 0.584 [0.521, 0.678] | 0.032 | 0.1123 | **+0.0727 [0.0689, 0.0764]** | 0.2566 | **+0.1829 [0.1503, 0.2144]** | 0.122 | 0.0640 | 2588 / 2829 | no / no |
+| engine-traj-shadow | 0.672 [0.552, 0.760] | 0.584 [0.521, 0.678] | 0.032 | 0.1123 | **+0.0728 [0.0689, 0.0765]** | 0.2566 | **+0.1829 [0.1503, 0.2144]** | 0.122 | 0.0640 | 2589 / 2829 | no / no |
 
 **Attack-level decision recall by family** (Δ vs engine with CI below each value).
 
@@ -348,9 +348,9 @@ sessions of all splits; precision at a 1.5% session base rate).
 | sessions | 0.0028 | 0.836 | 0.072 | 7.0 | 0.511 | 0.0422 | 0.944 | 0.0051 | – / 0.200 |
 | provisional | 0.0029 | 0.815 | 0.072 | 7.0 | 0.500 | 0.0326 | 0.918 | 0.0048 | – / 0.200 |
 | session_enforce | 0.0028 | 0.836 | 0.072 | 7.0 | 0.511 | 0.0422 | 0.944 | 0.0051 | – / 0.200 |
-| engine-traj † | 0.0040 | 0.948 | 0.075 | 7.0 | 0.450 | 0.2190 | 1.000 | 0.0172 | – / 0.200 |
+| engine-traj † | 0.0040 | 0.948 | 0.075 | 7.0 | 0.450 | 0.2190 | 1.000 | 0.0173 | – / 0.200 |
 | sessions+vital | 0.0029 | 0.948 | 0.072 | 7.0 | 0.526 | 0.0462 | 1.000 | 0.0055 | – / 0.200 |
-| engine-traj-shadow | 0.0039 | 0.948 | 0.075 | 7.0 | 0.453 | 0.2133 | 1.000 | 0.0170 | – / 0.200 |
+| engine-traj-shadow | 0.0039 | 0.948 | 0.075 | 7.0 | 0.453 | 0.2133 | 1.000 | 0.0171 | – / 0.200 |
 
 † enforcing replay with `provisional`: the sensitivity steps above θ = 0.6
 are approximate (T-43); the shadow rows are exact at every θ.
@@ -360,7 +360,7 @@ precision at base rate per θ; calibration-partition benign share).
 
 | θ | false-halt | runaway recall | attacked recall | prec@base | calibration benign share |
 |---|---|---|---|---|---|
-| 0.20 | 0.0288 | 0.996 | 0.140 | 0.128 | 0.0051 |
+| 0.20 | 0.0288 | 0.996 | 0.140 | 0.127 | 0.0051 |
 | 0.25 | 0.0274 | 0.996 | 0.134 | 0.131 | 0.0051 |
 | 0.30 | 0.0274 | 0.996 | 0.134 | 0.131 | 0.0051 |
 | 0.35 | 0.0104 | 0.987 | 0.084 | 0.251 | 0.0011 |

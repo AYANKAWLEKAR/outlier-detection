@@ -9,8 +9,12 @@ below is a proposal. If the user flips a default, that change regenerates
 Numbers: [`docs/trajectory-benchmark.md`](../trajectory-benchmark.md), the rendered report of
 `python -m agentfw.bench.trajectory --traces traces/bench --out results/trajectory-final --seeds
 0,1 --workers 4`, run on committed sha `c7c123f` (clean tree), which includes the final-review
-fixes T-58 to T-63 (`results/` is not committed, ruling R24). Every number in this record comes
-from that run unless a line names another source. Protocol: T-53. Interpretation records: T-52
+fixes T-58 to T-63, with the rows that read ledger refs (`engine`, `flow_ledger`, `provisional`,
+`seq_age_discount`, `gate`, `gate+flow_ledger`, `escalate+gate+flow_ledger`, `engine-traj`,
+`engine-traj-shadow`) and the attribution re-measured after ruling R28 reverted T-59's ledger
+change (both seeds, both protocols; the benchmark file's header lists what moved). Every other
+row and the latency table are carried over from `c7c123f` (`results/` is not committed, ruling
+R24). Every number in this record comes from that report unless a line names another source. Protocol: T-53. Interpretation records: T-52
 to T-64 in [`009-trajectory-clarifications.md`](009-trajectory-clarifications.md).
 
 **What the re-run changed** (against the Task 4.1 run, code `8d4c1f1`). Every per-call and
@@ -18,9 +22,11 @@ decision number of every single-switch row and of the `gate` / `escalate` compos
 identical, and so are splice, session AUROC, the vital false-flag rate and the calibration
 selection. What moved: runaway halt recall with `sessions` + vital (spin now lags one call,
 T-58) and with `engine-traj`; the first-flag baseline of the `sessions` / `session_enforce` rows
-(seed 0: 3.51% → 3.77%, T-61's flags) and of `sessions+vital`; and `engine-traj`'s own rows by a
-little (seed 0 spec §5.2 allow-all blocks / approvals 2,798 / 2,933 → 2,795 / 2,935; seed 1
-oracle-reviewer Δ control FPR +0.1683 → +0.1650). Latency changed (T-60).
+(seed 0: 3.51% → 3.77%, T-61's flags) and of `sessions+vital`; `engine-traj`'s own rows by a
+little (seed 0 spec §5.2 allow-all blocks / approvals 2,798 / 2,933 → 2,796 / 2,935; seed 1
+oracle-reviewer Δ control FPR +0.1683 → +0.1650); and, from T-59's gate-only rule, one benign
+prerequisite block on seed 0 in every row with `gate` (6 → 7 blocks; see `gate`). Latency changed
+(T-60).
 
 ## The bench
 
@@ -61,7 +67,7 @@ the ratios are the comparable figures). ‡ = measured with four read tools lear
 | `sessions` | Decisions identical. Shadow halts at θ_halt = 0.6: false-halt 0.29% and 0.29%, runaway recall 0.819 and 0.794. | Identical decisions. False-halt 0.28% and 0.30%. | not a group | ×1.09 / ×1.08 | **on** (shadow: records and reports only), once T-51 is decided |
 | `provisional` ‡ | Δ benign FPR **−0.0011 [−0.0014, −0.0008]** and **−0.0020 [−0.0026, −0.0014]**. Δ control FPR 0.0000. Recall: magnitude_spike **−0.300 [−0.431, −0.173]** and **−0.364 [−0.500, −0.226]**; prereq_skip −0.333 (seed 0); exfil_volume −0.100 and −0.143. | Δ benign FPR **−0.0295** and **−0.0337**. Δ control FPR **−0.0472** and **−0.0180**. Recall: magnitude_spike **−0.320** and **−0.382**; splice **−0.423** and **−0.217**. Median benign θ 0.916 → 1.000 (seed 0; the T-36 drift). | 0 carried. Removing it **gains** 24 and 29 (spec §5.2 allow-all) and 24 and 30 (oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic)) attacks. | ×1.14 / ×1.15 | **off**: net-negative as built ‡ |
 | `seq_age_discount` | Scores move. No metric moves beyond ±0.0001. | Δ benign FPR +0.0001 [0.0000, 0.0002] (seed 0). | not a group | ×0.99 / ×0.97 | **off** (no measured benefit) |
-| `gate` ‡ | Blocks 510 → 6 and 631 → 13; approvals 575 → 1,079 and 543 → 1,161. The flagged set is unchanged (Δ 0). Unchanged by T-59 (only response / task-input refs ground an id). | Δ control FPR −0.0015 [−0.0048, 0.0000] (seed 0). | 0 | ×1.06 / ×1.12 | **off** until approvals are enforced (Tier 4) |
+| `gate` ‡ | Blocks 510 → 7 and 631 → 13; approvals 575 → 1,079 and 543 → 1,161. The flagged set moves by one call: T-59's gate-only rule blocks one benign call on seed 0 whose charge id was first used in an earlier call's arguments (the T-59 residual: reviewer load, not a bypass); Δ benign FPR +0.0000 [0.0000, 0.0001]. | Δ control FPR −0.0015 [−0.0048, 0.0000] (seed 0). | 0 | ×1.06 / ×1.12 | **off** until approvals are enforced (Tier 4) |
 | `escalate` ‡ | Decisions identical. Escalation rate on benign test rows 0.67% and 0.73% (bar 2%). Δ control FPR 0.0000, so it does not lower control FPR (F5). | Identical decisions. Escalation rate 1.47% and 1.67%. | not a group | ×1.04 / ×1.05 (was ×1.32 before T-60) | **off**: no decision changes without a judge |
 | `session_enforce` | Δ benign FPR **+0.0027 [0.0019, 0.0037]** and **+0.0041 [0.0029, 0.0055]**. Blocks 510 → 799 and 631 → 934. | Δ benign FPR **+0.0026** and **+0.0037**. | not a group | ×1.09 / ×1.07 | **off** (enforcement is Tier 4; T-47 is pending) |
 | `authority` | Blocks 510 → 485 and 631 → 588. The flagged set is unchanged (Δ 0). | Δ benign FPR −0.0000 and **−0.0014 [−0.0017, −0.0010]**. | not a group | ×1.03 / ×0.99 | **on** candidate: it never raises a decision, and the user decides |
@@ -69,8 +75,8 @@ the ratios are the comparable figures). ‡ = measured with four read tools lear
 
 Bold = the CI excludes 0.
 
-- **Composite rows.** `gate+flow_ledger` behaves like `gate`: 6 and 13 blocks, Δ 0 under spec
-  §5.2 allow-all. `escalate+gate+flow_ledger` restores confirmed blocks (426 and 449) with
+- **Composite rows.** `gate+flow_ledger` behaves like `gate`: 7 and 13 blocks, Δ benign FPR
+  +0.0000 under spec §5.2 allow-all. `escalate+gate+flow_ledger` restores confirmed blocks (427 and 449) with
   escalation rates of 0.66% and 0.71%, and its Δ control FPR is 0.0000. `sessions+vital` is the
   F7 shadow configuration in the `vital` row.
 - **Which switches move a score** (corrected, final review m2). Under spec §5.2 allow-all only
@@ -183,7 +189,11 @@ datasets (T-56).
 | F10 removing a group changes exactly its rows | xfail: removing `provisional` gains 24 / 29 attacks (also magnitude, velocity, sequence 1–5) | xfail: `provisional` gains 24 / 30 (also magnitude 1–2, vital 2, velocity 1) |
 
 Result of the re-run: 9 passed, 7 xfailed (strict) in 16 min (`AFW_TRAJ_TRACES=traces/bench`,
-4 workers, load average 4.0 at start), the same pass / xfail pattern as Task 4.1.
+4 workers, load average 4.0 at start), the same pass / xfail pattern as Task 4.1. That run was on
+`9413905`, before R28 reverted T-59's ledger change; it was not repeated after it. The rows the
+criteria read are unchanged by the revert (`vital`, `escalate`, `provisional`, the attribution)
+or move below the precision of the table (`engine-traj-shadow` max sensitivity step 0.0167 →
+0.0168 on seed 0; first-flag false halts unchanged).
 
 The table's T-20 totals hold by construction (`tabulate` guarantees them), so they are not
 evidence and are not asserted. F10's real criterion is the literal no-gain check (T-52), and that

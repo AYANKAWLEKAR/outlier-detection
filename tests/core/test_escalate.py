@@ -83,11 +83,14 @@ def traj(r: DetectorResult) -> TrajectoryInfo:
 
 
 def history(clock: Clock, n: int) -> list[RawCall]:
-    """``n`` benign sessions (as ``test_gate.warm``): look a charge up, then refund it."""
+    """``n`` benign sessions (as ``test_gate.warm``, but each charge seeded by the task):
+    look a charge up, then refund it."""
     out: list[RawCall] = []
     for i in range(n):
         sid, ch = f"w{i:03d}", charge(i)
-        out += [lookup(clock, sid, 0, ch), refund(clock, sid, 1, ch, 20.0 + (i % 7) * 3.5)]
+        # valid sessions: the task supplied the charge (T-59: a lookup's echo grounds nothing)
+        first = lookup(clock, sid, 0, ch, task_ids=(ch,))
+        out += [first, refund(clock, sid, 1, ch, 20.0 + (i % 7) * 3.5)]
     return out
 
 
@@ -102,7 +105,9 @@ def warm_engine(
 def spike(clock: Clock) -> list[RawCall]:
     """G-c: a charge looked up, then refunded with an absurd amount in the same session."""
     ch = charge(777)
-    return [lookup(clock, "big", 0, ch), refund(clock, "big", 1, ch, amount=9_000_000.0)]
+    # the task supplied the charge (T-59: a lookup's echo does not ground an args-first id)
+    first = lookup(clock, "big", 0, ch, task_ids=(ch,))
+    return [first, refund(clock, "big", 1, ch, amount=9_000_000.0)]
 
 
 def spike_on(eng: Engine, clock: Clock) -> DetectorResult:
@@ -328,9 +333,8 @@ def test_audit_fields_filled() -> None:
     t = traj(r)
     assert t.escalated and t.fast_score == r.fused_score
     assert t.escalated_score == pytest.approx(r.fused_score)
-    ok = run_session(
-        eng, [lookup(clock, "ok", 0, charge(500)), refund(clock, "ok", 1, charge(500))]
-    )
+    ch = charge(500)  # supplied by the task (T-59)
+    ok = run_session(eng, [lookup(clock, "ok", 0, ch, task_ids=(ch,)), refund(clock, "ok", 1, ch)])
     for res in ok:  # a reversible lookup and a valid refund: nothing escalated
         assert traj(res).escalated is False
         assert traj(res).fast_score is None and traj(res).escalated_score is None
