@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import json
 import subprocess
 import sys
@@ -48,15 +49,19 @@ def test_normalizer_files_exist_and_hash_is_cwd_independent(tmp_path: Path) -> N
 
 
 def test_seeded_constants_are_engine_defaults() -> None:
+    """Every constant named like an EngineConfig field equals the engine default (the seeded five);
+    other keys are recorded selections that no engine reads (Task 4.1: ``*_selected_cal``)."""
     c = EngineConfig()
     got = load_calibrated()
-    assert got.constants == {
+    fields = {f.name for f in dataclasses.fields(EngineConfig)}
+    assert {k: v for k, v in got.constants.items() if k in fields} == {
         "z0": c.z0,
         "tau": c.tau,
         "prereq_rate": c.prereq_rate,
         "cal_alpha": c.cal_alpha,
         "novelty_full_n": float(c.novelty_full_n),
     }
+    assert all(k.endswith("_selected_cal") for k in got.constants if k not in fields)
     assert got.history[0] == "2026-11-11 initial stamp: tiers 0-2 constants"
 
 

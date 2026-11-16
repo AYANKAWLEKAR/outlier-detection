@@ -205,6 +205,10 @@ class ActionEnvelope:
     call_fp: int = 0
     recent: tuple[RecentCall, ...] = ()
     delta_i: float | None = None
+    # ``fingerprint.arg_tokens(flat_args)``, computed once by ``normalize`` (Task 4.1, latency):
+    # the loop near-duplicate check and ``SessionTracker.observe`` read it. ``None`` (an
+    # envelope built without ``normalize``): both compute it from ``flat_args``, same value.
+    arg_tokens: frozenset[int] | None = None
 
 
 class Label(BaseModel):

@@ -185,7 +185,7 @@ class SessionTracker:
                 seq_no=e.seq_no,
                 tool_id=e.tool_id,
                 call_fp=call_fingerprint(e.tool_id, e.flat_args),
-                arg_tokens=arg_tokens(e.flat_args),
+                arg_tokens=arg_tokens(e.flat_args) if e.arg_tokens is None else e.arg_tokens,
                 error=rm is not None and rm.error,
                 delta_i=_delta_i(s.fps, fp),
                 new_artifacts=created,
@@ -281,4 +281,5 @@ def normalize(raw: RawCall, tracker: SessionTracker) -> ActionEnvelope:
         call_fp=call_fingerprint(raw.tool_id, flat),
         recent=recent,
         delta_i=delta,
+        arg_tokens=arg_tokens(flat),
     )

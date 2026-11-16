@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from agentfw.bench.baselines.isolation_forest import IsolationForestBaseline
@@ -15,18 +16,46 @@ from agentfw.bench.protocol import Detector
 from agentfw.core.config import EngineConfig
 from agentfw.core.engine import ALL_DETECTORS, DETECTOR_ORDER, KNOWN_DETECTORS, Engine
 
-__all__ = ["DETECTORS", "ENGINE_VARIANTS", "make_bench_detector", "make_detector"]
+__all__ = [
+    "DETECTORS",
+    "ENGINE_VARIANTS",
+    "TRAJ_SWITCHES",
+    "make_bench_detector",
+    "make_detector",
+]
+
+#: Every trajectory switch on (F1-F8; Task 4.1's ``engine-traj``): the ``EngineConfig`` fields
+#: whose defaults (T-03) keep today's behaviour. ``vital`` is a detector, enabled by the variant.
+TRAJ_SWITCHES: Mapping[str, object] = MappingProxyType(
+    {
+        "flow_ledger": True,
+        "sessions": True,
+        "provisional": True,
+        "seq_age_discount": True,
+        "gate": True,
+        "escalate": True,
+        "session_enforce": True,
+        "authority": True,
+        "br_mode": "modulate",
+    }
+)
 
 
 def _engine(
-    enabled: frozenset[str] = ALL_DETECTORS, *, priors: bool = True
+    enabled: frozenset[str] = ALL_DETECTORS,
+    *,
+    priors: bool = True,
+    switches: Mapping[str, object] | None = None,
 ) -> Callable[..., Engine]:
-    """Engine factory for one ablation; ``priors=False`` forces ``priors_mode="off"``."""
+    """Engine factory for one ablation; ``priors=False`` forces ``priors_mode="off"``;
+    ``switches`` are set on top of the given (or default) config."""
 
     def make(cfg: EngineConfig | None = None, **kw: Any) -> Engine:
         cfg = EngineConfig() if cfg is None else cfg
         if not priors:
             cfg = cfg.replace(priors_mode="off")
+        if switches:
+            cfg = cfg.replace(**switches)
         return Engine(cfg, enabled=enabled, **kw)
 
     return make
@@ -44,6 +73,8 @@ DETECTORS: dict[str, Callable[..., Detector]] = {
     # v1 + the vital signs (F2). Vital scores are never fused (T-07), so this variant's fused
     # scores equal "engine"'s; no engine-no-vital / engine-only-vital ablations.
     "engine-vital": _engine(KNOWN_DETECTORS),
+    # Every trajectory switch on (Task 4.1): v1 + vital, TRAJ_SWITCHES set on the given config.
+    "engine-traj": _engine(KNOWN_DETECTORS, switches=TRAJ_SWITCHES),
 }
 
 

@@ -81,7 +81,7 @@ class VitalDetector:
                 ev["exempt"] = True
                 return 0.0, ev
             return (_DUP_FIRST if len(matches) == 1 else 1.0), ev
-        toks = arg_tokens(e.flat_args)
+        toks = arg_tokens(e.flat_args) if e.arg_tokens is None else e.arg_tokens
         best: RecentCall | None = None
         best_j = 0.0
         for rc in reversed(window):

@@ -147,7 +147,7 @@ from agentfw.core.trajectory.authority import grade
 from agentfw.core.trajectory.decide import HALT_REASON, decide, session_overlay
 from agentfw.core.trajectory.escalate import Judge
 from agentfw.core.trajectory.flags import Flag, derive_flags
-from agentfw.core.trajectory.session import SessionBook, SessionRecord
+from agentfw.core.trajectory.session import SessionBook, SessionRecord, ladder
 
 __all__ = ["ALL_DETECTORS", "DETECTOR_ORDER", "KNOWN_DETECTORS", "VITAL", "Engine"]
 
@@ -387,14 +387,15 @@ class Engine:
             scratch = SessionRecord() if rec is None else rec.copy()
             theta_eff = traj.threshold_eff
             flags |= provisional.advance(scratch, e, fr.fused, theta_eff, per, self.cfg)
+        halted = rec is not None and rec.halted  # before this call (T-43)
+        density = book.density_with(rec, flags)
         traj = dataclasses.replace(
             traj,
             flags=frozenset(flags),
-            density=book.density_with(rec, flags),
-            session_verdict=book.verdict_with(rec, flags),
+            density=density,
+            session_verdict=ladder(density, halted, self.cfg),  # = book.verdict_with, computed once
             session_mass=book.mass_with(rec, fr.fused),
         )
-        halted = rec is not None and rec.halted  # before this call (T-43)
         decision, traj = session_overlay(decision, traj, halted, self.cfg)
         if self.cfg.session_enforce and halted:
             fr = FusionResult(fr.fused, (HALT_REASON, *fr.reasons))

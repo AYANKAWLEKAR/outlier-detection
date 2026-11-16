@@ -22,6 +22,7 @@ Everything here is a pure function of its arguments; the engine supplies ``is_wr
 
 from __future__ import annotations
 
+import functools
 import math
 import re
 from collections.abc import Iterable, Mapping
@@ -74,7 +75,10 @@ def _clip(x: float, lo: float = 0.0, hi: float = 1.0) -> float:
     return min(hi, max(lo, x))
 
 
-def _tokens(name: str) -> set[str]:
+@functools.lru_cache(maxsize=4096)
+def _tokens(name: str) -> frozenset[str]:
+    """Name tokens; memoized (a pure function of the name; tool and path names repeat on every
+    call, so this keeps the lexical source off the score path's critical cost; Task 4.1)."""
     out: set[str] = set()
     for part in _SPLIT.split(_CAMEL.sub("_", name)):
         if part:
@@ -82,7 +86,7 @@ def _tokens(name: str) -> set[str]:
             out.add(t)
             if len(t) > 1 and t.endswith("s"):
                 out.add(t[:-1])
-    return out
+    return frozenset(out)
 
 
 def lexical(tool_id: str, flat_paths: Iterable[str], field_hints: Mapping[str, FieldHint]) -> float:
