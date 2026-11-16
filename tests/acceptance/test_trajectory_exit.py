@@ -126,7 +126,8 @@ def test_f2_benign_vital_false_flag_rate_at_most_1pct(
 
 _F5 = (
     "F5 unmet: escalate leaves the decision control FPR unchanged ({}); without a judge the "
-    "Python re-score equals the fast score (T-12, T-42), so escalation changes no decision"
+    "Python re-score is the fast score (T-12, T-42; reused since T-60), so escalation changes no "
+    "decision"
 )
 
 
@@ -223,7 +224,7 @@ _F10 = (
         ),
         review=_F10.format(
             "seed 0: provisional 24, magnitude 2, vital 2; "
-            "seed 1: provisional 30, magnitude 2, novelty 1, velocity 1"
+            "seed 1: provisional 30, magnitude 1, velocity 1 (re-measured on c7c123f, T-64)"
         ),
     ),
 )
