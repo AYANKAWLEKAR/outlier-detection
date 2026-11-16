@@ -64,7 +64,7 @@ def test_values_json_cannot_carry_normalize_and_observe() -> None:
     for i, args in enumerate([{"n": 10**5000}, {"s": "x\ud800y"}, {"k\udc00": -(2**70)}]):
         e = make_env(make_raw(seq_no=i, args=args), t)
         t.observe(e)
-        assert e.call_fp != 0 and t.recent("s1")[0][-1].call_fp == e.call_fp
+        assert e.call_fp != 0 and t.recent("s1")[-1].call_fp == e.call_fp
 
 
 def test_tracker_is_causal_and_bounded() -> None:

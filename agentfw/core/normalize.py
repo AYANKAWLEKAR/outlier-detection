@@ -4,7 +4,9 @@ Session context per ``session_id`` (``SessionTracker``): the last ``k`` tools, t
 (Bloom beyond ``max_ids``), the previous response, the artifact ledger (F1) and the recent-call
 ring of the vital signs (F2): the last ``RECENT_MAX`` completed calls as ``RecentCall`` plus
 their response fingerprints. ``normalize`` copies the ring to ``ActionEnvelope.recent`` and
-computes the call's ``call_fp`` and ``delta_i``; ``observe`` appends the call.
+computes the call's ``call_fp``; ``observe`` computes the call's ``delta_i`` and appends it. The
+envelope never carries anything derived from its own response (``response_meta`` aside, which
+only ``update`` reads): a proxy scores a call before it has one (T-58).
 """
 
 from __future__ import annotations
@@ -138,16 +140,14 @@ class SessionTracker:
         s = self._sessions.get(session_id)
         return None if s is None else s.ledger
 
-    def recent(
-        self, session_id: str, fp: tuple[int, ...] | None = None
-    ) -> tuple[tuple[RecentCall, ...], float | None]:
-        """(the session's ring, oldest first; ``delta_i`` of a response fingerprint ``fp``)."""
+    def recent(self, session_id: str) -> tuple[RecentCall, ...]:
+        """The session's ring of completed calls, oldest first."""
         s = self._sessions.get(session_id)
         if s is None:
-            return (), (None if fp is None else 1.0)
+            return ()
         if s.recent_t is None:
             s.recent_t = tuple(s.recent)
-        return s.recent_t, _delta_i(s.fps, fp)
+        return s.recent_t
 
     def _add_id(self, s: _Session, v: str) -> None:
         if v in s.ids or (s.bloom is not None and v in s.bloom):
@@ -258,8 +258,6 @@ def normalize(raw: RawCall, tracker: SessionTracker) -> ActionEnvelope:
     prior_tools, ids_seen, prev = tracker.snapshot(raw.session_id)
     ledger = tracker.ledger(raw.session_id)
     refs = (_EMPTY_LEDGER if ledger is None else ledger).refs_for(flat, raw.task_ids)
-    rm = raw.response_meta
-    recent, delta = tracker.recent(raw.session_id, None if rm is None else rm.fp)
     return ActionEnvelope(
         envelope_id=raw.envelope_id,
         schema_version=raw.schema_version,
@@ -279,7 +277,6 @@ def normalize(raw: RawCall, tracker: SessionTracker) -> ActionEnvelope:
         ledger_refs=refs,
         task_ids=raw.task_ids,
         call_fp=call_fingerprint(raw.tool_id, flat),
-        recent=recent,
-        delta_i=delta,
+        recent=tracker.recent(raw.session_id),
         arg_tokens=arg_tokens(flat),
     )

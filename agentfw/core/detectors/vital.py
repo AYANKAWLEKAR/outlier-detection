@@ -4,7 +4,9 @@ These are the reference-free per-step signals of the L1 layer in arXiv:2610.1237
 and rebuilt on fingerprints instead of embeddings: is the agent repeating a call, are its calls
 returning nothing new, is the session producing no new artifacts. They need no per-agent state
 and no configuration per tool; everything is read from the envelope (``call_fp``, ``recent``,
-``delta_i``, ``flat_args``, ``ResponseMeta.error``), never from response content.
+``flat_args``), never from response content. Every response-derived input (``RecentCall.error``,
+``delta_i``, ``new_artifacts``) is a *completed* call's, from the ring: the current call's own
+response does not exist yet when a proxy scores it, so it is never read (T-58).
 
 Each call gets three scores, fields ``__loop__``, ``__spin__`` and ``__stall__``:
 
@@ -15,8 +17,9 @@ Each call gets three scores, fields ``__loop__``, ``__spin__`` and ``__stall__``
   errored matches (most recent first) is at most ``vital_r_max``. With no exact match, a call
   of the same tool whose arg-token Jaccard is >= ``vital_jaccard`` is a near-duplicate: 0.7,
   or 0 when that call errored (a corrected retry).
-* **Spin.** 1.0 when the last ``vital_w_spin`` calls *including this one* each have a
-  fingerprinted response with ``delta_i < vital_spin_di`` and none errored; else 0.
+* **Spin.** Over the last ``vital_w_spin`` completed calls (0 while there are fewer): 1.0 when
+  each has a fingerprinted response with ``delta_i < vital_spin_di`` and none errored; else 0.
+  Like stall, it lags the call that completes the window by one call (T-58).
 * **Stall.** Over the last ``vital_w_stall`` completed calls (0 while there are fewer): 1.0 when
   none created a ledger artifact and none is a write; else 0.5 when every one is a read with
   ``delta_i < vital_stall_di`` (busy re-reading, even if an id trickles in); else 0.
@@ -100,14 +103,12 @@ class VitalDetector:
 
     def _spin(self, e: ActionEnvelope) -> tuple[float, dict[str, object]]:
         cfg = self._cfg
-        need = cfg.vital_w_spin - 1
-        rm = e.response_meta
-        own_error = rm is not None and rm.error
-        prior = e.recent[-need:] if need > 0 else ()
-        ev: dict[str, object] = {"observed": e.delta_i}
-        if len(prior) < need or e.delta_i is None or own_error or e.delta_i >= cfg.vital_spin_di:
+        w = cfg.vital_w_spin
+        window = e.recent[-w:]
+        ev: dict[str, object] = {"observed": window[-1].delta_i if window else None}
+        if len(window) < w:
             return 0.0, ev
-        for rc in prior:
+        for rc in window:
             if rc.error or rc.delta_i is None or rc.delta_i >= cfg.vital_spin_di:
                 return 0.0, ev
         return 1.0, ev

@@ -200,11 +200,10 @@ class ActionEnvelope:
     blast_radius: float | None = None
     ledger_refs: tuple[LedgerRef, ...] = ()
     task_ids: tuple[str, ...] = ()
-    # Vital signs (F2): this call's fingerprint, the session's completed calls before it (oldest
-    # first, at most 32) and this call's own information gain against them (see RecentCall).
+    # Vital signs (F2): this call's fingerprint and the session's completed calls before it
+    # (oldest first, at most 32). Nothing derived from this call's own response (T-58).
     call_fp: int = 0
     recent: tuple[RecentCall, ...] = ()
-    delta_i: float | None = None
     # ``fingerprint.arg_tokens(flat_args)``, computed once by ``normalize`` (Task 4.1, latency):
     # the loop near-duplicate check and ``SessionTracker.observe`` read it. ``None`` (an
     # envelope built without ``normalize``): both compute it from ``flat_args``, same value.

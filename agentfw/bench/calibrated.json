@@ -14,7 +14,8 @@
     "2026-11-11 add fingerprint.py and ledger.py to NORMALIZER_FILES; no calibrated constant depends on either yet",
     "2026-11-11 Task 1.5: normalize.py adds the recent-call ring (call_fp, recent, delta_i); ledger.py record() returns the new-artifact count; fingerprint.py call_fingerprint/arg_tokens accept ints beyond 64 bits and lone surrogates (unchanged for every value they accepted before); no calibrated constant depends on any of these",
     "2026-11-12 Task 4.1: normalize.py precomputes ActionEnvelope.arg_tokens (the same fingerprint.arg_tokens value the vital detector and observe computed before); no output changes, no calibrated constant depends on it",
-    "2026-11-12 Task 4.1: calibration-partition selection theta_halt_selected_cal=0.2, theta_warn undefined (theta_halt is the grid floor) (engine-traj-shadow, allow, seed 0; benign false-halt <= 1%, warn rate <= 5%); recorded only, EngineConfig defaults unchanged; not for deployment: decision 010 keeps 0.33/0.6; 3-agent calibration partition too small"
+    "2026-11-12 Task 4.1: calibration-partition selection theta_halt_selected_cal=0.2, theta_warn undefined (theta_halt is the grid floor) (engine-traj-shadow, allow, seed 0; benign false-halt <= 1%, warn rate <= 5%); recorded only, EngineConfig defaults unchanged; not for deployment: decision 010 keeps 0.33/0.6; 3-agent calibration partition too small",
+    "2026-11-16 final review I1 (T-58): normalize.py no longer computes the current call's delta_i (ActionEnvelope.delta_i removed; SessionTracker.recent returns the ring only); every completed call's delta_i is unchanged; no calibrated constant depends on it"
   ],
-  "normalizer_hash": "a3027dc0a4c324e7f210ca6dfd3569eadd01e79087db4b504356b0de971e21db"
+  "normalizer_hash": "14c41d6ecf2518bd7afceeb41f24d6fdbb5e723e19d0731426c6de4bd3535187"
 }

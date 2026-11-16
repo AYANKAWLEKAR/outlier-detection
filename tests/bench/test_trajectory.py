@@ -290,7 +290,8 @@ def test_calibrated_json_records_the_rejected_selection_honestly() -> None:
     assert {k for k in c.constants if k not in fields} == {"theta_halt_selected_cal"}
     assert c.constants["theta_halt_selected_cal"] == 0.2
     assert all(c.constants[k] == getattr(EngineConfig(), k) for k in c.constants if k in fields)
-    last = c.history[-1]
+    # the latest selection line (restamps for unrelated normalizer changes may follow it)
+    last = [h for h in c.history if "calibration-partition selection" in h][-1]
     assert "theta_halt_selected_cal=0.2" in last and "theta_warn undefined" in last
     assert "not for deployment" in last and "0.33/0.6" in last
     assert (EngineConfig().theta_warn, EngineConfig().theta_halt) == (0.33, 0.6)

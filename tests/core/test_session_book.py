@@ -239,9 +239,9 @@ def test_recording_and_density_follow_the_one_session_gate() -> None:  # T-34, r
 
 def test_engine_density_over_a_loop() -> None:
     res = run_session(engine(), [read_call(i) for i in range(6)])
-    # loop 1.0 from call 2 on (T-08), spin from call 4: one weight per call, not two
+    # loop 1.0 from call 2 on (T-08), spin from call 5 (T-58): one weight per call, not two
     assert [Flag.LOOP in flags_of(r) for r in res] == [False, False, True, True, True, True]
-    assert Flag.SPIN in flags_of(res[4])
+    assert [Flag.SPIN in flags_of(r) for r in res] == [False] * 5 + [True]
     assert [density_of(r) for r in res] == pytest.approx([0, 0, 1 / 6, 2 / 6, 3 / 6, 4 / 6])
 
 

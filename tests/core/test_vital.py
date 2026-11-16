@@ -141,11 +141,42 @@ def test_polling_needs_both_annotations() -> None:
 # -- spin -----------------------------------------------------------------------------------
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="T-58 (final review I1): spin reads completed calls only, so it first fires at index 5, "
+    "not <= 4: the response repeats from call 1, and calls 1-4 complete the window only when "
+    "call 5 is scored. The bar assumed the current call's own response (T-27), which a proxy "
+    "does not have at score time. Bar kept; the measured index is pinned below.",
+)
 def test_spin_within_w_spin() -> None:  # varying args, identical fp
     raws = [call(i, {"q": f"query {i}"}) for i in range(8)]
     spin_scores = scores(run_session(engine(), raws), "__spin__")
     assert first_index(spin_scores, 1.0) <= 4
     assert spin_scores[:4] == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_spin_fires_once_w_spin_completed_calls_repeat() -> None:  # T-58: one call of lag
+    raws = [call(i, {"q": f"query {i}"}) for i in range(8)]
+    spin_scores = scores(run_session(engine(), raws), "__spin__")
+    assert spin_scores == [0.0] * 5 + [1.0] * 3  # ring = calls 1-4 (delta_i 0) at index 5
+
+
+def test_spin_ignores_the_current_calls_response() -> None:  # T-58 (final review I1)
+    """A proxy scores a call before its response exists: the spin score of a call is the same
+    with and without its own ``response_meta`` (errored or fresh included)."""
+    raws = [call(i, {"q": f"query {i}"}) for i in range(6)]
+    tr = SessionTracker()
+    run_session(engine(), raws, tracker=tr)
+    det = VitalDetector(EngineConfig(), {}, lambda agent, tool: False)
+    metas = (
+        None,
+        ResponseMeta(item_count=3, fp=FP),
+        ResponseMeta(item_count=3, error=True, fp=FP),
+        ResponseMeta(item_count=3, fp=_fp(99)),
+    )
+    out = [det.score(normalize(call(6, {"q": "q6"}, meta=m), tr), None) for m in metas]  # type: ignore[arg-type]
+    assert all(o == out[0] for o in out)
+    assert [s.score for s in out[0] if s.field == "__spin__"] == [1.0]
 
 
 def test_spin_off_when_responses_change() -> None:
@@ -169,7 +200,7 @@ def test_errored_or_fp_less_calls_never_count_as_spin() -> None:  # Review Focus
     tr = SessionTracker()
     run_session(engine(), no_meta + no_fp, tracker=tr)
     e = normalize(make_raw(**_kw(12)), tr)
-    assert all(rc.delta_i is None for rc in e.recent) and e.delta_i is None
+    assert all(rc.delta_i is None for rc in e.recent)
 
 
 def _kw(j: int) -> dict[str, Any]:
@@ -255,7 +286,7 @@ def test_envelope_ring_fields() -> None:
         delta_i=0.0,
         new_artifacts=1,
     )
-    assert e.delta_i == 0.0  # the probe's own response matches the ring
+    assert not hasattr(e, "delta_i")  # T-58: nothing from the call's own response
 
 
 def test_new_artifacts_counts_ledger_entries_created() -> None:
@@ -300,7 +331,7 @@ def test_tracker_dump_load_round_trips_the_ring(tmp_path: Path) -> None:
     for sid in ("s0", "s1", "s9"):
         probe = call(99, {"q": "q 1"}, session=sid, meta=ResponseMeta(item_count=3, fp=FP))
         a, b = normalize(probe, tr), normalize(probe, tr2)
-        assert a.recent == b.recent and a.delta_i == b.delta_i and a.call_fp == b.call_fp
+        assert a.recent == b.recent and a.call_fp == b.call_fp
     tr2.dump(tmp_path / "again.jsonl")
     assert (tmp_path / "again.jsonl").read_bytes() == p.read_bytes()
 

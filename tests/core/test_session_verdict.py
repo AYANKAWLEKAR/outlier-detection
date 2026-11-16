@@ -246,7 +246,10 @@ def test_evicted_idle_session_restarts_ok() -> None:
     run_session(eng, [_late("other", 1)], tr)
     assert eng.store.get(key_sess("w")) is None
     back = run_session(eng, [read_call(9, session="w", fresh=True, ts=T0 + 7_200_000)], tr)
-    assert verdicts(back) == [OK] and traj_of(back[0]).density == 0.0
+    # The record restarted: the window holds this call only. Spin reads the tracker's ring of
+    # completed calls (T-58), which outlives the evicted record, so calls 1-4 still raise SPIN.
+    assert verdicts(back) == [OK] and traj_of(back[0]).flags == {Flag.SPIN}
+    assert traj_of(back[0]).density == pytest.approx(1 / 6)
     rec = stored(eng, "w")
     assert rec.n_calls == 1 and [s for s, _ in rec.window] == [9]
 

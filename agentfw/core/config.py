@@ -115,9 +115,9 @@ class EngineConfig:
     # Vital signs (F2, Task 1.5; opt-in through ``Engine(enabled=...)``, never fused: T-07).
     # Loop: exact ``call_fp`` matches in the last ``vital_w_loop`` calls (``vital_w_loop_polling``
     # for read-only + idempotent tools), retries of an errored call exempt up to ``vital_r_max``;
-    # an arg-token Jaccard >= ``vital_jaccard`` is a near-duplicate. Spin: ``vital_w_spin`` calls
-    # with ``delta_i < vital_spin_di``. Stall: ``vital_w_stall`` calls without a new artifact, or
-    # reads with ``delta_i < vital_stall_di``.
+    # an arg-token Jaccard >= ``vital_jaccard`` is a near-duplicate. Spin: ``vital_w_spin``
+    # completed calls with ``delta_i < vital_spin_di`` (T-58). Stall: ``vital_w_stall`` completed
+    # calls without a new artifact, or reads with ``delta_i < vital_stall_di``.
     vital_w_loop: int = 8
     vital_w_loop_polling: int = 32
     vital_r_max: int = 3
