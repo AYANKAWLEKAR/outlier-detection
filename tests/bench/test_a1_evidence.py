@@ -146,6 +146,33 @@ def test_merge_refuses_an_incomplete_set_of_cells(
     assert list(out.iterdir()) == []
 
 
+@pytest.mark.parametrize("stale", ["cell", "manifest"])
+def test_merge_refuses_cells_of_different_dataset_versions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stale: str
+) -> None:
+    mod = _measure()
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr(mod, "HERE", out)
+    cells = tmp_path / "cells"
+    cells.mkdir()
+    for d in SEEDS01:
+        traces = tmp_path / "traces" / d
+        traces.mkdir(parents=True)
+        sha = "a" * 64
+        if stale == "manifest" and d == "sw1-seed0":
+            sha = "b" * 64  # regenerated after its cells were replayed
+        (traces / "manifest.json").write_bytes(orjson.dumps({"files": {"traces.jsonl": sha}}))
+        for i, c in enumerate(CELLS):
+            cell_sha = "c" * 12 if stale == "cell" and d == "sw1-seed1" and i == 0 else "a" * 12
+            (cells / f"{d}--{c}.json").write_bytes(
+                orjson.dumps({"traces": str(traces), "dataset_sha": cell_sha})
+            )
+    with pytest.raises(SystemExit, match="dataset"):
+        mod.merge(cells)
+    assert list(out.iterdir()) == []
+
+
 def _a1_review_over_bound(m: dict[str, Any]) -> list[float]:
     return [
         r["control_fpr"]

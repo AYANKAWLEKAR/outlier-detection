@@ -223,10 +223,33 @@ def _missing_cells(cells_dir: Path) -> list[str]:
     return missing
 
 
+def _stale_cells(cells_dir: Path) -> list[str]:
+    """Datasets whose cells disagree on ``dataset_sha`` with one another or with the traces'
+    current manifest (a dataset regenerated after some of its cells were replayed)."""
+    stale: list[str] = []
+    for d in DATASETS.values():
+        cs = [orjson.loads(p.read_bytes()) for p in sorted(cells_dir.glob(f"{d}--*.json"))]
+        if not cs:
+            continue
+        shas = {str(c.get("dataset_sha")) for c in cs}
+        dirs = {str(c.get("traces")) for c in cs}
+        if len(dirs) == 1:
+            manifest = orjson.loads((Path(dirs.pop()) / "manifest.json").read_bytes())
+            shas.add(str(manifest["files"]["traces.jsonl"])[:12])
+        else:
+            shas.add(f"{len(dirs)} traces directories")
+        if len(shas) != 1:
+            stale.append(f"{d} {sorted(shas)}")
+    return stale
+
+
 def merge(cells_dir: Path) -> None:
     missing = _missing_cells(cells_dir)
     if missing:  # never overwrite the matrix with part of it
         raise SystemExit("merge: cell files missing: " + ", ".join(missing))
+    stale = _stale_cells(cells_dir)
+    if stale:  # never merge cells of different dataset versions
+        raise SystemExit("merge: cells of different dataset versions: " + "; ".join(stale))
     rows: list[dict[str, Any]] = []
     counts: dict[str, dict[str, int]] = {}
     cens: dict[str, dict[str, Any]] = {}
