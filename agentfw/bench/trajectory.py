@@ -869,12 +869,16 @@ def write_calibrated(
     path: Path = CALIBRATED_PATH,
     *,
     note: str = "",
+    curve: Sequence[tuple[float, float, int]] | None = None,
 ) -> None:
     """Record the selection in ``calibrated.json`` under keys that are no ``EngineConfig`` field
     (``theta_warn_selected_cal`` / ``theta_halt_selected_cal``; an undefined warn leaves its key
     out) with a history line ending in ``note``. A recorded value: no engine reads it, and the
     ``EngineConfig`` defaults are unchanged (T-03, T-54). ``ValueError`` when the file's
-    normalizer hash is stale: the selection was measured with the current normalizer."""
+    normalizer hash is stale: the selection was measured with the current normalizer. With the
+    ``curve`` the selection came from, the line states the benign shares at the selected
+    thresholds and whether each bound is met (a grid-top fallback is not; T-69); without it, the
+    bounds are marked not checked."""
     c = load_calibrated(path)
     if c.normalizer_hash != normalizer_hash():
         raise ValueError("calibrated.json is stale: restamp or recalibrate before recording")
@@ -887,13 +891,33 @@ def write_calibrated(
     c.constants["theta_halt_selected_cal"] = theta_halt
     line = (
         f"{datetime.date.today().isoformat()} Task 4.1: calibration-partition selection "
-        f"theta_halt_selected_cal={theta_halt}, {warn} ({where}; benign false-halt <= 1%, warn "
-        "rate <= 5%); recorded only, EngineConfig defaults unchanged"
+        f"theta_halt_selected_cal={theta_halt}, {warn} ({where}; "
+        f"{_bounds_clause(curve, theta_warn, theta_halt)}); recorded only, EngineConfig "
+        "defaults unchanged"
     )
     c.history.append(f"{line}; {note}" if note else line)
     path.write_bytes(
         orjson.dumps(c.model_dump(), option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS) + b"\n"
     )
+
+
+def _bounds_clause(
+    curve: Sequence[tuple[float, float, int]] | None, warn: float | None, halt: float
+) -> str:
+    """The history line's statement of the selection bounds (T-69)."""
+    if curve is None:
+        return (
+            f"bounds not checked: benign false-halt <= {FALSE_HALT_MAX:.0%}, warn rate <= "
+            f"{WARN_RATE_MAX:.0%}"
+        )
+    share = {t: s for t, s, _ in curve}
+
+    def part(name: str, theta: float, bound: float) -> str:
+        got = share[theta]
+        return f"{name} {got:.1%} (bound <= {bound:.0%}: {'met' if got <= bound else 'unmet'})"
+
+    w = "warn undefined" if warn is None else part("warn rate", warn, WARN_RATE_MAX)
+    return f"benign {part('false-halt', halt, FALSE_HALT_MAX)}, {w}"
 
 
 def rerender(report: dict[str, Any]) -> dict[str, Any]:
@@ -1065,13 +1089,23 @@ def _write(report: Mapping[str, Any], out: Path) -> None:
     print(f"wrote {out / REPORT_JSON} and {out / REPORT_MD}")
 
 
+def _source_curve(report: Mapping[str, Any]) -> list[tuple[float, float, int]] | None:
+    """The calibration curve behind :func:`selected_thetas` (``None`` when the report lacks it)."""
+    try:
+        seeds = report["protocols"]["allow"]["seeds"]
+        src = seeds[min(seeds, key=int)]["rows"][THETA_SOURCE_ROW]["sessions"]["halt"]
+        return [(c["theta"], c["benign_share"], c["n_benign"]) for c in src["calibration_curve"]]
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
 def _calibrate(report: Mapping[str, Any], note: str) -> None:
     """``ValueError`` unless the report was measured with the current normalizer (its
     ``meta.normalizer_hash``; a report without one cannot be checked and is rejected)."""
     if report["meta"].get("normalizer_hash") != normalizer_hash():
         raise ValueError("the report's normalizer hash is missing or stale: re-run the bench")
     warn, halt, where = selected_thetas(report)
-    write_calibrated(warn, halt, where, note=note)
+    write_calibrated(warn, halt, where, note=note, curve=_source_curve(report))
     print(f"calibrated.json: theta_warn={warn} theta_halt={halt} ({where})")
 
 

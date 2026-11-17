@@ -432,3 +432,23 @@ def test_render_markdown_reads_the_stored_theta_halt() -> None:
 
     assert _halt_theta({"a": {"theta_halt": 0.8}, "b": {"theta_halt": 0.8}}) == "θ_halt = 0.8"
     assert _halt_theta({"a": {"theta_halt": 0.6}, "b": {"theta_halt": 0.8}}) == "each row's θ_halt"
+
+
+def test_write_calibrated_marks_unmet_bounds(tmp_path: Path) -> None:
+    """A grid-top fallback is not recorded as meeting the bounds (T-69)."""
+    p = tmp_path / "c.json"
+    p.write_bytes(CALIBRATED_PATH.read_bytes())
+    unmet = calibration_curve(_sessions([1.0] * 5 + [0.0] * 45))  # 10% at every theta
+    warn, halt = select_from_curve(unmet)
+    write_calibrated(warn, halt, "test", p, curve=unmet)
+    line = load_calibrated(p).history[-1]
+    assert "false-halt 10.0% (bound <= 1%: unmet)" in line
+    assert "warn rate 10.0% (bound <= 5%: unmet)" in line
+    met = calibration_curve(_sessions([0.5] * 9 + [0.7] * 3 + [1.0] + [0.0] * 87))
+    w2, h2 = select_from_curve(met)
+    write_calibrated(w2, h2, "test", p, curve=met)
+    line = load_calibrated(p).history[-1]
+    assert "false-halt 1.0% (bound <= 1%: met)" in line
+    assert "warn rate 4.0% (bound <= 5%: met)" in line
+    write_calibrated(0.3, 0.55, "test", p)
+    assert "bounds not checked" in load_calibrated(p).history[-1]
