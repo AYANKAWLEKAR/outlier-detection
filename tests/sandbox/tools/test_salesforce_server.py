@@ -415,3 +415,25 @@ def test_org_query_error_refuses_without_echoing_it(tmp_path: Path) -> None:
         )
     text = "".join(str(x) for x in (info.value, info.value.__cause__, info.value.__context__))
     assert "SECRETSESSION" not in text and "RuntimeError" in text
+
+
+def test_run_soql_follows_every_page_and_charges_each(tmp_path: Path) -> None:
+    class Paged(_FakeSF):
+        def query(self, q: str) -> dict[str, Any]:
+            if "FROM Organization" in q:
+                return super().query(q)
+            self.calls.append(("QUERY", q))
+            return {"done": False, "nextRecordsUrl": "/next/1", "records": [{"Id": "a"}]}
+
+        def query_more(self, url: str, identifier_is_url: bool = False) -> dict[str, Any]:
+            assert identifier_is_url
+            self.calls.append(("MORE", url))
+            if url == "/next/1":
+                return {"done": False, "nextRecordsUrl": "/next/2", "records": [{"Id": "b"}]}
+            return {"done": True, "records": [{"Id": "c"}]}
+
+    sf = Paged()
+    budget = ApiBudget(tmp_path / "b.json", limit=10)
+    backend = LiveSalesforceBackend(_cfg(tmp_path), client=sf, budget=budget)
+    assert backend.run_soql("SELECT Id FROM Contact") == [{"Id": "a"}, {"Id": "b"}, {"Id": "c"}]
+    assert budget.remaining() == 10 - 1 - 3  # org check + three pages

@@ -307,7 +307,11 @@ class LiveSalesforceBackend:
 
     def run_soql(self, query: str) -> list[dict[str, Any]]:
         res = self._request(self._sf.query, validate_soql(query))
-        return [{k: v for k, v in r.items() if k != "attributes"} for r in res["records"]]
+        records = list(res["records"])
+        while not res.get("done", True) and res.get("nextRecordsUrl"):  # each page is a request
+            res = self._request(self._sf.query_more, res["nextRecordsUrl"], identifier_is_url=True)
+            records.extend(res["records"])
+        return [{k: v for k, v in r.items() if k != "attributes"} for r in records]
 
     def get_record(self, obj: str, record_id: str) -> dict[str, Any]:
         _check_object(obj)
