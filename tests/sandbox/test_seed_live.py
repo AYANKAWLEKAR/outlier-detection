@@ -32,5 +32,6 @@ def test_stripe_seed_twice_no_duplicates() -> None:
 def test_salesforce_seed_twice_no_duplicates() -> None:
     cfg = _cfg()
     company = build_company(0)
-    budget = ApiBudget(cfg.data_dir / "sf_budget.json", cfg.sf_daily_api_budget)
+    # the runner's budget file: the test and the runner share one org's daily budget
+    budget = ApiBudget(cfg.data_dir / "sf_api_budget.json", cfg.sf_daily_api_budget)
     assert seed_salesforce(cfg, company, budget) == seed_salesforce(cfg, company, budget)
