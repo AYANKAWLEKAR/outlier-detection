@@ -10,6 +10,7 @@ imports ``mcp``.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -85,14 +86,15 @@ class ToolSchema:
         captured_at: int,
     ) -> ToolSchema:
         """A schema as captured now: ``hash`` computed from the schema and annotations."""
-        h = schema_hash(input_schema, _annotations_row(annotations))
-        return cls(tool_id, input_schema, annotations, captured_at, h)
+        schema = copy.deepcopy(input_schema)  # the hash must keep describing the stored content
+        h = schema_hash(schema, _annotations_row(annotations))
+        return cls(tool_id, schema, annotations, captured_at, h)
 
     def to_row(self) -> dict[str, JsonValue]:
         annotations: dict[str, JsonValue] = dict(_annotations_row(self.annotations))
         return {
             "tool_id": self.tool_id,
-            "input_schema": self.input_schema,
+            "input_schema": copy.deepcopy(self.input_schema),
             "annotations": annotations,
             "captured_at": self.captured_at,
             "hash": self.hash,
@@ -108,7 +110,9 @@ class ToolSchema:
             raise ValueError(f"malformed schema row for {tool!r}")
         if isinstance(at, bool) or not isinstance(at, int):
             raise ValueError(f"captured_at must be an int, got {at!r}")
-        return cls(tool, schema, _annotations_from_row(row.get("annotations", {})), at, h)
+        return cls(
+            tool, copy.deepcopy(schema), _annotations_from_row(row.get("annotations", {})), at, h
+        )
 
 
 def load_schemas(path: Path) -> dict[str, ToolSchema]:

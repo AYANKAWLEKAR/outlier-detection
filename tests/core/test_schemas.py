@@ -242,3 +242,21 @@ def test_engine_vital_under_schema_auto_load_on_the_ci_dataset(tmp_path: Path) -
     x, y = changed[0]
     assert (x.tool_id, x.label) == ("salesforce.run_soql", "benign")
     assert (_vital_scores(x)[LOOP], _vital_scores(y)[LOOP]) == (0.7, 1.0)
+
+
+def test_captured_schema_is_independent_of_caller_mutations() -> None:
+    from agentfw.core.hints import ToolAnnotations
+    from agentfw.core.schemas import ToolSchema, schema_hash
+
+    src = {"type": "object", "properties": {"id": {"type": "string"}}}
+    s = ToolSchema.capture("t", src, ToolAnnotations(), 1)  # type: ignore[arg-type]
+    src["properties"]["id"]["type"] = "integer"  # type: ignore[index]
+    row = s.to_row()
+    assert row["input_schema"]["properties"]["id"]["type"] == "string"  # type: ignore[index]
+    row["input_schema"]["properties"]["id"]["type"] = "integer"  # type: ignore[index]
+    assert s.to_row()["hash"] == schema_hash(s.to_row()["input_schema"], {})  # type: ignore[arg-type]
+    back = ToolSchema.from_row(s.to_row())
+    raw = s.to_row()
+    again = ToolSchema.from_row(raw)
+    raw["input_schema"]["properties"]["id"]["type"] = "integer"  # type: ignore[index]
+    assert again.to_row() == back.to_row()
