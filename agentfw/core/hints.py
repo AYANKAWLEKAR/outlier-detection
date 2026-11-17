@@ -41,3 +41,7 @@ class ToolHint:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "field_hints", MappingProxyType(dict(self.field_hints)))
+
+    def __reduce__(self) -> tuple[type[ToolHint], tuple[object, ...]]:
+        # A mappingproxy does not pickle; rebuild through __init__ (process-pool workers).
+        return (ToolHint, (self.kind, dict(self.field_hints), self.annotations, self.has_schema))

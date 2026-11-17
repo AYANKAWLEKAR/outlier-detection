@@ -97,3 +97,20 @@ def test_runaway_attacks_are_never_attributed(tmp_path: Path) -> None:
     )
     assert not RUNAWAY_FAMILIES & set(table)
     assert "unknown" not in table
+
+
+def test_tool_hints_pickle_for_parallel_attribution() -> None:
+    import pickle
+
+    from agentfw.core.hints import ToolAnnotations, ToolHint
+
+    h = ToolHint(kind="write", field_hints={"amount": "money"}, annotations=ToolAnnotations(destructive=True), has_schema=True)
+    back = pickle.loads(pickle.dumps(h))
+    assert back == h
+    assert dict(back.field_hints) == {"amount": "money"}
+    try:
+        back.field_hints["x"] = "count"  # type: ignore[index]
+    except TypeError:
+        pass
+    else:
+        raise AssertionError("field_hints must stay read-only after unpickling")
