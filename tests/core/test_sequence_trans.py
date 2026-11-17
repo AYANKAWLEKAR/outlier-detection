@@ -329,9 +329,13 @@ def test_validated_record_round_trips(tmp_path: Path) -> None:
 
 
 def test_discount_never_touches_prereq_or_flow() -> None:
-    plain, disc = pair()
+    # age_h above Y's 60 observations, so the age weight is < 1 and the test is not vacuous
+    plain = SequenceDetector(DictStore(), EngineConfig())
+    disc = SequenceDetector(DictStore(), dataclasses.replace(AGE, age_h=1000))
     for _ in range(60):
         feed((plain, disc), ["X", "Y"])
+    _, ev = disc._s_trans(probe(disc, [], "Y"))
+    assert float(str(ev["age_weight"])) < 1.0
 
     def parts(d: SequenceDetector) -> dict[str, tuple[float, dict[str, object]]]:
         return {n: (s, ev) for n, s, ev in d._parts(probe(d, [], "Y"), TYPES)}  # X is missing
