@@ -841,6 +841,7 @@ def build_report(
                 for g in TRAJ_GROUPS
             ],
             "n_boot_delta": n_boot_delta,
+            "normalizer_hash": normalizer_hash(),
             "delta_method": "paired percentile bootstrap over test-split sessions (row minus "
             f"engine, same resampled sessions for both), {int(CI_LEVEL * 100)}% interval",
             "theta_grid": list(THETA_GRID),
@@ -1065,6 +1066,10 @@ def _write(report: Mapping[str, Any], out: Path) -> None:
 
 
 def _calibrate(report: Mapping[str, Any], note: str) -> None:
+    """``ValueError`` unless the report was measured with the current normalizer (its
+    ``meta.normalizer_hash``; a report without one cannot be checked and is rejected)."""
+    if report["meta"].get("normalizer_hash") != normalizer_hash():
+        raise ValueError("the report's normalizer hash is missing or stale: re-run the bench")
     warn, halt, where = selected_thetas(report)
     write_calibrated(warn, halt, where, note=note)
     print(f"calibrated.json: theta_warn={warn} theta_halt={halt} ({where})")

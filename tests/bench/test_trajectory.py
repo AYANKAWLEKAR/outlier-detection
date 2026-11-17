@@ -393,3 +393,17 @@ def test_calibration_needs_a_benign_session_not_a_benign_row() -> None:
     assert _has_benign_calibration_session([setup])
     assert not _has_benign_calibration_session([dataclasses.replace(setup, split="test")])
 
+
+def test_write_calibrated_rejects_a_report_from_another_normalizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentfw.bench import trajectory as T
+
+    called: list[object] = []
+    monkeypatch.setattr(T, "write_calibrated", lambda *a, **k: called.append(a))
+    monkeypatch.setattr(T, "selected_thetas", lambda r: (None, 0.2, "x"))
+    for meta in ({}, {"normalizer_hash": "stale"}):
+        with pytest.raises(ValueError, match="normalizer"):
+            T._calibrate({"meta": meta}, "")
+    T._calibrate({"meta": {"normalizer_hash": T.normalizer_hash()}}, "")
+    assert len(called) == 1
