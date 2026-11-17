@@ -120,3 +120,29 @@ def test_sf_field_equals_numeric_normalization() -> None:
     assert sf_field_equals(be, "Opportunity", rid, "Amount", "33770")  # spec params are strings
     assert sf_field_equals(be, "Opportunity", rid, "Amount", "33770.0")
     assert not sf_field_equals(be, "Opportunity", rid, "Amount", "33771")
+
+
+def test_mailhog_reads_every_page() -> None:
+    from urllib.parse import parse_qs, urlsplit
+
+    from agentfw.sandbox.checks import mailhog_message_ids
+
+    items = [
+        {
+            "ID": f"m{i}",
+            "To": [{"Mailbox": "bob", "Domain": "acme.example"}],
+            "Content": {"Headers": {"Subject": ["refund" if i == 120 else "other"]}},
+        }
+        for i in range(121)
+    ]
+
+    def fetch(url: str) -> bytes:
+        q = parse_qs(urlsplit(url).query)
+        start = int(q.get("start", ["0"])[0])
+        page = items[start : start + 50]  # Mailhog's default page size
+        return orjson.dumps(
+            {"total": len(items), "count": len(page), "start": start, "items": page}
+        )
+
+    assert mailhog_has_message(MAILHOG, "bob@acme.example", "refund", fetch=fetch)
+    assert len(mailhog_message_ids(MAILHOG, fetch=fetch)) == 121

@@ -23,7 +23,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, ListToolsResult
 
 from agentfw.sandbox.agent import McpLike
-from agentfw.sandbox.checks import CheckContext, mailhog_message_ids
+from agentfw.sandbox.checks import CheckContext, mailhog_items, mailhog_message_ids
 from agentfw.sandbox.config import ApiBudget, BudgetExceeded, SandboxConfig
 from agentfw.sandbox.proxy_py import error_result
 from agentfw.sandbox.seed.company import Company
@@ -149,11 +149,12 @@ def _fake_mailhog(mail: mail_server.FakeMailBackend) -> Callable[[str], bytes]:
 def session_mailhog(mailhog_http: str, fetch: Callable[[str], bytes]) -> Callable[[str], bytes]:
     """``fetch`` minus the messages Mailhog lists now (call it as a session starts)."""
     before = mailhog_message_ids(mailhog_http, fetch)
+    base = mailhog_http.rstrip("/")
 
     def view(url: str) -> bytes:
-        data = orjson.loads(fetch(url))
-        items = [i for i in data.get("items", []) if str(i.get("ID")) not in before]
-        return orjson.dumps({**data, "items": items, "count": len(items)})
+        # One page holding every new message (all of Mailhog's pages are read here).
+        items = [i for i in mailhog_items(base, fetch) if str(i.get("ID")) not in before]
+        return orjson.dumps({"total": len(items), "count": len(items), "start": 0, "items": items})
 
     return view
 

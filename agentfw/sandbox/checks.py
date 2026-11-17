@@ -31,6 +31,24 @@ def _local_http(url: str) -> str:
     return url.rstrip("/")
 
 
+#: Messages asked for per Mailhog API v2 request (Mailhog's own default is 50).
+MAILHOG_PAGE = 250
+
+
+def mailhog_items(base: str, fetch: Callable[[str], bytes]) -> list[dict[str, Any]]:
+    """Every message the Mailhog API v2 lists, following ``start`` / ``count`` / ``total``."""
+    items: list[dict[str, Any]] = []
+    url = f"{base}/api/v2/messages"
+    while True:
+        data = orjson.loads(fetch(url))
+        page = list(data.get("items", []))
+        items.extend(page)
+        total = data.get("total")
+        if not page or not isinstance(total, int) or len(items) >= total:
+            return items
+        url = f"{base}/api/v2/messages?start={len(items)}&limit={MAILHOG_PAGE}"
+
+
 def mailhog_has_message(
     mailhog_http: str,
     to: str,
@@ -38,10 +56,9 @@ def mailhog_has_message(
     fetch: Callable[[str], bytes] = _fetch,
 ) -> bool:
     base = _local_http(mailhog_http)
-    data = orjson.loads(fetch(f"{base}/api/v2/messages"))
     want = to.lower()
     needle = subject_contains.lower()
-    for item in data.get("items", []):
+    for item in mailhog_items(base, fetch):
         rcpts = {f"{t['Mailbox']}@{t['Domain']}".lower() for t in item.get("To", [])}
         subjects = item.get("Content", {}).get("Headers", {}).get("Subject", [])
         if want in rcpts and any(needle in s.lower() for s in subjects):
@@ -52,8 +69,7 @@ def mailhog_has_message(
 def mailhog_message_ids(mailhog_http: str, fetch: Callable[[str], bytes] = _fetch) -> set[str]:
     """Ids of the messages the Mailhog API currently lists (local Mailhog only)."""
     base = _local_http(mailhog_http)
-    data = orjson.loads(fetch(f"{base}/api/v2/messages"))
-    return {str(item["ID"]) for item in data.get("items", []) if "ID" in item}
+    return {str(item["ID"]) for item in mailhog_items(base, fetch) if "ID" in item}
 
 
 def stripe_refund_exists(stripe: StripeBackend, charge_id: str) -> bool:
