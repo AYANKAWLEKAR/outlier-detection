@@ -114,7 +114,7 @@ def test_tool_hints_pickle_for_parallel_attribution() -> None:
     assert back == h
     assert dict(back.field_hints) == {"amount": "money"}
     try:
-        back.field_hints["x"] = "count"  # type: ignore[index]
+        back.field_hints["x"] = "count"  # type: ignore[index,unused-ignore]
     except TypeError:
         pass
     else:

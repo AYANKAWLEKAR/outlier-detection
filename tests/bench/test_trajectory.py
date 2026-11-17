@@ -398,6 +398,7 @@ def test_write_calibrated_rejects_a_report_from_another_normalizer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from agentfw.bench import trajectory as T
+    from agentfw.bench.calibrated import normalizer_hash
 
     called: list[object] = []
     monkeypatch.setattr(T, "write_calibrated", lambda *a, **k: called.append(a))
@@ -405,5 +406,5 @@ def test_write_calibrated_rejects_a_report_from_another_normalizer(
     for meta in ({}, {"normalizer_hash": "stale"}):
         with pytest.raises(ValueError, match="normalizer"):
             T._calibrate({"meta": meta}, "")
-    T._calibrate({"meta": {"normalizer_hash": T.normalizer_hash()}}, "")
+    T._calibrate({"meta": {"normalizer_hash": normalizer_hash()}}, "")
     assert len(called) == 1

@@ -1229,10 +1229,12 @@ def test_age_discount_rejects_non_positive_age_h(age_h: int) -> None:
     "field", ["vital_w_loop", "vital_w_loop_polling", "vital_w_spin", "vital_w_stall"]
 )
 def test_vital_rejects_non_positive_windows(field: str) -> None:
+    from typing import cast
+
     from agentfw.core.config import EngineConfig
     from agentfw.core.engine import ALL_DETECTORS, VITAL, Engine
 
-    cfg = EngineConfig(**{field: 0})
+    cfg = EngineConfig(**cast(dict[str, Any], {field: 0}))
     with pytest.raises(ValueError, match=field):
         Engine(cfg, enabled=ALL_DETECTORS | {VITAL})
     Engine(cfg)  # unused without the vital detector

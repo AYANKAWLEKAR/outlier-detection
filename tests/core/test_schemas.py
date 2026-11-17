@@ -6,6 +6,7 @@ import hashlib
 import shutil
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import orjson
 import pytest
@@ -248,15 +249,16 @@ def test_captured_schema_is_independent_of_caller_mutations() -> None:
     from agentfw.core.hints import ToolAnnotations
     from agentfw.core.schemas import ToolSchema, schema_hash
 
-    src = {"type": "object", "properties": {"id": {"type": "string"}}}
-    s = ToolSchema.capture("t", src, ToolAnnotations(), 1)  # type: ignore[arg-type]
-    src["properties"]["id"]["type"] = "integer"  # type: ignore[index]
-    row = s.to_row()
-    assert row["input_schema"]["properties"]["id"]["type"] == "string"  # type: ignore[index]
-    row["input_schema"]["properties"]["id"]["type"] = "integer"  # type: ignore[index]
-    assert s.to_row()["hash"] == schema_hash(s.to_row()["input_schema"], {})  # type: ignore[arg-type]
+    src: Any = {"type": "object", "properties": {"id": {"type": "string"}}}
+    s = ToolSchema.capture("t", src, ToolAnnotations(), 1)
+    src["properties"]["id"]["type"] = "integer"
+    row: Any = s.to_row()
+    assert row["input_schema"]["properties"]["id"]["type"] == "string"
+    row["input_schema"]["properties"]["id"]["type"] = "integer"
+    fresh: Any = s.to_row()
+    assert fresh["hash"] == schema_hash(fresh["input_schema"], {})
     back = ToolSchema.from_row(s.to_row())
-    raw = s.to_row()
+    raw: Any = s.to_row()
     again = ToolSchema.from_row(raw)
-    raw["input_schema"]["properties"]["id"]["type"] = "integer"  # type: ignore[index]
+    raw["input_schema"]["properties"]["id"]["type"] = "integer"
     assert again.to_row() == back.to_row()
