@@ -276,6 +276,25 @@ async def test_mutated_args_are_never_forwarded_even_if_mutator_says_so(
     assert any("D-014" in r.getMessage() for r in caplog.records)
 
 
+class InPlaceMutator(RefundMutator):
+    """Changes ``raw.args`` in place and returns the same object with ``forward=True``."""
+
+    def mutate(self, raw: RawCall, history: Sequence[RawCall]) -> MutationResult | None:
+        if raw.tool_id != self.target:
+            return None
+        raw.args["amount"] = 999.0  # type: ignore[index]
+        return MutationResult(raw=raw, forward=True, synthetic_result=self.synthetic)
+
+
+async def test_in_place_mutation_is_never_forwarded() -> None:
+    async with make_proxy(mutator=InPlaceMutator()) as (proxy, sink, spies):
+        res = await proxy.call_tool(
+            "stripe.create_refund", {"charge_id": CHARGE_ID, "amount": 1.0, "reason": "x"}
+        )
+        assert res is SYNTH
+        assert spies["stripe"].forwarded == []
+
+
 class BadMutator(RefundMutator):
     """Returns output that skips pydantic validation (model_copy does not validate)."""
 

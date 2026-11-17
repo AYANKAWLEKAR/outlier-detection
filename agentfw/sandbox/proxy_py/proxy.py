@@ -32,6 +32,7 @@ Shadow scoring, its verdict write and the shadow update all sit behind logged ``
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import time
@@ -206,6 +207,8 @@ class FirewallProxy:
         self, name: str, route: tuple[str, str], arguments: dict[str, Any]
     ) -> CallToolResult:
         raw = self._new_raw(name, arguments)
+        # Independent snapshot: a mutator that edits ``raw`` in place is still seen as mutating.
+        orig_tool, orig_args = raw.tool_id, copy.deepcopy(raw.args)
         mutation: MutationResult | None = None
         if self.mutator is not None:
             try:
@@ -218,7 +221,7 @@ class FirewallProxy:
             return self._reject(raw, f"{name}: mutator produced an invalid call; not forwarded")
         forward = True
         if mutation is not None:
-            mutated = mutation.raw.tool_id != raw.tool_id or mutation.raw.args != raw.args
+            mutated = mutation.raw.tool_id != orig_tool or mutation.raw.args != orig_args
             if mutation.forward and mutated:
                 logger.warning(
                     "D-014: %s was mutated; not forwarding despite forward=True", raw.envelope_id
