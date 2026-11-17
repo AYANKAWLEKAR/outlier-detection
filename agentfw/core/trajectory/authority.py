@@ -110,15 +110,18 @@ def contributor_floor(theta_eff: float | None, cfg: EngineConfig) -> float:
 def contributors(
     per: Sequence[DetectorScore], cfg: EngineConfig, floor: float = CONTRIB_MIN
 ) -> list[DetectorScore]:
-    """The non-vital scores that made the fused score (module docstring); ties count alike. A
+    """The non-vital scores that made the fused score (module docstring); ties count alike. The
+    floor applies to the fused score of the top scores, bonus included when earned (T-72). A
     top score of 0 contributes nothing whatever the floor."""
     v1 = [(0.0 if math.isnan(s.score) else s.score, s) for s in per if s.detector != VITAL]
     ranked = sorted({v for v, _ in v1}, reverse=True)
     top1 = ranked[0] if ranked else 0.0
-    if top1 <= 0.0 or top1 < floor:
-        return []
     out = [s for v, s in v1 if v == top1]  # a tie at the top is top1 and top2 at once
-    if len(out) == 1 and len(ranked) > 1 and ranked[1] > cfg.fusion_bonus_gate:
+    top2 = top1 if len(out) > 1 else (ranked[1] if len(ranked) > 1 else 0.0)
+    bonus = top2 > cfg.fusion_bonus_gate  # as ``fuse``
+    if top1 <= 0.0 or min(1.0, top1 + (cfg.fusion_bonus if bonus else 0.0)) < floor:
+        return []
+    if len(out) == 1 and bonus:
         out += [s for v, s in v1 if v == ranked[1]]  # top2 earned the bonus
     return out
 

@@ -541,3 +541,14 @@ def test_per_call_blocks_are_graded_and_never_cold_or_bare(
         for audit in (cold_or_bare_blocks, ungraded_blocks):
             bad = _per_call(rows, audit)
             assert not bad, f"{name} {audit.__name__}: {_fmt(bad)}"
+
+
+def test_floor_is_tested_on_the_fused_score_with_its_bonus() -> None:
+    """The floor applies to what ``fuse`` makes of the top scores: a top score under the floor
+    whose earned bonus carries the fused score to it contributes, with the bonus earner (T-72).
+    Unreachable with the default gate (0.5 > CONTRIB_MIN), so a lowered gate shows it."""
+    cfg = dataclasses.replace(CFG, fusion_bonus_gate=0.1, fusion_bonus=0.15)
+    per = [mag(0.25, 12), nov(0.2, 40)]  # fused 0.25 + 0.15 = 0.40 >= 0.3
+    assert contributors(per, cfg) == per
+    assert contributors(per, CFG) == []  # no bonus at the default gate: 0.25 < 0.3
+    assert contributors([mag(0.25, 12), nov(0.05, 40)], cfg) == []  # no bonus earned
