@@ -56,6 +56,7 @@ import os
 import re
 import shutil
 import sys
+import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AsyncExitStack, contextmanager
 from dataclasses import dataclass
@@ -119,6 +120,7 @@ from agentfw.sandbox.tasks.schema import (
     load_templates,
     render,
 )
+from agentfw.sandbox.tools.mail_server import LiveMailBackend
 from agentfw.sandbox.tools.salesforce_server import BUDGET_ERROR_CODE
 
 __all__ = [
@@ -472,12 +474,14 @@ class _Runner:
                 self.company, self.cfg.slack_channel_id, sf_budget=self.sf_budget
             )
             return backends, check_context(backends, self.cfg.mailhog_http)
-        ctx = check_context(self.live, self.cfg.mailhog_http)
+        tag = uuid.uuid4().hex
+        backends = {**self.live, "mail": LiveMailBackend(self.cfg, session_tag=tag)}
+        ctx = check_context(backends, self.cfg.mailhog_http)
         base = ctx.fetch
         ctx.fetch = await anyio.to_thread.run_sync(
-            lambda: session_mailhog(self.cfg.mailhog_http, base)
+            lambda: session_mailhog(self.cfg.mailhog_http, base, session_tag=tag)
         )
-        return self.live, ctx
+        return backends, ctx
 
     @contextmanager
     def _plant(

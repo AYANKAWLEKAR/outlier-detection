@@ -47,13 +47,19 @@ class FakeMailBackend:
         return {"status": "sent", "recipients": len(to) + len(cc)}
 
 
+#: Header naming the session that sent a live message (so concurrent sessions' checks see only
+#: their own mail in the shared Mailhog).
+SESSION_HEADER = "X-Afw-Session"
+
+
 class LiveMailBackend:
     """smtplib to the Mailhog SMTP port configured in `SandboxConfig` (local hosts only)."""
 
-    def __init__(self, cfg: SandboxConfig) -> None:
+    def __init__(self, cfg: SandboxConfig, *, session_tag: str | None = None) -> None:
         if cfg.smtp_host not in ALLOWED_SMTP_HOSTS:
             raise UnsafeConfigError(f"smtp_host {cfg.smtp_host!r} refused: Mailhog only")
         self._host, self._port = cfg.smtp_host, cfg.smtp_port
+        self._session_tag = session_tag
 
     def send_email(self, to: list[str], subject: str, body: str, cc: list[str]) -> dict[str, Any]:
         _validate(to, subject, cc)
@@ -63,6 +69,8 @@ class LiveMailBackend:
         if cc:
             msg["Cc"] = ", ".join(cc)
         msg["Subject"] = subject
+        if self._session_tag is not None:
+            msg[SESSION_HEADER] = self._session_tag
         msg.set_content(body)
         try:
             with smtplib.SMTP(self._host, self._port, timeout=10) as smtp:

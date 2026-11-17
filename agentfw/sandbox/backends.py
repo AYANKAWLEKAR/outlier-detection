@@ -146,14 +146,28 @@ def _fake_mailhog(mail: mail_server.FakeMailBackend) -> Callable[[str], bytes]:
     return fetch
 
 
-def session_mailhog(mailhog_http: str, fetch: Callable[[str], bytes]) -> Callable[[str], bytes]:
-    """``fetch`` minus the messages Mailhog lists now (call it as a session starts)."""
+def _tagged(item: Mapping[str, Any], tag: str) -> bool:
+    headers = (item.get("Content") or {}).get("Headers") or {}
+    return tag in headers.get(mail_server.SESSION_HEADER, [])
+
+
+def session_mailhog(
+    mailhog_http: str, fetch: Callable[[str], bytes], *, session_tag: str | None = None
+) -> Callable[[str], bytes]:
+    """``fetch`` minus the messages Mailhog lists now (call it as a session starts); with
+    ``session_tag``, also only the messages whose ``SESSION_HEADER`` carries that tag (what a
+    :class:`LiveMailBackend` built with the same tag sends), so concurrent sessions sharing one
+    Mailhog never see each other's mail."""
     before = mailhog_message_ids(mailhog_http, fetch)
     base = mailhog_http.rstrip("/")
 
     def view(url: str) -> bytes:
         # One page holding every new message (all of Mailhog's pages are read here).
-        items = [i for i in mailhog_items(base, fetch) if str(i.get("ID")) not in before]
+        items = [
+            i
+            for i in mailhog_items(base, fetch)
+            if str(i.get("ID")) not in before and (session_tag is None or _tagged(i, session_tag))
+        ]
         return orjson.dumps({"total": len(items), "count": len(items), "start": 0, "items": items})
 
     return view

@@ -9,7 +9,12 @@ import orjson
 import pytest
 
 from agentfw.sandbox.config import SandboxConfig, UnsafeConfigError
-from agentfw.sandbox.tools.mail_server import FakeMailBackend, LiveMailBackend, build_server
+from agentfw.sandbox.tools.mail_server import (
+    SESSION_HEADER,
+    FakeMailBackend,
+    LiveMailBackend,
+    build_server,
+)
 from tests.sandbox.tools.conftest import call, tool_names
 
 
@@ -94,6 +99,29 @@ async def test_live_backend_uses_smtp_to_configured_host(monkeypatch) -> None:  
     assert not err
     assert seen["addr"] == ("mailhog", 1025)
     assert seen["to"] == ["a@acme.example", "c@acme.example"] and seen["subject"] == "S"
+
+
+def test_live_backend_tags_mail_with_its_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: dict[str, Any] = {}
+
+    class FakeSMTP:
+        def __init__(self, host: str, port: int, timeout: float) -> None:
+            pass
+
+        def __enter__(self) -> FakeSMTP:
+            return self
+
+        def __exit__(self, *a: object) -> None:
+            return None
+
+        def send_message(self, msg: Any, to_addrs: list[str]) -> None:
+            seen["tag"] = msg[SESSION_HEADER]
+
+    monkeypatch.setattr("agentfw.sandbox.tools.mail_server.smtplib.SMTP", FakeSMTP)
+    LiveMailBackend(_cfg(smtp_host="mailhog"), session_tag="s-1").send_email(
+        ["a@x.example"], "S", "B", []
+    )
+    assert seen["tag"] == "s-1"
 
 
 def test_live_backend_refuses_non_local_host() -> None:

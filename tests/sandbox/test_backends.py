@@ -72,6 +72,23 @@ def test_session_mailhog_hides_mail_sent_before_the_session() -> None:
         session_mailhog("http://mail.example.com:8025", fetch)
 
 
+def test_session_mailhog_with_a_tag_shows_only_that_sessions_mail() -> None:
+    store: dict[str, Any] = {"items": []}
+
+    def fetch(url: str) -> bytes:
+        return orjson.dumps(store)
+
+    view = session_mailhog(MAILHOG, fetch, session_tag="mine")
+    other = _item("m1", "a@x.example", "Hello")
+    other["Content"]["Headers"]["X-Afw-Session"] = ["theirs"]
+    store["items"].append(other)
+    assert not mailhog_has_message(MAILHOG, "a@x.example", "Hello", view)
+    mine = _item("m2", "a@x.example", "Hello")
+    mine["Content"]["Headers"]["X-Afw-Session"] = ["mine"]
+    store["items"].append(mine)
+    assert mailhog_has_message(MAILHOG, "a@x.example", "Hello", view)
+
+
 def test_budgeted_salesforce_charges_each_request_and_fails_like_live(tmp_path: Path) -> None:
     budget = ApiBudget(tmp_path / "sf.json", 2)
     sf = BudgetedSalesforce(FakeSalesforceBackend(COMPANY), budget)
