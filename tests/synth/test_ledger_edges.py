@@ -199,3 +199,30 @@ def test_pool_drawn_ids_are_seeded_even_when_catalog_source_is_a_producer(world:
                 assert c.args["ticket_id"] in seeds
                 writes += c.tool_id != "zendesk.get_ticket"
     assert writes > 20
+
+
+@pytest.mark.parametrize("rate", [0.0, 0.5])
+def test_sources_name_a_producer_that_returned_the_value(world: World, rate: float) -> None:
+    """A fabricated id (``id_flow_rate < 1``) is never credited to the bound alias's producer,
+    neither directly nor through a later call that echoes it."""
+    from agentfw.core.normalize import flatten
+
+    checked = 0
+    ids = sorted(world.personas)
+    for k in range(300):
+        agent = ids[k % len(ids)]
+        persona = world.persona(agent).model_copy(update={"id_flow_rate": rate})
+        rng = np.random.default_rng(k)
+        names = [t.name for t in persona.tasks if t.weight > 0]
+        task = world.tasks[names[int(rng.integers(len(names)))]]
+        planned = walk(task, persona, world.catalog, rng, world.pools(agent))
+        for pc in planned:
+            flat = flatten(pc.args)[0]
+            for path, src in pc.sources:
+                meta = planned[src].response_meta
+                assert meta is not None
+                vals = [v for v in flat[path] if isinstance(v, str)]
+                assert any(v in meta.ids for v in vals), (pc.tool_id, path, vals)
+                checked += 1
+    assert checked > 0
+

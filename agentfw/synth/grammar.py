@@ -307,6 +307,19 @@ def _arg_sources(
     return tuple(out)
 
 
+def _carried(
+    arg_org: dict[str, int], step_args: dict[str, str], args: dict[str, JsonValue],
+    aliases: dict[str, dict[str, JsonValue]],
+) -> dict[str, int]:  # fmt: skip
+    """``arg_org`` restricted to args that still carry an id of their bound value."""
+    out: dict[str, int] = {}
+    for name, o in arg_org.items():
+        bound = set(_id_strings(_resolve(aliases, step_args[name])))
+        if name in args and any(v in bound for v in _id_strings(args[name])):
+            out[name] = o
+    return out
+
+
 def _gap(ctx: _Ctx, first: bool) -> float:
     return 0.0 if first else max(1e-3, _num(sample(_GAP, ctx.rng)))
 
@@ -339,7 +352,12 @@ def walk(
                 emit = False
             args = _build_args(ctx, step.tool, spec, step.args, aliases)
             produced, item_count = _produce(ctx, step.tool, spec, args)
-            arg_org = _arg_origins(spec, step.args, origin)
+            # an arg ``_adapt`` replaced (a fabricated id) has no producer: not for itself, nor
+            # for a field of this call that echoes it
+            arg_org = _carried(_arg_origins(spec, step.args, origin), step.args, args, aliases)
+            bound_aliases = dict(
+                aliases
+            )  # this step's args bind against the aliases before its own
             if step.as_:
                 by_field: dict[str, JsonValue] = {}
                 for key, val in produced.items():
