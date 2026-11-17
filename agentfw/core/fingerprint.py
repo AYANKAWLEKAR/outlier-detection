@@ -87,7 +87,9 @@ def arg_tokens(flat_args: Mapping[str, tuple[Scalar, ...]]) -> frozenset[int]:
 
 
 def _shingles(text: str, item_count: int | None, error: bool) -> set[str] | None:
-    clipped = text.encode("utf-8")[:MAX_RESP_BYTES].decode("utf-8", errors="ignore")
+    # a char is >= 1 byte, so the first MAX_RESP_BYTES chars hold the byte prefix
+    head = text[:MAX_RESP_BYTES].encode("utf-8")
+    clipped = head[:MAX_RESP_BYTES].decode("utf-8", errors="ignore")
     words = clipped.lower().split()
     if not words:
         return None

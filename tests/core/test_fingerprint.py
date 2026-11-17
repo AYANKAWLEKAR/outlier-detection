@@ -62,6 +62,20 @@ def test_split_multibyte_char_is_dropped_not_fatal() -> None:
     assert resp_fingerprint(text, None, False) is not None
 
 
+def test_large_response_is_clipped_before_encoding() -> None:
+    """Only the 4096-byte prefix is encoded, not the whole response (CodeRabbit PR #1)."""
+    import tracemalloc
+
+    text = "x " * (5 * 1024 * 1024)  # 10 MiB
+    tracemalloc.start()
+    try:
+        resp_fingerprint(text, None, False)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1024 * 1024
+
+
 def test_empty_text_has_no_fingerprint_and_short_text_does() -> None:
     assert resp_fingerprint("", 3, False) is None
     assert resp_fingerprint("   \n", None, True) is None
