@@ -953,8 +953,12 @@ def test_cli_topup_rate_default_is_the_config_default(
 
 def test_only_a_sessions_first_call_carries_task_ids_with_attacks(tmp_path: Path) -> None:
     """Attack copies (burst duplicates, runaway repeats) are never a session's first call (T-33)."""
-    d = gen(tmp_path / "x", small_cfg())
-    assert any(lab["label"] == "attack" for lab in d.labels)
+    from agentfw.synth.attacks import RUNAWAY_FAMILIES
+
+    fams = [*ALL_FAMILIES, *sorted(RUNAWAY_FAMILIES)]
+    d = gen(tmp_path / "x", small_cfg(families=fams))
+    got = {lab["attack_family"] for lab in d.labels if lab["label"] == "attack"}
+    assert set(RUNAWAY_FAMILIES) <= got  # the runaway repeats are exercised
     seen: set[object] = set()
     first = 0
     for row in sorted(d.traces, key=lambda r: (str(r["session_id"]), int(r["seq_no"]))):  # type: ignore[call-overload]
