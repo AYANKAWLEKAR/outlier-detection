@@ -222,6 +222,17 @@ def test_package_rejects_missing_label_and_session_id_collision(tmp_path: Path) 
         package([run2, run3], tmp_path / "out2")
 
 
+def test_package_rejects_envelope_id_collision_across_sessions(tmp_path: Path) -> None:
+    r1, r2 = tmp_path / "r1", tmp_path / "r2"
+    _write_run(r1, {"s0": (AGENT_IDS[0], [1000])})
+    _write_run(r2, {"s1": (AGENT_IDS[0], [1000])})
+    for sub in ("raw", "labels"):
+        f = r2 / sub / "s1.jsonl"
+        f.write_bytes(f.read_bytes().replace(b'"envelope_id":"s1-', b'"envelope_id":"s0-'))
+    with pytest.raises(ValueError, match="duplicate envelope_id"):
+        package([r1, r2], tmp_path / "out")
+
+
 def test_package_refuses_unreserved_email_in_source(tmp_path: Path) -> None:
     run = tmp_path / "run"
     _write_run(run, {"s0": (AGENT_IDS[0], [1000])}, email="eve@gmail.com")

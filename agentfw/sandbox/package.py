@@ -415,6 +415,11 @@ def _load_run(
         raws = _read_rows(run / "raw" / f"{sid}.jsonl", RawCall.model_validate_json, sid, run)
         labs = _read_rows(run / "labels" / f"{sid}.jsonl", Label.model_validate_json, sid, run)
         _check_session(sid, run, raws, labs)
+        clash = sorted({lab.envelope_id for lab in labs} & labels.keys())
+        if clash:
+            raise ValueError(
+                f"duplicate envelope_id {clash[0]!r} across sessions (session {sid!r} in {run})"
+            )
         sessions[sid] = raws
         labels.update({lab.envelope_id: lab for lab in labs})
         included += 1
