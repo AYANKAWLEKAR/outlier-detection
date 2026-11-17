@@ -977,7 +977,7 @@ def test_merge_schemas_logs_drift_across_sessions(
 
     out = tmp_path / "out"
     out.mkdir()
-    r = cast(Any, SimpleNamespace(out_dir=out, schema_seen=set(), schema_last={}))
+    r = cast(Any, SimpleNamespace(out_dir=out, schema_loaded=False, schema_last={}))
 
     def session(name: str, *rows: dict[str, JsonValue]) -> Path:
         w = tmp_path / name
@@ -997,8 +997,50 @@ def test_merge_schemas_logs_drift_across_sessions(
     ]
     assert len((out / "schemas.jsonl").read_bytes().splitlines()) == 2
     # a resumed run (fresh runner state) also notices a drift against the file
-    r2 = cast(Any, SimpleNamespace(out_dir=out, schema_seen=set(), schema_last={}))
+    r2 = cast(Any, SimpleNamespace(out_dir=out, schema_loaded=False, schema_last={}))
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="agentfw.sandbox.run"):
         _Runner.merge_schemas(r2, session("s4", _schema_row("zendesk.get_ticket", {}, 3)))
     assert any("drift" in x.getMessage() for x in caplog.records)
+
+
+def test_merge_schemas_keeps_a_rollback_and_survives_a_corrupt_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from agentfw.sandbox.run import _Runner
+
+    out = tmp_path / "out"
+    out.mkdir()
+    r = cast(Any, SimpleNamespace(out_dir=out, schema_loaded=False, schema_last={}))
+    a = _schema_row("zendesk.get_ticket", {"a": {"type": "string"}}, 1)
+    b = _schema_row("zendesk.get_ticket", {"a": {"type": "integer"}}, 2)
+    for i, row in enumerate([a, b, a]):
+        w = tmp_path / f"s{i}"
+        w.mkdir()
+        _write_schemas(w, [row])
+        _Runner.merge_schemas(r, w)
+    assert load_schemas(out / "schemas.jsonl")["zendesk.get_ticket"].hash == a["hash"]
+    assert len((out / "schemas.jsonl").read_bytes().splitlines()) == 3
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "schemas.jsonl").write_bytes(b"{not json\n")
+    r2 = cast(Any, SimpleNamespace(out_dir=out, schema_loaded=False, schema_last={}))
+    with caplog.at_level(logging.WARNING, logger="agentfw.sandbox.run"):
+        _Runner.merge_schemas(r2, bad)  # never raises: capture must not fail a session
+    assert any("schema" in x.getMessage() for x in caplog.records)
+
+
+def test_package_keeps_the_latest_definition_after_a_rollback(tmp_path: Path) -> None:
+    run_a, run_b = _schema_run(tmp_path, "a"), _schema_run(tmp_path, "b")
+    a = _schema_row("zendesk.get_ticket", {"ticket_id": {"type": "string"}}, 50)
+    b = _schema_row("zendesk.get_ticket", {"ticket_id": {"type": "integer"}}, 60)
+    _write_schemas(run_a, [a, b])
+    _write_schemas(run_b, [dict(a, captured_at=70)])
+    out = tmp_path / "ds"
+    package([run_a, run_b], out, seed=0)
+    rows = _jsonl(out / "schemas.jsonl")
+    assert [r["hash"] for r in rows] == [a["hash"], b["hash"], a["hash"]]
+    assert load_schemas(out / "schemas.jsonl")["zendesk.get_ticket"].hash == a["hash"]

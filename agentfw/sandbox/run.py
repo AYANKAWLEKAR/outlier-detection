@@ -456,6 +456,29 @@ def _read_jsonl[T](path: Path, parse: Callable[[bytes], T]) -> list[T]:
 # --- execution -----------------------------------------------------------------------------------
 
 
+def _merge_schemas(self: _Runner, work: Path) -> None:
+    path = self.out_dir / SCHEMAS
+    if not self.schema_loaded:  # a resumed run: what is already there (once)
+        if path.exists():
+            for row in _read_jsonl(path, orjson.loads):
+                self.schema_last[row["tool_id"]] = row["hash"]
+        self.schema_loaded = True
+    fresh = []
+    for line in (work / SCHEMAS).read_bytes().splitlines() if (work / SCHEMAS).exists() else []:
+        row = orjson.loads(line)
+        tool, h = row["tool_id"], row["hash"]
+        last = self.schema_last.get(tool)
+        if last == h:
+            continue
+        if last is not None:  # each session has its own proxy
+            logger.warning("tool-definition drift: %s", tool)
+        self.schema_last[tool] = h
+        fresh.append(line + b"\n")
+    if fresh:
+        with path.open("ab") as f:
+            f.write(b"".join(fresh))
+
+
 @dataclass(slots=True)
 class _Runner:
     cfg: SandboxConfig
@@ -468,30 +491,18 @@ class _Runner:
     meter: UsageMeter
     sem: anyio.Semaphore
     sf_reserved: int = 0
-    schema_seen: set[tuple[str, str]] = field(default_factory=set)
+    schema_loaded: bool = False
     schema_last: dict[str, str] = field(default_factory=dict)
 
     def merge_schemas(self, work: Path) -> None:
-        """Append the session's captured schema rows to the run's ``schemas.jsonl``, each
-        ``(tool_id, hash)`` once per run (sessions see the same schemas; a drifted one is new)."""
-        path = self.out_dir / SCHEMAS
-        if not self.schema_seen and path.exists():  # a resumed run: what is already there
-            for row in _read_jsonl(path, orjson.loads):
-                self.schema_seen.add((row["tool_id"], row["hash"]))
-                self.schema_last[row["tool_id"]] = row["hash"]
-        fresh = []
-        for line in (work / SCHEMAS).read_bytes().splitlines() if (work / SCHEMAS).exists() else []:
-            row = orjson.loads(line)
-            key = (row["tool_id"], row["hash"])
-            if key not in self.schema_seen:
-                if row["tool_id"] in self.schema_last:  # each session has its own proxy
-                    logger.warning("tool-definition drift: %s", row["tool_id"])
-                self.schema_seen.add(key)
-                self.schema_last[row["tool_id"]] = row["hash"]
-                fresh.append(line + b"\n")
-        if fresh:
-            with path.open("ab") as f:
-                f.write(b"".join(fresh))
+        """Append the session's captured schema rows to the run's ``schemas.jsonl``, skipping a
+        row whose hash is its tool's latest one (sessions see the same schemas; a drifted one,
+        or a rollback to an earlier one, is new). Never raises: schema capture must not fail a
+        completed session (a corrupt file is logged and skipped)."""
+        try:
+            _merge_schemas(self, work)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            logger.warning("schema merge skipped (%s)", type(e).__name__)
 
     def append_ledger(self, row: dict[str, Any]) -> None:
         with (self.out_dir / LEDGER).open("ab") as f:

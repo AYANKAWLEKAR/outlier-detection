@@ -444,9 +444,11 @@ def _load_run(
 
 
 def _read_schemas(runs: Sequence[Path]) -> bytes:
-    """The runs' captured schemas merged into one ``schemas.jsonl`` blob (empty when none): every
-    ``(tool_id, hash)`` once, in capture order, ``captured_at`` set to ``START_MS`` (T-33)."""
-    rows: dict[tuple[str, str], ToolSchema] = {}
+    """The runs' captured schemas merged into one ``schemas.jsonl`` blob (empty when none): in
+    capture order, a row dropped only when it repeats its tool's latest kept hash (a rollback
+    A -> B -> A keeps the final A, which ``load_schemas`` returns); ``captured_at`` set to
+    ``START_MS`` (T-33)."""
+    rows: list[ToolSchema] = []
     found: list[ToolSchema] = []
     for run in runs:
         path = run / _SCHEMAS
@@ -461,9 +463,12 @@ def _read_schemas(runs: Sequence[Path]) -> bytes:
                 raise ValueError(
                     f"{run.name}/{_SCHEMAS} line {i}: invalid schema row ({type(e).__name__})"
                 ) from None
+    last: dict[str, str] = {}
     for sc in sorted(found, key=lambda x: x.captured_at):  # stable: ties keep read order
-        rows.setdefault((sc.tool_id, sc.hash), sc)
-    return _jsonl([{**sc.to_row(), "captured_at": START_MS} for sc in rows.values()])
+        if last.get(sc.tool_id) != sc.hash:  # a repeat of the current definition is dropped
+            last[sc.tool_id] = sc.hash
+            rows.append(sc)
+    return _jsonl([{**sc.to_row(), "captured_at": START_MS} for sc in rows])
 
 
 # --- packaging -----------------------------------------------------------------------------------
