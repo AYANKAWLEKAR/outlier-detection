@@ -142,8 +142,11 @@ def _config_record(det: object, kw: dict[str, Any]) -> dict[str, Any]:
     if callable(rec):
         return dict(rec())
     out: dict[str, Any] = {}
+    eff = getattr(det, "cfg", None)  # the config the engine ran with, presets applied (T-75)
+    if isinstance(eff, EngineConfig):
+        out["cfg"] = {f: _jsonable(x) for f, x in dataclasses.asdict(eff).items()}
     for k, v in kw.items():
-        if any(h in k.lower() for h in _SECRET_HINTS):
+        if any(h in k.lower() for h in _SECRET_HINTS) or (k == "cfg" and "cfg" in out):
             continue
         if isinstance(v, EngineConfig):
             out[k] = {f: _jsonable(x) for f, x in dataclasses.asdict(v).items()}
