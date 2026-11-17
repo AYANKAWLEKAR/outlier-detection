@@ -226,3 +226,32 @@ def test_sources_name_a_producer_that_returned_the_value(world: World, rate: flo
                 checked += 1
     assert checked > 0
 
+
+def test_a_reused_alias_binds_against_the_earlier_producer(world: World) -> None:
+    from agentfw.synth.schema import TaskSpec
+
+    task = TaskSpec.model_validate(
+        {
+            "name": "reuse",
+            "steps": [
+                {"tool": "stripe.retrieve_charge", "as": "x", "args": {"charge_id": "ext:charges"}},
+                {
+                    "tool": "stripe.retrieve_customer",
+                    "as": "x",
+                    "args": {"customer_id": "x.customer"},
+                },
+            ],
+        }
+    )
+    agent = "exec-assistant-a"
+    persona = world.persona(agent).model_copy(
+        update={
+            "id_flow_rate": 1.0,
+            "noise": world.persona(agent).noise.model_copy(
+                update={"skip_lookup": 0.0, "retry": 0.0, "abandon": 0.0, "arg_dropout": 0.0}
+            ),
+        }
+    )
+    planned = walk(task, persona, world.catalog, np.random.default_rng(0), world.pools(agent))
+    assert [pc.tool_id for pc in planned] == ["stripe.retrieve_charge", "stripe.retrieve_customer"]
+    assert planned[1].sources == (("customer_id", 0),)

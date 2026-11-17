@@ -373,7 +373,7 @@ def walk(
                     }
                 meta = _meta(spec, produced, item_count)
                 ext = _external_ids(spec, step.args, args)
-                src = _arg_sources(step.args, args, aliases, arg_org)
+                src = _arg_sources(step.args, args, bound_aliases, arg_org)
                 calls.append(PlannedCall(step.tool, args, meta, _gap(ctx, not calls), ext, src))
                 if noise.retry > 0 and rng.random() < noise.retry:
                     calls.append(
