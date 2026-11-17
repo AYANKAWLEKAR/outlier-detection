@@ -327,14 +327,18 @@ def _write_atomic(path: Path, data: bytes) -> None:
 
 
 def _repair_ledger(path: Path) -> None:
-    """Cut off a trailing line torn by a crash mid-append (it would glue onto the next line)."""
+    """Cut off a trailing line torn by a crash mid-append (it would glue onto the next line).
+    Used for every append-only run file (``ledger.jsonl``, ``schemas.jsonl``; T-74)."""
     if not path.exists():
         return
     data = path.read_bytes()
     if data and not data.endswith(b"\n"):
         keep = data.rfind(b"\n") + 1
         logger.warning(
-            "ledger %s: dropping a torn trailing line (%d bytes)", path, len(data) - keep
+            "%s %s: dropping a torn trailing line (%d bytes)",
+            path.stem,
+            path,
+            len(data) - keep,
         )
         with path.open("r+b") as f:
             f.truncate(keep)
@@ -465,19 +469,21 @@ def _merge_schemas(self: _Runner, work: Path) -> None:
                 self.schema_last[row["tool_id"]] = row["hash"]
         self.schema_loaded = True
     fresh = []
+    nxt = dict(self.schema_last)  # committed only once the rows are on disk (T-74)
     for line in (work / SCHEMAS).read_bytes().splitlines() if (work / SCHEMAS).exists() else []:
         row = orjson.loads(line)
         tool, h = row["tool_id"], row["hash"]
-        last = self.schema_last.get(tool)
+        last = nxt.get(tool)
         if last == h:
             continue
         if last is not None:  # each session has its own proxy
             logger.warning("tool-definition drift: %s", tool)
-        self.schema_last[tool] = h
+        nxt[tool] = h
         fresh.append(line + b"\n")
     if fresh:
         with path.open("ab") as f:
             f.write(b"".join(fresh))
+    self.schema_last = nxt
 
 
 @dataclass(slots=True)
@@ -742,6 +748,7 @@ async def _execute_locked(
     for d in (RAW_DIR, LABELS_DIR, TRANSCRIPTS_DIR, WORK_DIR):
         (out_dir / d).mkdir(parents=True, exist_ok=True)
     _repair_ledger(out_dir / LEDGER)
+    _repair_ledger(out_dir / SCHEMAS)
     meta = {"mode": mode, "model": cfg.llm_model}
     _check_resume_meta(out_dir, meta)
     _write_atomic(  # run metadata for packaging: the model id only, never a secret

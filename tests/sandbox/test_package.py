@@ -1059,3 +1059,47 @@ def test_task_ids_are_only_the_ids_the_prompt_discloses() -> None:
     t = RenderedTask("refund", "Resolve ticket TCK-104233.", slots, [], [])
     s = RenderedSession("a1", t.prompt, [t], [], [], 25)
     assert task_ids(s) == ("TCK-104233",)
+
+
+def test_resume_repairs_a_torn_schemas_tail(tmp_path: Path) -> None:
+    """A crash mid-append leaves ``schemas.jsonl`` with a torn last line; a resumed run cuts it
+    off like the ledger's, so the merge and packaging can read the file (T-74)."""
+    run = tmp_path / "run"
+    assert run_main(["--sessions", "2", "--seed", "0", "--out", str(run), "--fake"]) == 0
+    with (run / "schemas.jsonl").open("ab") as f:
+        f.write(b'{"tool_id": "zendesk.get_ti')
+    assert run_main(["--sessions", "3", "--seed", "0", "--out", str(run), "--fake"]) == 0
+    data = (run / "schemas.jsonl").read_bytes()
+    assert data.endswith(b"\n") and b'zendesk.get_ti"' not in data
+    assert load_schemas(run / "schemas.jsonl")
+
+
+def test_merge_schemas_commits_hashes_only_after_the_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed append leaves the runner's latest hashes as they were, so the next session
+    retries the row instead of skipping it as already recorded (T-74)."""
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from agentfw.sandbox.run import _Runner
+
+    out = tmp_path / "out"
+    out.mkdir()
+    r = cast(Any, SimpleNamespace(out_dir=out, schema_loaded=False, schema_last={}))
+    w = tmp_path / "s"
+    w.mkdir()
+    _write_schemas(w, [_schema_row("zendesk.get_ticket", {"a": {"type": "string"}}, 1)])
+    real_open = Path.open
+
+    def failing_open(self: Path, mode: str = "r", *a: Any, **kw: Any) -> Any:
+        if self.name == "schemas.jsonl" and mode == "ab":
+            raise OSError("disk full")
+        return real_open(self, mode, *a, **kw)
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    _Runner.merge_schemas(r, w)  # logged and skipped
+    assert r.schema_last == {}
+    monkeypatch.setattr(Path, "open", real_open)
+    _Runner.merge_schemas(r, w)
+    assert list(load_schemas(out / "schemas.jsonl")) == ["zendesk.get_ticket"]
