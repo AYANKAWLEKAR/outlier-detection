@@ -363,3 +363,33 @@ def test_report_sha_marks_a_dirty_tree(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _short_sha("0123456789abcdef0123") == "0123456789ab"
     src = Path(T.__file__).read_text()
     assert '"git_sha": _code_sha()' in src
+
+
+def test_paired_deltas_with_zero_bootstrap_samples() -> None:
+    a = _vec([True, False, True, False, False, False, True, False])
+    b = _vec([False] * 6 + [True, True])
+    d = paired_deltas(a, b, n_boot=0)
+    assert d["benign_fpr"]["delta"] == pytest.approx(2 / 6)
+    assert d["benign_fpr"]["lo"] is None and d["benign_fpr"]["hi"] is None
+
+
+def test_latency_ratios_are_relative_to_the_engine_row(tiny_traj: Path) -> None:
+    from agentfw.bench.trajectory import _ROW_BY_NAME, latency_ab
+
+    d = tiny_traj / "seed-0"
+    raws, _, _ = load_dir(d)
+    rows = [_ROW_BY_NAME["gate"], _ROW_BY_NAME["engine"]]
+    lat = latency_ab(raws, load_schema_hints(d), rows, n_calls=200, warmup=50)
+    assert lat["rows"]["engine"]["ratio_p50"] == 1.0
+    assert lat["rows"]["engine"]["ratio_p99"] == 1.0
+
+
+def test_calibration_needs_a_benign_session_not_a_benign_row() -> None:
+    from agentfw.bench.trajectory import _has_benign_calibration_session
+
+    setup = _row("s", split="calibration", density=0.1)
+    atk = dataclasses.replace(setup, label="attack", attack_family="exfil", attack_id="a1")
+    assert not _has_benign_calibration_session([setup, atk])
+    assert _has_benign_calibration_session([setup])
+    assert not _has_benign_calibration_session([dataclasses.replace(setup, split="test")])
+

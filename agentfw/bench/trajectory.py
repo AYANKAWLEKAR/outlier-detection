@@ -526,13 +526,20 @@ def _sessions(rows: Sequence[ScoreRow], vital: bool, cfg: EngineConfig) -> dict[
         "calibration_curve": None,
         "selected": None,
     }
-    if any(r.split == "calibration" and r.label != "attack" for r in rows):
+    if _has_benign_calibration_session(rows):
         warn, halt = select_on_calibration(rows)
         out["halt"]["calibration_curve"] = [
             {"theta": t, "benign_share": s, "n_benign": n} for t, s, n in calibration_curve(rows)
         ]
         out["halt"]["selected"] = {"theta_warn": warn, "theta_halt": halt}
     return out
+
+
+def _has_benign_calibration_session(rows: Sequence[ScoreRow]) -> bool:
+    """Does the calibration partition hold a benign *session* (what :func:`calibration_curve`
+    needs; a benign setup row of an attacked session does not count)?"""
+    cal = [r for r in rows if r.split == "calibration"]
+    return any(lab == "benign" for lab in SM.session_labels(cal).values())
 
 
 def row_summary(rows: Sequence[ScoreRow], det: Engine, *, n_boot: int) -> dict[str, Any]:
@@ -641,9 +648,9 @@ def paired_deltas(
     n_sess = int(a.session.max()) + 1 if a.session.size else 0
     pa, pb = _per_session(a, n_sess), _per_session(b, n_sess)
     rng = np.random.default_rng(seed)
-    weights = np.stack(
-        [np.bincount(rng.integers(0, n_sess, n_sess), minlength=n_sess) for _ in range(n_boot)]
-    ).astype(np.float64)
+    draws = [np.bincount(rng.integers(0, n_sess, n_sess), minlength=n_sess) for _ in range(n_boot)]
+    # ``n_boot == 0``: point estimates only, intervals unavailable
+    weights = (np.stack(draws) if draws else np.empty((0, n_sess))).astype(np.float64)
     q = [100 * (1 - level) / 2, 100 * (1 + level) / 2]
     out: dict[str, dict[str, float | None]] = {}
     for name in pa:
@@ -674,7 +681,8 @@ def latency_ab(
     """Alternated A/B ``score`` latency: the first ``n_calls`` calls in replay order, each scored
     by every row's engine in one process (the order rotated by one every call), then every
     engine updated with ``ALLOWED``; the first ``warmup`` calls are not timed. Per row: p50, p99
-    and mean in microseconds, and p50 / p99 relative to the first row."""
+    and mean in microseconds, and p50 / p99 relative to the ``engine`` row (the first row when
+    ``engine`` is absent)."""
     engines = [_engine(r, hints) for r in rows]
     calls = sorted(raws, key=lambda r: (r.ts_unix_ms, r.session_id, r.seq_no))[:n_calls]
     tracker = SessionTracker()
@@ -698,7 +706,7 @@ def latency_ab(
         arr = np.asarray(xs)
         p50, p99 = np.percentile(arr, [50, 99]) if arr.size else (math.nan, math.nan)
         per[r.name] = {"p50_us": float(p50), "p99_us": float(p99), "mean_us": float(arr.mean())}
-    ref = per[rows[0].name]
+    ref = per.get("engine", per[rows[0].name])
     for v in per.values():
         v["ratio_p50"] = v["p50_us"] / ref["p50_us"]
         v["ratio_p99"] = v["p99_us"] / ref["p99_us"]
