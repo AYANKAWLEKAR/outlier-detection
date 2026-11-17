@@ -412,14 +412,15 @@ def _final_labels(raws: Sequence[RawCall], attacks: Sequence[Label]) -> list[Lab
 
 
 def task_ids(rendered: RenderedSession) -> tuple[str, ...]:
-    """The id-like values of a session's resolved task inputs (``slot_values``), deduplicated in
-    task order and capped at ``RawCall``'s 64. They are what the task handed the agent, so ids
-    that appear in the calls are not "new" (F1)."""
+    """The id-like values of a session's resolved task inputs (``slot_values``) that its prompt
+    discloses, deduplicated in task order and capped at ``RawCall``'s 64. They are what the task
+    handed the agent, so ids that appear in the calls are not "new" (F1); a resolved slot the
+    prompt does not show was never handed over (T-73)."""
     seen: dict[str, None] = {}
     for task in rendered.tasks:
         for values in task.slot_values.values():
             for v in values.values():
-                if isinstance(v, str) and is_id_like(v):
+                if isinstance(v, str) and is_id_like(v) and v in rendered.prompt:
                     seen.setdefault(v)
     return tuple(seen)[:64]
 

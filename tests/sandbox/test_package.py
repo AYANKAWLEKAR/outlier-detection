@@ -961,10 +961,13 @@ def test_fake_run_writes_schemas_and_task_ids(tmp_path: Path) -> None:
     assert schemas["stripe.create_refund"].annotations.destructive is True
     rows = (run / "schemas.jsonl").read_bytes().splitlines()
     assert len(rows) == len(schemas)  # one row per (tool, hash) across all sessions
+    firsts = []
     for f in sorted((run / "raw").glob("*.jsonl")):
         calls = [RawCall.model_validate_json(x) for x in f.read_bytes().splitlines()]
-        assert calls[0].task_ids and all(is_id_like(x) for x in calls[0].task_ids)
+        assert all(is_id_like(x) for x in calls[0].task_ids)
         assert all(c.task_ids == () for c in calls[1:])
+        firsts.append(calls[0].task_ids)
+    assert any(firsts)  # a prompt with no id discloses none (T-73)
 
 
 def test_merge_schemas_logs_drift_across_sessions(
@@ -1044,3 +1047,15 @@ def test_package_keeps_the_latest_definition_after_a_rollback(tmp_path: Path) ->
     rows = _jsonl(out / "schemas.jsonl")
     assert [r["hash"] for r in rows] == [a["hash"], b["hash"], a["hash"]]
     assert load_schemas(out / "schemas.jsonl")["zendesk.get_ticket"].hash == a["hash"]
+
+
+def test_task_ids_are_only_the_ids_the_prompt_discloses() -> None:
+    """A resolved slot the prompt does not show (a ticket's charge id when the template names
+    only the ticket) was never handed to the agent, so it is no task input (T-73)."""
+    from agentfw.sandbox.run import task_ids
+    from agentfw.sandbox.tasks.schema import RenderedSession, RenderedTask
+
+    slots = {"ticket": {"id": "TCK-104233", "charge_id": "ch_3NxQ8vK2eZvKYlo2C0a1b2c3"}}
+    t = RenderedTask("refund", "Resolve ticket TCK-104233.", slots, [], [])
+    s = RenderedSession("a1", t.prompt, [t], [], [], 25)
+    assert task_ids(s) == ("TCK-104233",)
