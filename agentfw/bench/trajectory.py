@@ -502,7 +502,7 @@ def _sessions(rows: Sequence[ScoreRow], vital: bool, cfg: EngineConfig) -> dict[
         out["halt"] = None
         return out
     base = 0.015
-    h = SM.halt_metrics(rows, EngineConfig().theta_halt, base)
+    h = SM.halt_metrics(rows, cfg.theta_halt, base)
     ff = SM.first_flag_halts(rows, base)
     sens = []
     for t in THETA_GRID:
@@ -514,7 +514,7 @@ def _sessions(rows: Sequence[ScoreRow], vital: bool, cfg: EngineConfig) -> dict[
         if a["false_halt_rate"] is not None and b["false_halt_rate"] is not None
     ]
     out["halt"] = {
-        "theta_halt": EngineConfig().theta_halt,
+        "theta_halt": cfg.theta_halt,
         "session_base_rate": base,
         "density_policy": _halt(h),
         "first_flag": _halt(ff),

@@ -46,6 +46,12 @@ def _table(head: Sequence[str], body: Sequence[Sequence[str]]) -> list[str]:
     return out
 
 
+def _halt_theta(halts: Mapping[str, Mapping[str, Any]]) -> str:
+    """The θ_halt the rows' density policy was evaluated at (each row stores its own, T-68)."""
+    got = {h["theta_halt"] for h in halts.values()}
+    return f"θ_halt = {got.pop()}" if len(got) == 1 else "each row's θ_halt"
+
+
 def _seed_block(seed: str, b: Mapping[str, Any], label: str, theta_row: str) -> list[str]:
     rows: Mapping[str, Any] = b["rows"]
     deltas: Mapping[str, Any] = b["deltas"]
@@ -112,7 +118,11 @@ def _seed_block(seed: str, b: Mapping[str, Any], label: str, theta_row: str) -> 
     L += _table(["row", *[f"{f} (N={n_atk.get(f, '?')})" for f in fams]], body)
     halts = {n: s["sessions"]["halt"] for n, s in rows.items() if s["sessions"]["halt"]}
     if halts:
-        L += ["", "**Session halts** (density policy at θ_halt = 0.6 vs the first-flag baseline;"]
+        L += [
+            "",
+            f"**Session halts** (density policy at {_halt_theta(halts)} vs the first-flag "
+            "baseline;",
+        ]
         L += ["sessions of all splits; precision at a 1.5% session base rate).", ""]
         body = []
         for n, h in halts.items():

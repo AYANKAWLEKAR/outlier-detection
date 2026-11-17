@@ -408,3 +408,27 @@ def test_write_calibrated_rejects_a_report_from_another_normalizer(
             T._calibrate({"meta": meta}, "")
     T._calibrate({"meta": {"normalizer_hash": normalizer_hash()}}, "")
     assert len(called) == 1
+
+
+# -- CodeRabbit PR #1 ------------------------------------------------------------------------------
+
+
+def test_session_halts_use_the_configs_theta_halt() -> None:
+    """The halt summary evaluates (and records) the replay's own ``theta_halt``, not the default:
+    a benign session peaking at 0.7 does not halt at theta_halt 0.8 (T-68)."""
+    from agentfw.bench.trajectory import _sessions as sessions_summary
+
+    rows = _sessions([0.7] + [0.0] * 9)
+    got = sessions_summary(rows, False, EngineConfig(theta_halt=0.8))["halt"]
+    assert got["theta_halt"] == 0.8
+    assert got["density_policy"]["false_halt_rate"] == 0.0
+    dflt = sessions_summary(rows, False, EngineConfig())["halt"]
+    assert dflt["theta_halt"] == 0.6
+    assert dflt["density_policy"]["false_halt_rate"] == pytest.approx(0.1)
+
+
+def test_render_markdown_reads_the_stored_theta_halt() -> None:
+    from agentfw.bench.trajectory_md import _halt_theta
+
+    assert _halt_theta({"a": {"theta_halt": 0.8}, "b": {"theta_halt": 0.8}}) == "θ_halt = 0.8"
+    assert _halt_theta({"a": {"theta_halt": 0.6}, "b": {"theta_halt": 0.8}}) == "each row's θ_halt"
