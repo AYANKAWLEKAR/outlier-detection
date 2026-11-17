@@ -18,6 +18,7 @@ engine before Amendment A1 (``engine-pre-a1`` with ``engine-pre-a1-allow-all``).
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import math
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -34,7 +35,7 @@ from agentfw.bench.gate import (
     render_gate_matrix,
 )
 from agentfw.bench.metrics import GatePreview
-from agentfw.bench.replay import PROTOCOL_LABELS, OutcomeMode, protocol_label
+from agentfw.bench.replay import PROTOCOL_LABELS, OutcomeMode, SplitSpec, protocol_label
 
 __all__ = [
     "ALLOW_ALL_CAVEAT",
@@ -157,6 +158,15 @@ def _rank_key(r: LeaderboardRow) -> tuple[bool, float, bool, float, str]:
     )
 
 
+def _split_key(split: Any) -> tuple[tuple[str, str], ...]:
+    """A report's ``meta.split`` as a comparable key, absent fields read as the
+    :class:`SplitSpec` defaults (a sensitivity row copied from ``matrix.json`` records only
+    ``kind``; ``matrix.json`` is computed with ``SplitSpec()``)."""
+    d = dataclasses.asdict(SplitSpec())
+    d.update(dict(split) if isinstance(split, Mapping) else {})
+    return tuple(sorted((str(k), repr(v)) for k, v in d.items()))
+
+
 def build_leaderboard(
     report_paths: Sequence[Path],
     *,
@@ -175,6 +185,10 @@ def build_leaderboard(
     splits = {str(r["meta"]["split"]["kind"]) for _, r in reps}
     if len(splits) != 1:
         raise ValueError(f"reports mix split kinds {sorted(splits)}; tabulate them separately")
+    if len({_split_key(r["meta"]["split"]) for _, r in reps}) != 1:
+        raise ValueError(
+            "reports mix split configurations (train_frac / seed); tabulate them separately"
+        )
     return Leaderboard(
         label=label,
         dataset_sha=shas.pop(),
@@ -257,7 +271,7 @@ def _family_md(lb: Leaderboard) -> list[str]:
 
 def _gate_rows(
     reports: Mapping[str, Mapping[str, Any]], what: str
-) -> tuple[dict[str, dict[OutcomeMode, GatePreview]], str, str]:
+) -> tuple[dict[str, dict[OutcomeMode, GatePreview]], str, str, tuple[tuple[str, str], ...]]:
     """The ``GATE_RUNS`` pairs of ``reports`` as gate rows, their dataset sha and their split
     kind; refuses a pair
     missing a protocol, a run without a gate section or without ``meta.dataset_sha`` /
@@ -265,7 +279,7 @@ def _gate_rows(
     different engine configurations (``meta.detector_config.cfg``; spec A1.5: same engine
     configuration, same dataset) and runs of different datasets or splits."""
     rows: dict[str, dict[OutcomeMode, GatePreview]] = {}
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, tuple[tuple[str, str], ...]]] = set()
     for row, runs in GATE_RUNS.items():
         by_mode: dict[OutcomeMode, GatePreview] = {}
         cfgs: list[object] = []
@@ -295,7 +309,7 @@ def _gate_rows(
                     f"{meta.get('detector')!r})"
                 )
             cfgs.append((meta.get("detector_config") or {}).get("cfg"))
-            seen.add((str(sha), str(split)))
+            seen.add((str(sha), str(split), _split_key(meta.get("split"))))
             by_mode[mode] = preview_from_json(dict(gate))
         if cfgs[0] != cfgs[1]:
             raise ValueError(
@@ -306,8 +320,8 @@ def _gate_rows(
         rows[row] = by_mode
     if len(seen) != 1:
         raise ValueError(f"{what}: the gate runs mix datasets or splits {sorted(seen)}")
-    sha, split = seen.pop()
-    return rows, sha, split
+    sha, split, key = seen.pop()
+    return rows, sha, split, key
 
 
 def render_gate_section(
@@ -336,10 +350,15 @@ def render_gate_section(
     different engine configurations, the runs of one mapping mix datasets or splits, or the
     ``sensitivity`` runs are of the dataset of ``reports`` (compared on 12 characters).
     """
-    results, sha, split = _gate_rows(reports, "reports")
+    results, sha, split, split_key = _gate_rows(reports, "reports")
     sens = None
     if sensitivity is not None:
-        sens, sens_sha, _ = _gate_rows(sensitivity, "sensitivity")
+        sens, sens_sha, _, sens_key = _gate_rows(sensitivity, "sensitivity")
+        if sens_key != split_key:
+            raise ValueError(
+                f"sensitivity: the companion runs use another split configuration "
+                f"({dict(sens_key)}) than the gate runs ({dict(split_key)})"
+            )
         if sens_sha[:12] == sha[:12]:  # matrix.json keeps 12 characters of a sha
             raise ValueError(
                 f"sensitivity: the companion runs are of the same dataset as the gate runs "

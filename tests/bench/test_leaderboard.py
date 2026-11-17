@@ -108,6 +108,16 @@ def test_mixed_split_raises(tmp_path: Path) -> None:
         build_leaderboard([a, b])
 
 
+def test_mixed_split_configuration_raises(tmp_path: Path) -> None:
+    a = _report(tmp_path, "engine")
+    b = _report(tmp_path, "random")
+    rep = orjson.loads(b.read_bytes())
+    rep["meta"]["split"]["train_frac"] = 0.9
+    b.write_bytes(orjson.dumps(rep))
+    with pytest.raises(ValueError, match="split"):
+        build_leaderboard([a, b])
+
+
 def test_no_reports_raises() -> None:
     with pytest.raises(ValueError, match="no report"):
         build_leaderboard([])
@@ -448,6 +458,7 @@ def test_gate_section_pre_a1_block_shows_the_pre_a1_runs(reports: dict[str, Any]
     [
         ("engine-pre-a1", {"dataset_sha": "b" * 64}),  # another dataset
         ("engine-allow-all", {"split": {"kind": "agent"}}),  # another split
+        ("engine-allow-all", {"split": {"kind": "time", "train_frac": 0.9}}),  # another fraction
     ],
 )
 def test_gate_section_refuses_runs_mixing_datasets_or_splits(
@@ -759,4 +770,14 @@ def test_gate_section_refuses_sensitivity_rows_of_the_gate_dataset(
     for rep in sens.values():
         rep["meta"] = {**rep["meta"], "dataset_sha": sens_sha}
     with pytest.raises(ValueError, match="sensitivity.*same dataset"):
+        render_gate_section(reports, sensitivity=sens)
+
+
+def test_gate_section_refuses_sensitivity_runs_of_another_split(
+    reports: dict[str, Any],
+) -> None:
+    sens = _sens()
+    for rep in sens.values():
+        rep["meta"] = {**rep["meta"], "split": {"kind": "agent"}}
+    with pytest.raises(ValueError, match="split"):
         render_gate_section(reports, sensitivity=sens)
