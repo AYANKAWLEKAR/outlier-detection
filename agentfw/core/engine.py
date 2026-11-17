@@ -143,6 +143,7 @@ from agentfw.core.envelope import (
 )
 from agentfw.core.fusion import FusionResult, annotate, fuse
 from agentfw.core.hints import ToolHint
+from agentfw.core.normalize import RECENT_MAX
 from agentfw.core.patterns import try_number
 from agentfw.core.priors import PooledPriors
 from agentfw.core.schema_infer import TypeInference, TypeView
@@ -230,6 +231,12 @@ class Engine:
             for name in ("vital_w_loop", "vital_w_loop_polling", "vital_w_spin", "vital_w_stall"):
                 if getattr(cfg, name) < 1:
                     raise ValueError(f"{name} must be >= 1 with vital, got {getattr(cfg, name)}")
+            for name in ("vital_w_spin", "vital_w_stall"):  # need a full window of ``recent``
+                if getattr(cfg, name) > RECENT_MAX:
+                    raise ValueError(
+                        f"{name} must be <= {RECENT_MAX} (the recent-call ring) with vital, "
+                        f"got {getattr(cfg, name)}"
+                    )
         self.cfg = cfg
         self.store: StateStore = DictStore() if store is None else store
         self.enabled = frozenset(enabled)

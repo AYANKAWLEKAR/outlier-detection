@@ -1238,3 +1238,19 @@ def test_vital_rejects_non_positive_windows(field: str) -> None:
     with pytest.raises(ValueError, match=field):
         Engine(cfg, enabled=ALL_DETECTORS | {VITAL})
     Engine(cfg)  # unused without the vital detector
+
+
+@pytest.mark.parametrize("field", ["vital_w_spin", "vital_w_stall"])
+def test_vital_rejects_full_windows_beyond_the_recent_ring(field: str) -> None:
+    """Spin and stall need a full window of ``recent`` calls, which holds ``RECENT_MAX``: a
+    larger window would silently never fire (T-70). The ring's size itself is accepted."""
+    from typing import cast
+
+    from agentfw.core.config import EngineConfig
+    from agentfw.core.engine import ALL_DETECTORS, VITAL, Engine
+    from agentfw.core.normalize import RECENT_MAX
+
+    enabled = ALL_DETECTORS | {VITAL}
+    with pytest.raises(ValueError, match=field):
+        Engine(EngineConfig(**cast(dict[str, Any], {field: RECENT_MAX + 1})), enabled=enabled)
+    Engine(EngineConfig(**cast(dict[str, Any], {field: RECENT_MAX})), enabled=enabled)
