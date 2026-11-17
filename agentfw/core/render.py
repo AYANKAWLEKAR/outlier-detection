@@ -34,8 +34,12 @@ _VITAL = {
 }
 
 
-def _number(v: object) -> float | None:
-    return float(v) if isinstance(v, int | float) and not isinstance(v, bool) else None
+def _count(v: object) -> str | None:
+    """A numeric ``observed`` as text: an int exactly (it may exceed a float's range), a float
+    with ``:g``; anything else ``None``."""
+    if isinstance(v, bool) or not isinstance(v, int | float):
+        return None
+    return str(v) if isinstance(v, int) else f"{v:g}"
 
 
 def _ordinal(p: float) -> str:
@@ -50,7 +54,7 @@ def _ordinal(p: float) -> str:
 
 def _what(r: Reason) -> str:
     field = r.field
-    observed = _number(r.observed)
+    observed = _count(r.observed)
     if r.detector == "magnitude":
         if r.percentile is not None:
             return f"{field} at {_ordinal(r.percentile)} percentile"
@@ -58,7 +62,7 @@ def _what(r: Reason) -> str:
     if r.detector == "novelty":
         return f"unseen {field} value"
     if r.detector == "velocity":
-        count = "" if observed is None else f": {observed:g} calls in the short window"
+        count = "" if observed is None else f": {observed} calls in the short window"
         return f"{field} total burst{count}" if field else f"call burst{count}"
     if r.detector == "sequence":
         if r.prereq_missing is not None:

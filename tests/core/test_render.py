@@ -215,3 +215,15 @@ def test_rendered_reasons_on_the_ci_dataset_hold_no_raw_id(tmp_path: Path) -> No
     assert len(rendered) > 100 and len(ids) > 100 and gated > 100
     leaks = [(s, i) for s in rendered for i in ids if i in s]
     assert not leaks, leaks[:5]
+
+
+def test_integer_observed_beyond_float_range_renders() -> None:
+    """An accepted integer too large for a float renders as an integer and does not break the
+    line (T-71)."""
+    info = TrajectoryInfo("history_only", None, False, 0.6, maturity="mature")
+    nov = reason("novelty", "amount", observed=10**400, maturity="mature", regime="history_only")
+    assert render_reason(nov, info) == "mature; unseen amount value (history_only)"
+    vel = reason("velocity", None, observed=10**30, maturity="mature", regime="history_only")
+    assert render_reason(vel, info) == (
+        f"mature; call burst: {10**30} calls in the short window (history_only)"
+    )
