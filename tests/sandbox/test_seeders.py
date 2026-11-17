@@ -169,6 +169,17 @@ def test_salesforce_seed_idempotent(tmp_path: Path) -> None:
     assert 100_000 - budget.remaining() - used <= 4  # the org check + three existence queries
 
 
+def test_salesforce_seed_finds_records_whose_marker_was_overwritten(tmp_path: Path) -> None:
+    cfg, company, sf = _cfg(tmp_path), build_company(0), _FakeSF()
+    budget = ApiBudget(tmp_path / "b.json", limit=100_000)
+    first = seed_salesforce(cfg, company, budget, client=sf)
+    for kind in ("Account", "Contact", "Opportunity"):
+        sf.records[kind][0]["Description"] = "updated by an agent task"
+    total = sum(len(v) for v in sf.records.values())
+    assert seed_salesforce(cfg, company, budget, client=sf) == first
+    assert sum(len(v) for v in sf.records.values()) == total
+
+
 def test_salesforce_seed_respects_budget(tmp_path: Path) -> None:
     budget = ApiBudget(tmp_path / "b.json", limit=5)
     with pytest.raises(BudgetExceeded):

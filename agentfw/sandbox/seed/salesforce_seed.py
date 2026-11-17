@@ -1,4 +1,5 @@
-"""Seed a Salesforce Developer Edition org. Idempotent via Description prefix `afw-seed:<key>`."""
+"""Seed a Salesforce Developer Edition org. Idempotent via Description prefix `afw-seed:<key>`,
+falling back to each record's natural key (see ``_NATURAL``) when a task overwrote the marker."""
 
 from __future__ import annotations
 
@@ -17,25 +18,56 @@ def _close_date(days: int) -> str:
     return (date(*_REFERENCE_DATE) + timedelta(days=days)).isoformat()
 
 
-def _existing(sf: Any, kind: str, budget: ApiBudget) -> dict[str, str]:
+#: Fields that identify a seeded record when an agent task overwrote its ``Description`` marker.
+_NATURAL: dict[str, tuple[str, ...]] = {
+    "Account": ("Name", "Website"),
+    "Contact": ("Email",),
+    "Opportunity": ("AccountId", "Name"),
+}
+
+
+def _natural(kind: str, rec: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(str(rec.get(f) or "") for f in _NATURAL[kind])
+
+
+class _Have:
+    """Seeded records of one kind: by ``afw-seed:`` marker, else by natural key."""
+
+    def __init__(self, kind: str, records: list[dict[str, Any]]) -> None:
+        self.kind = kind
+        self.by_key: dict[str, str] = {}
+        self.by_natural: dict[tuple[str, ...], str] = {}
+        for r in records:
+            desc = r.get("Description") or ""
+            if desc.startswith(PREFIX):
+                self.by_key[desc[len(PREFIX) :]] = r["Id"]
+            elif all(r.get(f) for f in _NATURAL[kind]):
+                self.by_natural.setdefault(_natural(kind, r), r["Id"])
+
+    def find(self, key: str, data: dict[str, Any]) -> str | None:
+        if key in self.by_key:
+            return self.by_key[key]
+        return self.by_natural.get(_natural(self.kind, data))
+
+
+def _existing(sf: Any, kind: str, budget: ApiBudget) -> _Have:
     budget.charge(1)
     # Description is a Long Text Area: not filterable in SOQL, so filter the prefix here.
-    res = sf.query_all(f"SELECT Id, Description FROM {kind}")
-    return {
-        r["Description"][len(PREFIX) :]: r["Id"]
-        for r in res["records"]
-        if (r.get("Description") or "").startswith(PREFIX)
-    }
+    fields = ", ".join(("Id", "Description", *_NATURAL[kind]))
+    res = sf.query_all(f"SELECT {fields} FROM {kind}")
+    return _Have(kind, list(res["records"]))
 
 
 def _create(
-    sf: Any, kind: str, key: str, data: dict[str, Any], have: dict[str, str], budget: ApiBudget
+    sf: Any, kind: str, key: str, data: dict[str, Any], have: _Have, budget: ApiBudget
 ) -> str:
-    if key in have:
-        return have[key]
+    found = have.find(key, data)
+    if found is not None:
+        have.by_key[key] = found
+        return found
     budget.charge(1)
     rid = str(getattr(sf, kind).create({**data, "Description": f"{PREFIX}{key}"})["id"])
-    have[key] = rid
+    have.by_key[key] = rid
     return rid
 
 
