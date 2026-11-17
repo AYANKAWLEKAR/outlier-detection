@@ -224,6 +224,12 @@ class Engine:
                 "need 0 < mat_warm_n <= mat_mature_n, got "
                 f"mat_warm_n={cfg.mat_warm_n}, mat_mature_n={cfg.mat_mature_n}"
             )
+        if cfg.seq_age_discount and cfg.age_h < 1:  # ω divides by age_h
+            raise ValueError(f"age_h must be >= 1 with seq_age_discount, got {cfg.age_h}")
+        if VITAL in enabled:  # a window of 0 would slice the whole history (``[-0:]``)
+            for name in ("vital_w_loop", "vital_w_loop_polling", "vital_w_spin", "vital_w_stall"):
+                if getattr(cfg, name) < 1:
+                    raise ValueError(f"{name} must be >= 1 with vital, got {getattr(cfg, name)}")
         self.cfg = cfg
         self.store: StateStore = DictStore() if store is None else store
         self.enabled = frozenset(enabled)

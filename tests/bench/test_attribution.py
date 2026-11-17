@@ -104,7 +104,12 @@ def test_tool_hints_pickle_for_parallel_attribution() -> None:
 
     from agentfw.core.hints import ToolAnnotations, ToolHint
 
-    h = ToolHint(kind="write", field_hints={"amount": "money"}, annotations=ToolAnnotations(destructive=True), has_schema=True)
+    h = ToolHint(
+        kind="write",
+        field_hints={"amount": "money"},
+        annotations=ToolAnnotations(destructive=True),
+        has_schema=True,
+    )
     back = pickle.loads(pickle.dumps(h))
     assert back == h
     assert dict(back.field_hints) == {"amount": "money"}
