@@ -507,3 +507,12 @@ def test_offline_halts_match_the_engine_verdicts(tmp_path: Path) -> None:
     assert halt_metrics(rows, 0.5).false_halt_rate == pytest.approx(
         sum(s in halted for s in benign) / len(benign)
     )
+
+
+def test_sessions_without_an_observed_density_are_out_of_the_denominators() -> None:
+    """A sampled run leaves unsampled rows' density ``None``; such a session was never
+    evaluated, so it is neither halted nor not halted (T-76)."""
+    rows = [_row("halt", density=0.9), _row("calm", density=0.1)]
+    unscored = [_row("unscored", density=None), _row("unscored", density=None)]
+    assert halt_metrics(rows, 0.5).false_halt_rate == 0.5
+    assert halt_metrics(rows + unscored, 0.5).false_halt_rate == 0.5

@@ -273,7 +273,12 @@ def _metrics(
     labels = session_labels(rows)
     halted: dict[SessionLabel, list[bool]] = defaultdict(list)
     from_onset: list[int] = []
+    # a sampled run leaves unsampled rows' density None: a session with none observed was never
+    # evaluated, so it is out of every denominator (T-76)
+    observed = any(r.density is not None for r in rows)
     for sid, sess in _by_session(rows).items():
+        if observed and all(r.density is None for r in sess):
+            continue
         lab = labels[sid]
         at = _first(sess, halts)
         halted[lab].append(at is not None)
