@@ -112,16 +112,17 @@ _F2 = (
 )
 
 
-@pytest.mark.parametrize("mode", _modes(allow=_F2, review=_F2))
+@pytest.mark.parametrize(
+    ("mode", "seed"),
+    [pytest.param(m, s, marks=_xfail(_F2)) for m in PROTOCOLS for s in SEEDS],
+)
 def test_f2_benign_vital_false_flag_rate_at_most_1pct(
-    report: dict[str, Any], mode: OutcomeMode
+    report: dict[str, Any], mode: OutcomeMode, seed: int
 ) -> None:
-    got = {
-        s: _rows(b)["vital"]["sessions"]["vital_false_flag_rate"]
-        for s, b in _seeds(report, mode).items()
-    }
-    msg = f"{PROTOCOL_LABELS[mode]}: benign vital false-flag rate per seed {got} (bar 0.01)"
-    assert all(v <= 0.01 for v in got.values()), msg
+    """One case per protocol and seed, so a seed that recovers is reported on its own."""
+    got = _seeds(report, mode)[str(seed)]["rows"]["vital"]["sessions"]["vital_false_flag_rate"]
+    msg = f"{PROTOCOL_LABELS[mode]} seed {seed}: benign vital false-flag rate {got} (bar 0.01)"
+    assert got <= 0.01, msg
 
 
 _F5 = (
