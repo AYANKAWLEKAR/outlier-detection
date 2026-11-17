@@ -314,6 +314,17 @@ async def test_resume_after_crash_skips_completed_sessions(
     assert len(_labels(out, plans[5].session_id)) == len(raws)
 
 
+async def test_resume_with_another_model_is_refused(tmp_path: Path) -> None:
+    plans = plan_sessions(AGENTS, TEMPLATES, 2, AttackMix(action_rate=0, prompt_rate=0), 1)
+    out = tmp_path / "run"
+    await execute(plans, fake_config(data_dir=tmp_path / "data"), out, backends="fake")
+    meta = (out / "run_meta.json").read_bytes()
+    other = fake_config(data_dir=tmp_path / "data", llm_model="another-model")
+    with pytest.raises(ValueError, match="run_meta"):
+        await execute(plans, other, out, backends="fake")
+    assert (out / "run_meta.json").read_bytes() == meta
+
+
 async def test_usd_budget_stops_scheduling(tmp_path: Path) -> None:
     plans = plan_sessions(AGENTS, TEMPLATES, 5, AttackMix(action_rate=0, prompt_rate=0), 0)
     cfg = fake_config(

@@ -660,6 +660,21 @@ async def execute(
         return await _execute_locked(plans, cfg, out_dir, backends, llm, sf_budget)
 
 
+def _check_resume_meta(out_dir: Path, meta: Mapping[str, Any]) -> None:
+    """Refuse to resume a run whose recorded sessions were produced under another mode or model
+    (``run_meta.json`` is the provenance packaging gives every call of the run)."""
+    path = out_dir / RUN_META
+    if not path.exists() or not any(r.get("status") == "completed" for r in _read_ledger(out_dir)):
+        return
+    old = orjson.loads(path.read_bytes())
+    diff = sorted(k for k in meta if old.get(k) != meta[k])
+    if diff:
+        raise ValueError(
+            f"{path}: run_meta {diff} differ from this run's settings; the completed sessions were "
+            "recorded under the old values (resume with them, or use a new run directory)"
+        )
+
+
 async def _execute_locked(
     plans: Sequence[SessionPlan],
     cfg: SandboxConfig,
@@ -671,8 +686,10 @@ async def _execute_locked(
     for d in (RAW_DIR, LABELS_DIR, TRANSCRIPTS_DIR, WORK_DIR):
         (out_dir / d).mkdir(parents=True, exist_ok=True)
     _repair_ledger(out_dir / LEDGER)
+    meta = {"mode": mode, "model": cfg.llm_model}
+    _check_resume_meta(out_dir, meta)
     _write_atomic(  # run metadata for packaging: the model id only, never a secret
-        out_dir / RUN_META, orjson.dumps({"mode": mode, "model": cfg.llm_model}, option=_JSONL)
+        out_dir / RUN_META, orjson.dumps(meta, option=_JSONL)
     )
     templates = load_templates(TASKS_DIR)
     agents = {a.agent_id: a for a in load_agents(AGENTS_DIR)}
