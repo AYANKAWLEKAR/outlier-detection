@@ -422,3 +422,12 @@ def test_sweeps_cli_records_the_protocol_of_the_grid_suites(
         assert [e["outcomes"] for e in rep["suites"]["saturation"]] == [mode]
     md = (tmp_path / "d" / "sweeps.md").read_text()
     assert "labels act as a perfect human reviewer" in md.split("## ")[0]
+
+
+def test_ablation_forwards_cfg_only_to_engine_variants(tiny_dataset: Path) -> None:
+    from agentfw.core.config import EngineConfig
+
+    rows = run_ablation(
+        tiny_dataset, ["engine", "random"], SplitSpec(), outcomes="allow", cfg=EngineConfig()
+    )
+    assert [r.variant for r in rows] == ["engine", "random"]

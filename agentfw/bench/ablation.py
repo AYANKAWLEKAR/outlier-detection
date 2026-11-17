@@ -54,7 +54,10 @@ def replay_detector(
     if detector not in DETECTORS:
         raise KeyError(f"unknown detector {detector!r}; available: {sorted(DETECTORS)}")
     raws, labels = _load(str(traces_dir))
-    det = make_detector(detector) if cfg is None else make_detector(detector, cfg=cfg)
+    engine = detector == "engine" or detector.startswith("engine-")
+    det = (
+        make_detector(detector, cfg=cfg) if cfg is not None and engine else make_detector(detector)
+    )
     return replay(raws, labels, det, split, outcomes=outcomes), det
 
 
