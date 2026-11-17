@@ -39,6 +39,11 @@ def test_tier2_exit() -> None:
         "engine-sample",
     } <= reports.keys()
     assert len({r["meta"]["dataset_sha"] for r in reports.values()}) == 1
+    # ... and that one dataset is the validated dataset/v1 (no stale results of an older build)
+    manifest = json.loads((DATASET / "manifest.json").read_text())
+    assert {r["meta"]["dataset_sha"] for r in reports.values()} == {
+        manifest["files"]["traces.jsonl"]
+    }
     for name in ("engine", "engine-sample"):
         h = reports[name]["headline"]
         assert h["auprc_ci"][0] <= h["auprc"] <= h["auprc_ci"][1]
