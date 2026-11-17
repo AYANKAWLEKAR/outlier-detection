@@ -282,7 +282,7 @@ class InPlaceMutator(RefundMutator):
     def mutate(self, raw: RawCall, history: Sequence[RawCall]) -> MutationResult | None:
         if raw.tool_id != self.target:
             return None
-        raw.args["amount"] = 999.0  # type: ignore[index]
+        raw.args["amount"] = 999.0
         return MutationResult(raw=raw, forward=True, synthetic_result=self.synthetic)
 
 
