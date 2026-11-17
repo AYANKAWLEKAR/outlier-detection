@@ -86,7 +86,19 @@ class SqliteZendeskBackend:
 
     def restore(self, snap: bytes) -> None:
         with self._lock:
-            self._con.deserialize(snap)
+            file_backed = bool(self._con.execute("PRAGMA database_list").fetchone()[2])
+            if not file_backed:  # in memory: an exact, byte-for-byte restore
+                self._con.deserialize(snap)
+                return
+        # deserialize() would turn a file-backed connection into an in-memory one; load the
+        # snapshot into a scratch connection and copy it back into the file instead.
+        src = sqlite3.connect(":memory:")
+        try:
+            src.deserialize(snap)
+            with self._lock:
+                src.backup(self._con)
+        finally:
+            src.close()
 
     def set_ticket_body(self, ticket_id: str, body: str) -> None:
         """Overwrite a ticket's body (test/injection hook; not an MCP tool)."""

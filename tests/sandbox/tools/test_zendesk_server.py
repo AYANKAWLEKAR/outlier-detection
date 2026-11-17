@@ -145,3 +145,17 @@ async def test_all_ids_returned_are_id_like(server) -> None:  # type: ignore[no-
         assert is_id_like(t["charge_id"])
     assert len({k.key for k in COMPANY.tickets}) == len(COMPANY.tickets)
     assert all(is_id_like(k.key) for k in COMPANY.tickets)
+
+
+def test_restore_keeps_a_file_backed_db_on_disk(tmp_path: Path) -> None:
+    from agentfw.sandbox.tools.zendesk_server import SqliteZendeskBackend, _connect
+
+    db = tmp_path / "zendesk.db"
+    seed_zendesk(db, COMPANY, fake_stripe_ids(COMPANY))
+    backend = SqliteZendeskBackend(_connect(db))
+    snap = backend.snapshot()
+    backend.set_ticket_body(FIRST.key, "planted")
+    backend.restore(snap)
+    assert SqliteZendeskBackend(_connect(db)).get_ticket(FIRST.key)["description"] != "planted"
+    backend.update_status(FIRST.key, "solved")  # later writes still reach the file
+    assert SqliteZendeskBackend(_connect(db)).get_ticket(FIRST.key)["status"] == "solved"
