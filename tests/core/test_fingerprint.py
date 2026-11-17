@@ -58,8 +58,10 @@ def test_only_first_4kb_counts_and_meta_tokens_matter() -> None:
 
 
 def test_split_multibyte_char_is_dropped_not_fatal() -> None:
-    text = "a " * 2047 + "é" * 10  # the 4096-byte cut lands inside a 2-byte char
+    text = "a " * 2047 + "a" + "é" * 10  # 4095 ASCII bytes: the 4096-byte cut splits an é
+    assert len(text[:4096].encode("utf-8")) > 4096 and len(("a " * 2047 + "a").encode()) == 4095
     assert resp_fingerprint(text, None, False) is not None
+    assert resp_fingerprint(text, None, False) == resp_fingerprint("a " * 2047 + "a", None, False)
 
 
 def test_large_response_is_clipped_before_encoding() -> None:
