@@ -58,7 +58,7 @@ import orjson
 from agentfw.core.envelope import JsonValue, Label, RawCall, ResponseMeta
 from agentfw.core.ids import new_ulid
 from agentfw.core.patterns import email_domain, is_id_like
-from agentfw.synth.dists import IdPool, new_id
+from agentfw.synth.dists import IdPool, new_id, uniform
 from agentfw.synth.grammar import plan_args
 from agentfw.synth.schema import ArgSpec, Catalog, DistSpec, Persona
 
@@ -459,7 +459,7 @@ def magnitude_spike(
     if not cands:
         return None
     k = int(rng.integers(len(cands)))
-    log_m = rng.uniform(np.log(M_MIN), np.log(M_MAX))
+    log_m = uniform(rng, np.log(M_MIN), np.log(M_MAX))
     if ctx.far is None:
         i, name = cands[k]
         m = float(np.clip(np.exp(log_m), M_MIN, M_MAX))
@@ -659,7 +659,7 @@ def scope_blowup(
     i, name = cands[int(rng.integers(len(cands)))]
     a = ctx.catalog[session[i].tool_id].args[name]
     orig = [str(x) for x in session[i].args[name]]  # type: ignore[union-attr]
-    n = int(round(np.exp(rng.uniform(np.log(SCOPE_MIN), np.log(SCOPE_MAX)))))
+    n = int(round(np.exp(uniform(rng, np.log(SCOPE_MIN), np.log(SCOPE_MAX)))))
     n = max(n, len(orig) + 1)
     new = mutate_replace(
         session[i], name, blow_up_list(orig, a.type == "list_of_id", n, a.prefix or "nx_", rng)
@@ -681,7 +681,7 @@ def velocity_burst(
         return None
     orig = session[cands[int(rng.integers(len(cands)))]]
     r = int(rng.integers(BURST_MIN, BURST_MAX + 1))
-    w_ms = int(round(rng.uniform(BURST_W_MIN_S, BURST_W_MAX_S) * 1000))
+    w_ms = int(round(uniform(rng, BURST_W_MIN_S, BURST_W_MAX_S) * 1000))
     dups = burst_duplicates(orig, r, w_ms, rng)
     merged = _renumber(sorted([*session, *dups], key=lambda c: c.ts_unix_ms))  # stable: dups last
     return AttackResult(
@@ -703,7 +703,7 @@ def slow_drift(
         return None
     i, name = cands[int(rng.integers(len(cands)))]
     tool = session[i].tool_id
-    eps = float(rng.uniform(EPS_MIN, EPS_MAX))
+    eps = float(uniform(rng, EPS_MIN, EPS_MAX))
     remaining = len(ctx.persona_sessions) - ctx.session_index
     k = int(rng.integers(K_MIN, min(K_MAX, remaining) + 1))
     window = [session, *ctx.persona_sessions[ctx.session_index + 1 : ctx.session_index + k]]
@@ -743,7 +743,7 @@ def exfil_volume(
     if not cands:
         return None
     i = cands[int(rng.integers(len(cands)))]
-    v = float(np.clip(np.exp(rng.uniform(np.log(V_MIN), np.log(V_MAX))), V_MIN, V_MAX))
+    v = float(np.clip(np.exp(uniform(rng, np.log(V_MIN), np.log(V_MAX))), V_MIN, V_MAX))
     read = session[i]
     assert read.response_meta is not None
     median = _item_median(read.tool_id, ctx.catalog)

@@ -30,7 +30,7 @@ import numpy as np
 import orjson
 
 from agentfw.core.envelope import JsonValue, ResponseMeta
-from agentfw.synth.dists import IdPool, Sampled, WeightsCache, new_id, sample
+from agentfw.synth.dists import IdPool, Sampled, WeightsCache, new_id, sample, uniform
 from agentfw.synth.schema import ArgSpec, Catalog, DistSpec, Persona, TaskSpec, ToolSpec
 
 __all__ = ["PlannedCall", "plan_args", "walk"]
@@ -186,7 +186,7 @@ def _build_args(
             _, ref, lo, hi = b.split(":")
             base = _resolve(aliases, ref)
             assert isinstance(base, int | float)
-            args[name] = round(float(base) * float(ctx.rng.uniform(float(lo), float(hi))), 2)
+            args[name] = round(float(base) * float(uniform(ctx.rng, float(lo), float(hi))), 2)
         else:
             args[name] = _adapt(ctx, tool, name, a, _resolve(aliases, b))
     return args

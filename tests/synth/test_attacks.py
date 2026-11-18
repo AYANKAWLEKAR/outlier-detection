@@ -486,7 +486,10 @@ def _spiked(session: list[RawCall], res: AttackResult) -> tuple[float, float, st
 
 
 class _FixedRng:
-    """Stands in for the attack stream: candidate index ``k`` and the drawn ``ln m``."""
+    """Stands in for the attack stream: candidate index ``k`` and the drawn ``ln m``.
+
+    ``magnitude_spike`` draws ``ln m`` as ``dists.uniform(rng, ln M_MIN, ln M_MAX)``, i.e. from one
+    ``random()``; this returns the ``u`` whose draw lands nearest ``log_m``."""
 
     def __init__(self, k: int, log_m: float) -> None:
         self.k, self.log_m = k, log_m
@@ -495,9 +498,17 @@ class _FixedRng:
         assert 0 <= self.k < n
         return self.k
 
-    def uniform(self, low: float, high: float) -> float:
-        assert low - 1e-12 <= self.log_m <= high + 1e-12
-        return self.log_m
+    def random(self) -> float:
+        lo, hi = float(np.log(M_MIN)), float(np.log(M_MAX))
+        assert lo - 1e-12 <= self.log_m <= hi + 1e-12
+        # the ``u`` whose draw lands nearest ``log_m`` (some floats, e.g. the midpoint of the
+        # range, are no draw's image, so this is exact or one ulp off)
+        u = d = (self.log_m - lo) / (hi - lo)
+        cands = [u]
+        for _ in range(64):
+            u, d = math.nextafter(u, math.inf), math.nextafter(d, -math.inf)
+            cands += [u, d]
+        return min(cands, key=lambda c: (abs(lo + (hi - lo) * c - self.log_m), abs(c - cands[0])))
 
 
 def _fixed(k: int, log_m: float) -> np.random.Generator:
@@ -996,10 +1007,6 @@ class _CountingRng:
         self.draws.append("integers")
         return int(self.rng.integers(n))
 
-    def uniform(self, low: float, high: float) -> float:
-        self.draws.append("uniform")
-        return float(self.rng.uniform(low, high))
-
 
 def _as_rng(r: _CountingRng) -> np.random.Generator:
     return cast(np.random.Generator, r)
@@ -1113,9 +1120,10 @@ def test_topup_draws_once_per_eligible_untouched_session(world: World) -> None:
             assert first.stats["magnitude_dropped"] >= 1  # dropped spikes stay benign, untouched
 
         full = _topup_run(world, 1.0, magnitude_mode=mode)
-        # one draw per eligible session, then the spike's two draws on the same stream; a touched
-        # session and one with no (feasible) candidate cost no draw at all
-        assert full.topup.draws == ["random", "integers", "uniform"] * len(eligible)
+        # one draw per eligible session, then the spike's two draws (candidate, then ``ln m`` via
+        # ``dists.uniform``) on the same stream; a touched session and one with no (feasible)
+        # candidate cost no draw at all
+        assert full.topup.draws == ["random", "integers", "random"] * len(eligible)
         tops = [lab for lab in full.labels if _is_topup_id(lab.attack_id)]
         assert [index[lab.envelope_id] for lab in tops] == eligible
         assert [lab.attack_id for lab in tops] == [
@@ -1125,8 +1133,7 @@ def test_topup_draws_once_per_eligible_untouched_session(world: World) -> None:
 
         half = _topup_run(world, 0.5, magnitude_mode=mode)
         picked = [index[lab.envelope_id] for lab in half.labels if _is_topup_id(lab.attack_id)]
-        assert half.topup.draws.count("random") == len(eligible)
-        assert half.topup.draws.count("integers") == half.topup.draws.count("uniform")
+        assert half.topup.draws.count("random") == len(eligible) + len(picked)
         assert half.topup.draws.count("integers") == len(picked)
         assert 0 < len(picked) < len(eligible) and set(picked) < set(eligible)
         # the same stream replayed: u < rate picks the session, and its spike draws come next
@@ -1205,7 +1212,8 @@ def test_topup_skips_the_later_sessions_of_a_multi_session_attack(
     assert first_spikes and not first_spikes & set(taken)
     # every post-warm-up session is feasible here, so the top-up takes exactly the untouched ones
     assert topped == set(range(WARM, 80)) - set(taken) - first_spikes
-    assert stats["magnitude_topup"] == len(topped) == counting.draws.count("random")
+    assert stats["magnitude_topup"] == len(topped) == counting.draws.count("integers")
+    assert counting.draws == ["random", "integers", "random"] * len(topped)
     for i in taken:
         assert out[PERSONA][i] == sessions[i]
 
@@ -1311,7 +1319,7 @@ def test_topup_runs_without_the_spike_family(world: World) -> None:
             ]
             assert len(want) >= 10
             # one draw per usable untouched session, then the spike's two, on the top-up stream
-            assert draws1 == ["random", "integers", "uniform"] * len(want)
+            assert draws1 == ["random", "integers", "random"] * len(want)
             # the first pass is untouched: same labels first, same draws on the attack stream
             assert labels1[: len(labels0)] == labels0 and state1 == state0
             tops = labels1[len(labels0) :]

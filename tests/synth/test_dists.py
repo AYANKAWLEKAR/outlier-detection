@@ -98,3 +98,45 @@ def test_idpool_deterministic() -> None:
     a = IdPool("tk_", 50, 1.1, np.random.default_rng(1))
     b = IdPool("tk_", 50, 1.1, np.random.default_rng(1))
     assert a.ids == b.ids and [a.draw() for _ in range(20)] == [b.draw() for _ in range(20)]
+
+
+def test_uniform_is_plain_multiply_then_add() -> None:
+    """``uniform`` rounds ``low + (high - low) * u`` in two steps on every platform.
+
+    numpy's ``Generator.uniform`` is compiled with a fused multiply-add in the macOS arm64 wheel
+    and without one on Linux, so about one draw in five differed in the last bit and the dataset
+    (``labels.jsonl`` ``strength``) depended on the machine that generated it."""
+    from agentfw.synth.dists import uniform
+
+    us = np.random.default_rng(7).random(20_000)
+    rng = np.random.default_rng(7)
+    got = [uniform(rng, 0.03, 0.10) for _ in range(20_000)]
+    assert got == [0.03 + (0.10 - 0.03) * float(u) for u in us]
+    # seed 7's first draw is one where fused and unfused rounding differ (fused: 0.0737566826623267)
+    assert uniform(np.random.default_rng(7), 0.03, 0.10) == 0.07375668266232668
+
+
+def test_uniform_consumes_one_double_like_numpy() -> None:
+    """The helper keeps the random stream aligned with ``Generator.uniform``."""
+    from agentfw.synth.dists import uniform
+
+    a, b = np.random.default_rng(3), np.random.default_rng(3)
+    for _ in range(100):
+        uniform(a, 1.0, 2.0)
+        b.uniform(1.0, 2.0)
+    assert a.random() == b.random()
+
+
+def test_no_direct_generator_uniform_in_agentfw() -> None:
+    """Every uniform draw goes through ``dists.uniform`` (platform-independent rounding)."""
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "agentfw"
+    hits = [
+        f"{p.relative_to(root)}:{i}"
+        for p in root.rglob("*.py")
+        for i, line in enumerate(p.read_text().splitlines(), 1)
+        if re.search(r"rng\.uniform\(", line)
+    ]
+    assert hits == []

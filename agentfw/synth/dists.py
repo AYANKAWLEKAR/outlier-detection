@@ -23,13 +23,24 @@ from numpy.typing import NDArray
 
 from agentfw.synth.schema import DistSpec
 
-__all__ = ["IdPool", "Sampled", "WeightsCache", "new_id", "sample"]
+__all__ = ["IdPool", "Sampled", "WeightsCache", "new_id", "sample", "uniform"]
 
 Sampled = float | int | str | bool
 WeightsCache = dict[str, NDArray[np.float64]]
 
 _ALPHABET = np.array(list("ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"))
 _SUFFIX_MIN = 12
+
+
+def uniform(rng: np.random.Generator, low: float, high: float) -> float:
+    """A uniform draw on ``[low, high)`` that rounds the same on every platform.
+
+    Same stream use as ``Generator.uniform`` (one double), but the affine map is two
+    separately rounded Python float operations. numpy's macOS arm64 wheel fuses it into one
+    multiply-add and its Linux wheel does not, so ``Generator.uniform`` differed in the last bit
+    on about one draw in five and generated datasets depended on the machine."""
+    lo = float(low)
+    return lo + (float(high) - lo) * float(rng.random())
 
 
 @lru_cache(maxsize=256)
@@ -99,7 +110,7 @@ def sample(
         return int(_clip(float(rng.poisson(spec.lam)), spec))
     else:  # uniform
         assert spec.min is not None and spec.max is not None
-        x = float(rng.uniform(spec.min, spec.max))
+        x = float(uniform(rng, spec.min, spec.max))
     x = _clip(x, spec)
     return round(x, 2) if spec.round_cents else x
 
