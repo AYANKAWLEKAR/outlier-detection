@@ -889,7 +889,7 @@ def benign_unusual(
 def _repeats(rng: np.random.Generator) -> int:
     return int(
         np.clip(
-            round(math.exp(rng.uniform(math.log(RUN_MIN), math.log(RUN_MAX)))), RUN_MIN, RUN_MAX
+            round(math.exp(uniform(rng, math.log(RUN_MIN), math.log(RUN_MAX)))), RUN_MIN, RUN_MAX
         )
     )
 
