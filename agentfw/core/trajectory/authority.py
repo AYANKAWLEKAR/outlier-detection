@@ -121,8 +121,10 @@ def contributors(
     bonus = top2 > cfg.fusion_bonus_gate  # as ``fuse``
     if top1 <= 0.0 or min(1.0, top1 + (cfg.fusion_bonus if bonus else 0.0)) < floor:
         return []
-    if len(out) == 1 and bonus:
-        out += [s for v, s in v1 if v == ranked[1]]  # top2 earned the bonus
+    if len(out) == 1 and bonus and top2 > 0.0:
+        # top2 earned the bonus. A negative gate lets ``fuse`` add it on top2 = 0, a score no
+        # detector supplied (or a zero score): nothing more contributes then.
+        out += [s for v, s in v1 if v == top2]
     return out
 
 

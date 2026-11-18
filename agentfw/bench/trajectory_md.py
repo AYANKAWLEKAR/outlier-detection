@@ -52,6 +52,20 @@ def _halt_theta(halts: Mapping[str, Mapping[str, Any]]) -> str:
     return f"θ_halt = {got.pop()}" if len(got) == 1 else "each row's θ_halt"
 
 
+def _approx_note(halts: Mapping[str, Mapping[str, Any]]) -> list[str]:
+    """The † note under the halt table: an enforcing ``provisional`` replay is exact only up to
+    its own θ_halt (T-43), which each row stores (T-68). Empty when every row is exact."""
+    got = {h["theta_halt"] for h in halts.values() if not h["exact_at_every_theta"]}
+    if not got:
+        return []
+    above = f"θ = {got.pop()}" if len(got) == 1 else "each † row's θ_halt"
+    return [
+        "",
+        f"† enforcing replay with `provisional`: the sensitivity steps above {above}",
+        "are approximate (T-43); the shadow rows are exact at every θ.",
+    ]
+
+
 def _seed_block(seed: str, b: Mapping[str, Any], label: str, theta_row: str) -> list[str]:
     rows: Mapping[str, Any] = b["rows"]
     deltas: Mapping[str, Any] = b["deltas"]
@@ -158,9 +172,7 @@ def _seed_block(seed: str, b: Mapping[str, Any], label: str, theta_row: str) -> 
             ],
             body,
         )
-        if not all(h["exact_at_every_theta"] for h in halts.values()):
-            L += ["", "† enforcing replay with `provisional`: the sensitivity steps above θ = 0.6"]
-            L += ["are approximate (T-43); the shadow rows are exact at every θ."]
+        L += _approx_note(halts)
         src = halts.get(theta_row)
         if src is not None:
             L += ["", f"**Sensitivity curve, {theta_row}** (false-halt / runaway recall /"]

@@ -80,6 +80,15 @@ def _sessions(peaks: list[float], **kw: Any) -> list[ScoreRow]:
     return out
 
 
+def _unevaluated(n: int) -> list[ScoreRow]:
+    """``n`` calibration sessions a sampled replay never scored (density None on every row)."""
+    out: list[ScoreRow] = []
+    for j in range(n):
+        s = f"u{next(_ids)}-{j}"
+        out += [_row(s, density=None), _row(s, density=None)]
+    return out
+
+
 # -- configuration ---------------------------------------------------------------------------------
 
 
@@ -452,3 +461,46 @@ def test_write_calibrated_marks_unmet_bounds(tmp_path: Path) -> None:
     assert "warn rate 4.0% (bound <= 5%: met)" in line
     write_calibrated(0.3, 0.55, "test", p)
     assert "bounds not checked" in load_calibrated(p).history[-1]
+
+
+def test_provisional_note_names_the_approximate_rows_theta_halt() -> None:
+    """The † note names the θ_halt of the enforcing ``provisional`` rows it marks, not a
+    hard-coded 0.6 (CodeRabbit PR #1 follow-up on T-68); exact rows do not enter it."""
+    from agentfw.bench.trajectory_md import _approx_note
+
+    exact = {"theta_halt": 0.5, "exact_at_every_theta": True}
+
+    def at(t: float) -> dict[str, Any]:
+        return {"theta_halt": t, "exact_at_every_theta": False}
+
+    assert _approx_note({"shadow": exact}) == []
+    assert "above θ = 0.8" in _approx_note({"shadow": exact, "enf": at(0.8)})[1]
+    assert "above θ = 0.6" in _approx_note({"enf": at(0.6)})[1]  # the committed rendering
+    assert "above each † row's θ_halt" in _approx_note({"a": at(0.6), "b": at(0.8)})[1]
+
+
+def test_calibration_curve_leaves_unevaluated_sessions_out() -> None:
+    """A sampled replay leaves unsampled sessions' density None: they never reached or missed a
+    threshold, so they are out of the benign denominator, as in the halt metrics (T-76). One
+    session at 0.9 among 99 unevaluated is 100% at every theta up to 0.9, and the 1% bound is
+    then not met (CodeRabbit PR #1, outside-diff finding)."""
+    unevaluated = _unevaluated(99)
+    rows = _sessions([0.9]) + unevaluated
+    curve = calibration_curve(rows)
+    assert {n for _, _, n in curve} == {1}
+    assert all(share == 1.0 for t, share, _ in curve if t <= 0.9)
+    assert select_on_calibration(rows) == (0.75, 0.8)  # the grid-top fallback, bound unmet
+
+
+def test_calibration_curve_without_any_density_names_the_session_gate() -> None:
+    with pytest.raises(ValueError, match="density column is empty"):
+        calibration_curve(_unevaluated(3))
+
+
+def test_calibration_needs_an_evaluated_benign_session() -> None:
+    from agentfw.bench.trajectory import _has_benign_calibration_session
+
+    evaluated = _sessions([0.5], split="test")  # density observed, but not in calibration
+    unevaluated = _unevaluated(1)
+    assert not _has_benign_calibration_session(evaluated + unevaluated)
+    assert _has_benign_calibration_session(evaluated + unevaluated + _sessions([0.1]))

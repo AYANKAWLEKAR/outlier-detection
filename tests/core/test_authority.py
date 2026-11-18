@@ -552,3 +552,14 @@ def test_floor_is_tested_on_the_fused_score_with_its_bonus() -> None:
     assert contributors(per, cfg) == per
     assert contributors(per, CFG) == []  # no bonus at the default gate: 0.25 < 0.3
     assert contributors([mag(0.25, 12), nov(0.05, 40)], cfg) == []  # no bonus earned
+
+
+def test_negative_bonus_gate_with_one_positive_score_does_not_raise() -> None:
+    """A negative ``fusion_bonus_gate`` lets ``fuse`` add the bonus on top2 = 0, which no
+    detector supplied: the top score alone contributes, and a zero-valued second score earns
+    nothing (a top score of 0 contributes nothing). CodeRabbit PR #1 follow-up on T-72."""
+    cfg = dataclasses.replace(CFG, fusion_bonus_gate=-0.1, fusion_bonus=0.15)
+    one = [mag(0.25, 12)]  # fused 0.25 + 0.15 = 0.40 >= 0.3 with no second score
+    assert contributors(one, cfg) == one
+    with_zero = [mag(0.25, 12), nov(0.0, 3)]
+    assert contributors(with_zero, cfg) == [with_zero[0]]

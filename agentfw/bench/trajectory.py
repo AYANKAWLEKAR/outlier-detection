@@ -433,23 +433,19 @@ def calibration_curve(rows: Sequence[ScoreRow]) -> list[tuple[float, float, int]
     """``(theta, share, n)`` over :data:`THETA_GRID`: the share of the ``n`` benign sessions of
     the calibration partition whose density reaches ``theta`` on some call. A session reaching
     ``theta`` halts there (``theta`` as ``theta_halt``) or is warned (as ``theta_warn``), so one
-    curve gives both rates. ``ValueError`` without a calibration benign session or a density."""
+    curve gives both rates. A session with no observed density was never evaluated (a sampled
+    replay) and is out of ``n``, as in the halt metrics (T-76). ``ValueError`` without a density,
+    or without an evaluated calibration benign session."""
+    if all(r.density is None for r in rows):
+        raise ValueError("the density column is empty: replay with the session gate open")
     cal = [r for r in rows if r.split == "calibration"]
     labels = SM.session_labels(cal)
     peak: dict[str, float] = {}
-    any_density = False
     for r in cal:
-        if labels[r.session_id] != "benign":
-            continue
-        d = -1.0
-        if r.density is not None:
-            any_density = True
-            d = r.density
-        peak[r.session_id] = max(peak.get(r.session_id, -1.0), d)
+        if labels[r.session_id] == "benign" and r.density is not None:
+            peak[r.session_id] = max(peak.get(r.session_id, -1.0), r.density)
     if not peak:
-        raise ValueError("no benign session in the calibration partition")
-    if not any_density:
-        raise ValueError("the density column is empty: replay with the session gate open")
+        raise ValueError("no benign session in the calibration partition has an observed density")
     n = len(peak)
     vals = np.fromiter(peak.values(), dtype=np.float64, count=n)
     return [(t, float(np.sum(vals >= t - 1e-12)) / n, n) for t in THETA_GRID]
@@ -537,9 +533,11 @@ def _sessions(rows: Sequence[ScoreRow], vital: bool, cfg: EngineConfig) -> dict[
 
 def _has_benign_calibration_session(rows: Sequence[ScoreRow]) -> bool:
     """Does the calibration partition hold a benign *session* (what :func:`calibration_curve`
-    needs; a benign setup row of an attacked session does not count)?"""
+    needs; a benign setup row of an attacked session does not count), evaluated on some call
+    (an unsampled session's density is None throughout, T-76)?"""
     cal = [r for r in rows if r.split == "calibration"]
-    return any(lab == "benign" for lab in SM.session_labels(cal).values())
+    labels = SM.session_labels(cal)
+    return any(labels[r.session_id] == "benign" and r.density is not None for r in cal)
 
 
 def row_summary(rows: Sequence[ScoreRow], det: Engine, *, n_boot: int) -> dict[str, Any]:
