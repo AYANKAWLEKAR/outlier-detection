@@ -9,9 +9,11 @@ import orjson
 import pyarrow.parquet as pq
 
 from agentfw.core.envelope import Label, RawCall
+from agentfw.core.hints import ToolHint
+from agentfw.core.schemas import hints_from_schemas, load_schemas
 from agentfw.synth.generate import GenerateConfig, Manifest
 
-__all__ = ["load_dir", "load_labels", "load_labels_list", "load_traces"]
+__all__ = ["load_dir", "load_labels", "load_labels_list", "load_schema_hints", "load_traces"]
 
 
 def _rows(path: str | Path) -> list[dict[str, object]]:
@@ -56,6 +58,13 @@ def _packaged_manifest(raw: dict[str, Any]) -> Manifest:
     )
     counts = {"sessions": c["sessions"], "envelopes": c["actions"], "attacks": c["attacks"]}
     return Manifest(config=cfg, files=raw["files"], counts=counts)
+
+
+def load_schema_hints(d: str | Path) -> dict[str, ToolHint]:
+    """Engine hints from the dataset's ``schemas.jsonl`` (F3): annotations and ``has_schema`` per
+    captured tool, no kind or field hints. ``{}`` when the directory has no schemas file."""
+    p = Path(d) / "schemas.jsonl"
+    return hints_from_schemas(load_schemas(p), {}) if p.exists() else {}
 
 
 def load_dir(d: str | Path) -> tuple[list[RawCall], dict[str, Label], Manifest]:

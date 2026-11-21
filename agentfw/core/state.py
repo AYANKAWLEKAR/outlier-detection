@@ -35,7 +35,9 @@ __all__ = [
     "key_prereq",
     "key_prior_mag",
     "key_prior_nov",
+    "key_sess",
     "key_trans",
+    "key_validated",
     "key_type",
     "key_vel",
     "register_record",
@@ -70,6 +72,7 @@ def register_record[R: type[Any]](cls: R) -> R:
 class StateStore(Protocol):
     def get(self, key: str) -> Record | None: ...
     def put(self, key: str, rec: Record) -> None: ...
+    def delete(self, key: str) -> None: ...
     def items(self) -> Iterator[tuple[str, Record]]: ...
     def nbytes(self) -> int: ...
     def dump(self, path: Path) -> None: ...
@@ -88,6 +91,10 @@ class DictStore:
 
     def put(self, key: str, rec: Record) -> None:
         self._d[key] = rec
+
+    def delete(self, key: str) -> None:
+        """Drop ``key`` (no-op when absent)."""
+        self._d.pop(key, None)
 
     def items(self) -> Iterator[tuple[str, Record]]:
         return iter(list(self._d.items()))
@@ -168,6 +175,10 @@ def key_prereq(a: str, t: str) -> str:
     return f"s:{_esc(a)}:prereq:{_esc(t)}"
 
 
+def key_validated(a: str) -> str:
+    return f"s:{_esc(a)}:validated"
+
+
 def key_flow(a: str, t: str, p: str) -> str:
     return "f:" + _key(a, t, p)
 
@@ -186,3 +197,7 @@ def key_prior_mag(t: str, p: str) -> str:
 
 def key_prior_nov(t: str, p: str) -> str:
     return "p:n:" + _key(t, p)
+
+
+def key_sess(session_id: str) -> str:
+    return "sess:" + _esc(session_id)

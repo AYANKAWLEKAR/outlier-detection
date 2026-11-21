@@ -60,7 +60,7 @@ __all__ = [
     "write_score_table",
 ]
 
-Split = Literal["train", "test"]
+Split = Literal["train", "test", "calibration"]
 OutcomeMode = Literal["allow", "enforce", "review", "oracle"]
 OUTCOME_MODES: tuple[OutcomeMode, ...] = ("allow", "enforce", "review", "oracle")
 #: The benchmark protocol (user decision 2026-11-10, decision 008): the oracle-reviewer loop.
@@ -96,6 +96,8 @@ class SplitSpec:
     kind: Literal["time", "agent"] = "time"
     train_frac: float = 0.7
     seed: int = 0
+    #: Fraction of agents held out whole as a calibration partition (F10); 0.0 = today's split.
+    calibration_frac: float = 0.0
 
 
 @dataclass(slots=True)
@@ -119,25 +121,68 @@ class ScoreRow:
     n_key_obs: int
     latency_us: float
     threshold: float | None
+    decision: str | None = None  # the detector's Decision value; None when unscored
+    # The call's flags (comma-joined sorted names) and its session's flag density (Task 2.1,
+    # ``TrajectoryInfo``); "" / None when unscored or the detector has no trajectory.
+    flags: str = ""
+    density: float | None = None
+    # The session's label (``session_metrics.session_labels``: benign / runaway / attacked),
+    # filled by ``replay`` once every row is built (Task 2.4).
+    session_label: str | None = None
+    # The escalation stage ran on this call (F5, Task 3.2: ``TrajectoryInfo.escalated``, T-42);
+    # False when unscored or the detector has no trajectory.
+    escalated: bool = False
+    # The call's session verdict (F7, Task 3.3: ``TrajectoryInfo.session_verdict`` -- ok /
+    # warn_session / halt_session, T-43); None when unscored or the session gate is shut.
+    session_verdict: str | None = None
+    # The call's evidence maturity and regime (F8, Task 3.4: ``TrajectoryInfo.maturity`` /
+    # ``regime``, T-14, T-06); None when unscored or the detector has no trajectory.
+    maturity: str | None = None
+    regime: str | None = None
+    # The threshold the decision used (``TrajectoryInfo.threshold_eff``: θ, or θ_eff under
+    # ``br_mode="modulate"``); None when unscored or the detector has no trajectory. With
+    # ``per_detector_json`` it recomputes the call's contributors (F8 audit, T-50).
+    threshold_eff: float | None = None
 
 
 def _order(r: RawCall) -> tuple[int, str, int]:
     return (r.ts_unix_ms, r.session_id, r.seq_no)
 
 
+def _calibration_agents(agents: Sequence[str], spec: SplitSpec) -> set[str]:
+    """Agents held out as the calibration partition: drawn first, over the sorted agent list."""
+    if not 0.0 <= spec.calibration_frac < 1.0:
+        raise ValueError(f"calibration_frac must be in [0, 1), got {spec.calibration_frac}")
+    n_cal = round(spec.calibration_frac * len(agents))
+    if n_cal == 0:
+        return set()
+    perm = np.random.default_rng(spec.seed).permutation(len(agents))
+    return {agents[int(i)] for i in perm[:n_cal]}
+
+
 def assign_split(raws: Sequence[RawCall], spec: SplitSpec) -> dict[str, Split]:
+    """``envelope_id -> split``. Calibration agents (``spec.calibration_frac``) are removed first
+    and every one of their envelopes is ``"calibration"``; the time / agent split then runs on the
+    remaining envelopes only (the time cut is computed over them)."""
     if not raws:
         return {}
+    cal = _calibration_agents(sorted({r.agent_id for r in raws}), spec)
+    out: dict[str, Split] = {r.envelope_id: "calibration" for r in raws if r.agent_id in cal}
+    rest = [r for r in raws if r.agent_id not in cal] if cal else raws
+    if not rest:
+        return out
     if spec.kind == "time":
-        t_min = min(r.ts_unix_ms for r in raws)
-        t_max = max(r.ts_unix_ms for r in raws)
+        t_min = min(r.ts_unix_ms for r in rest)
+        t_max = max(r.ts_unix_ms for r in rest)
         cut = t_min + spec.train_frac * (t_max - t_min)
-        return {r.envelope_id: ("train" if r.ts_unix_ms <= cut else "test") for r in raws}
-    agents = sorted({r.agent_id for r in raws})
+        out.update({r.envelope_id: ("train" if r.ts_unix_ms <= cut else "test") for r in rest})
+        return out
+    agents = sorted({r.agent_id for r in rest})
     perm = np.random.default_rng(spec.seed).permutation(len(agents))
     n_train = round(spec.train_frac * len(agents))
     train = {agents[int(i)] for i in perm[:n_train]}
-    return {r.envelope_id: ("train" if r.agent_id in train else "test") for r in raws}
+    out.update({r.envelope_id: ("train" if r.agent_id in train else "test") for r in rest})
+    return out
 
 
 def _per_detector_json(res_per: Sequence[Any]) -> str:
@@ -188,6 +233,14 @@ def replay(
         per_json = "[]"
         latency = 0.0
         threshold: float | None = None
+        decision: str | None = None
+        flags = ""
+        density: float | None = None
+        escalated = False
+        session_verdict: str | None = None
+        maturity: str | None = None
+        regime: str | None = None
+        threshold_eff: float | None = None
         outcome = Outcome.ALLOWED
         flagged = False
         if scored:
@@ -200,7 +253,16 @@ def replay(
             fused = res.fused_score
             per_json = _per_detector_json(res.per_detector)
             threshold = res.threshold
+            decision = None if res.decision is None else res.decision.value
             flagged = res.decision in _FLAGGED
+            if res.trajectory is not None:
+                flags = ",".join(sorted(f.name for f in res.trajectory.flags))
+                density = res.trajectory.density
+                escalated = res.trajectory.escalated
+                verdict = res.trajectory.session_verdict
+                session_verdict = None if verdict is None else verdict.value
+                maturity, regime = res.trajectory.maturity, res.trajectory.regime
+                threshold_eff = res.trajectory.threshold_eff
             if outcomes == "enforce" and res.decision is Decision.BLOCK:
                 outcome = Outcome.BLOCKED
         lab = labels.get(env.envelope_id)
@@ -230,11 +292,25 @@ def replay(
                 n_key_obs=n_obs,
                 latency_us=latency,
                 threshold=threshold,
+                decision=decision,
+                flags=flags,
+                density=density,
+                escalated=escalated,
+                session_verdict=session_verdict,
+                maturity=maturity,
+                regime=regime,
+                threshold_eff=threshold_eff,
             )
         )
         detector.update(env, outcome)
         tracker.observe(env)
         obs[key] += 1
+    # Local import: session_metrics reads ScoreRow from this module (an import cycle at load time).
+    from agentfw.bench.session_metrics import session_labels
+
+    by_session = session_labels(rows)
+    for row in rows:
+        row.session_label = by_session[row.session_id]
     return rows
 
 

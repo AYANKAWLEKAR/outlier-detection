@@ -59,7 +59,7 @@ import sys
 import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import AsyncExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -70,6 +70,7 @@ from mcp import Client
 from pydantic import BaseModel, SecretStr
 
 from agentfw.core.envelope import Label, RawCall
+from agentfw.core.patterns import is_id_like
 from agentfw.sandbox.agent import Transcript, run_session
 from agentfw.sandbox.backends import (
     BUILDERS,
@@ -100,7 +101,7 @@ from agentfw.sandbox.plan import (
     plan_sessions,
 )
 from agentfw.sandbox.proxy_py import FirewallProxy, JsonlSink, SessionInfo
-from agentfw.sandbox.proxy_py.sinks import CALLS, LABELS
+from agentfw.sandbox.proxy_py.sinks import CALLS, LABELS, SCHEMAS
 from agentfw.sandbox.scripted_policy import (
     Call,
     PolicyContext,
@@ -326,14 +327,18 @@ def _write_atomic(path: Path, data: bytes) -> None:
 
 
 def _repair_ledger(path: Path) -> None:
-    """Cut off a trailing line torn by a crash mid-append (it would glue onto the next line)."""
+    """Cut off a trailing line torn by a crash mid-append (it would glue onto the next line).
+    Used for every append-only run file (``ledger.jsonl``, ``schemas.jsonl``; T-74)."""
     if not path.exists():
         return
     data = path.read_bytes()
     if data and not data.endswith(b"\n"):
         keep = data.rfind(b"\n") + 1
         logger.warning(
-            "ledger %s: dropping a torn trailing line (%d bytes)", path, len(data) - keep
+            "%s %s: dropping a torn trailing line (%d bytes)",
+            path.stem,
+            path,
+            len(data) - keep,
         )
         with path.open("r+b") as f:
             f.truncate(keep)
@@ -410,6 +415,20 @@ def _final_labels(raws: Sequence[RawCall], attacks: Sequence[Label]) -> list[Lab
     ]
 
 
+def task_ids(rendered: RenderedSession) -> tuple[str, ...]:
+    """The id-like values of a session's resolved task inputs (``slot_values``) that its prompt
+    discloses, deduplicated in task order and capped at ``RawCall``'s 64. They are what the task
+    handed the agent, so ids that appear in the calls are not "new" (F1); a resolved slot the
+    prompt does not show was never handed over (T-73)."""
+    seen: dict[str, None] = {}
+    for task in rendered.tasks:
+        for values in task.slot_values.values():
+            for v in values.values():
+                if isinstance(v, str) and is_id_like(v) and v in rendered.prompt:
+                    seen.setdefault(v)
+    return tuple(seen)[:64]
+
+
 def _budget_hit(tr: Transcript) -> bool:
     """Whether a tool result is the Salesforce budget refusal (its error code at the start;
     tool output that merely quotes "budget exceeded" does not count)."""
@@ -442,6 +461,31 @@ def _read_jsonl[T](path: Path, parse: Callable[[bytes], T]) -> list[T]:
 # --- execution -----------------------------------------------------------------------------------
 
 
+def _merge_schemas(self: _Runner, work: Path) -> None:
+    path = self.out_dir / SCHEMAS
+    if not self.schema_loaded:  # a resumed run: what is already there (once)
+        if path.exists():
+            for row in _read_jsonl(path, orjson.loads):
+                self.schema_last[row["tool_id"]] = row["hash"]
+        self.schema_loaded = True
+    fresh = []
+    nxt = dict(self.schema_last)  # committed only once the rows are on disk (T-74)
+    for line in (work / SCHEMAS).read_bytes().splitlines() if (work / SCHEMAS).exists() else []:
+        row = orjson.loads(line)
+        tool, h = row["tool_id"], row["hash"]
+        last = nxt.get(tool)
+        if last == h:
+            continue
+        if last is not None:  # each session has its own proxy
+            logger.warning("tool-definition drift: %s", tool)
+        nxt[tool] = h
+        fresh.append(line + b"\n")
+    if fresh:
+        with path.open("ab") as f:
+            f.write(b"".join(fresh))
+    self.schema_last = nxt
+
+
 @dataclass(slots=True)
 class _Runner:
     cfg: SandboxConfig
@@ -454,6 +498,18 @@ class _Runner:
     meter: UsageMeter
     sem: anyio.Semaphore
     sf_reserved: int = 0
+    schema_loaded: bool = False
+    schema_last: dict[str, str] = field(default_factory=dict)
+
+    def merge_schemas(self, work: Path) -> None:
+        """Append the session's captured schema rows to the run's ``schemas.jsonl``, skipping a
+        row whose hash is its tool's latest one (sessions see the same schemas; a drifted one,
+        or a rollback to an earlier one, is new). Never raises: schema capture must not fail a
+        completed session (a corrupt file is logged and skipped)."""
+        try:
+            _merge_schemas(self, work)
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            logger.warning("schema merge skipped (%s)", type(e).__name__)
 
     def append_ledger(self, row: dict[str, Any]) -> None:
         with (self.out_dir / LEDGER).open("ab") as f:
@@ -553,7 +609,12 @@ class _Runner:
                 }
                 proxy = FirewallProxy(
                     downstreams,
-                    SessionInfo(sid, agent.agent_id, f"{agent.agent_id}-principal"),
+                    SessionInfo(
+                        sid,
+                        agent.agent_id,
+                        f"{agent.agent_id}-principal",
+                        task_ids(prep.rendered),
+                    ),
                     sink,
                     mutator=mutator,
                     rng=np.random.default_rng([plan.seed, 4]),
@@ -582,6 +643,7 @@ class _Runner:
                 attacks += prompt_labels
                 info["attempted"], info["succeeded"] = True, ok
         labels = _final_labels(raws, attacks)
+        self.merge_schemas(work)
         calls_path = work / CALLS
         _write_atomic(
             self.out_dir / RAW_DIR / f"{sid}.jsonl",
@@ -686,6 +748,7 @@ async def _execute_locked(
     for d in (RAW_DIR, LABELS_DIR, TRANSCRIPTS_DIR, WORK_DIR):
         (out_dir / d).mkdir(parents=True, exist_ok=True)
     _repair_ledger(out_dir / LEDGER)
+    _repair_ledger(out_dir / SCHEMAS)
     meta = {"mode": mode, "model": cfg.llm_model}
     _check_resume_meta(out_dir, meta)
     _write_atomic(  # run metadata for packaging: the model id only, never a secret

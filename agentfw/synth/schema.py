@@ -24,6 +24,9 @@ Conventions the walker (Task 0.5) relies on:
     from the override).
 * Benign generated email domains follow ``<word><k>.example`` (``ArgSpec.domain_suffix``);
   attack and novel values use ``.test`` (RFC 2606 only, D-016).
+* ``ToolSpec.annotations`` are the tool's MCP annotations (F3) as a real server would declare them
+  (``generate`` writes them to ``schemas.jsonl``). A declared ``read_only`` must agree with
+  ``kind``.
 """
 
 from __future__ import annotations
@@ -31,6 +34,8 @@ from __future__ import annotations
 from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from agentfw.core.hints import ToolAnnotations
 
 Family = Literal[
     "lognormal", "gamma", "poisson", "zipf", "categorical", "constant", "uniform", "bernoulli"
@@ -110,6 +115,18 @@ class ResponseSpec(_Model):
     produces_ids: list[str] = Field(default_factory=list)
 
 
+class AnnotationSpec(_Model):
+    """MCP tool annotations (``readOnlyHint`` ...); ``None`` = not declared."""
+
+    read_only: bool | None = None
+    destructive: bool | None = None
+    idempotent: bool | None = None
+    open_world: bool | None = None
+
+    def to_core(self) -> ToolAnnotations:
+        return ToolAnnotations(self.read_only, self.destructive, self.idempotent, self.open_world)
+
+
 class ToolSpec(_Model):
     kind: Literal["read", "write"]
     args: dict[str, ArgSpec]
@@ -117,6 +134,14 @@ class ToolSpec(_Model):
     # Generation spec for every entry of ``produces`` (same keys).
     produced: dict[str, ArgSpec] = Field(default_factory=dict)
     response: ResponseSpec = Field(default_factory=ResponseSpec)
+    annotations: AnnotationSpec | None = None
+
+    @model_validator(mode="after")
+    def _check_annotations(self) -> Self:
+        a = self.annotations
+        if a is not None and a.read_only is not None and a.read_only != (self.kind == "read"):
+            raise ValueError(f"annotations.read_only={a.read_only} contradicts kind={self.kind}")
+        return self
 
 
 Catalog = dict[str, ToolSpec]

@@ -1213,3 +1213,44 @@ def test_bool_numeric_does_not_feed_pooled_priors() -> None:
     eng, _ = _qty_engine([1] * 60, A1)
     assert eng.store.get(key_mag("a", "shop.order", "qty")) is not None
     assert eng.store.get(key_prior_mag("shop.order", "qty")) is None
+
+
+@pytest.mark.parametrize("age_h", [0, -1])
+def test_age_discount_rejects_non_positive_age_h(age_h: int) -> None:
+    from agentfw.core.config import EngineConfig
+    from agentfw.core.engine import Engine
+
+    with pytest.raises(ValueError, match="age_h"):
+        Engine(EngineConfig(seq_age_discount=True, age_h=age_h))
+    Engine(EngineConfig(age_h=age_h))  # unused without the switch
+
+
+@pytest.mark.parametrize(
+    "field", ["vital_w_loop", "vital_w_loop_polling", "vital_w_spin", "vital_w_stall"]
+)
+def test_vital_rejects_non_positive_windows(field: str) -> None:
+    from typing import cast
+
+    from agentfw.core.config import EngineConfig
+    from agentfw.core.engine import ALL_DETECTORS, VITAL, Engine
+
+    cfg = EngineConfig(**cast(dict[str, Any], {field: 0}))
+    with pytest.raises(ValueError, match=field):
+        Engine(cfg, enabled=ALL_DETECTORS | {VITAL})
+    Engine(cfg)  # unused without the vital detector
+
+
+@pytest.mark.parametrize("field", ["vital_w_spin", "vital_w_stall"])
+def test_vital_rejects_full_windows_beyond_the_recent_ring(field: str) -> None:
+    """Spin and stall need a full window of ``recent`` calls, which holds ``RECENT_MAX``: a
+    larger window would silently never fire (T-70). The ring's size itself is accepted."""
+    from typing import cast
+
+    from agentfw.core.config import EngineConfig
+    from agentfw.core.engine import ALL_DETECTORS, VITAL, Engine
+    from agentfw.core.normalize import RECENT_MAX
+
+    enabled = ALL_DETECTORS | {VITAL}
+    with pytest.raises(ValueError, match=field):
+        Engine(EngineConfig(**cast(dict[str, Any], {field: RECENT_MAX + 1})), enabled=enabled)
+    Engine(EngineConfig(**cast(dict[str, Any], {field: RECENT_MAX})), enabled=enabled)

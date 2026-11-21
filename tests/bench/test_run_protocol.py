@@ -118,3 +118,13 @@ def test_report_unknown_protocol_label_matches_the_leaderboard() -> None:
     assert _protocol_md("review") == [f"Protocol: {REVIEW_LABEL}.", ""]
     assert _protocol_md(None) == []
     assert is_outcome_mode("allow") and not is_outcome_mode("deny") and not is_outcome_mode(1)
+
+
+def test_config_record_is_the_engine_config_after_the_preset(
+    tiny_dataset: Path, tmp_path: Path
+) -> None:
+    """A preset's switches (``engine-traj``) are applied inside the factory; the report records
+    the config the engine ran with, not the caller's raw keyword (T-75)."""
+    run(tiny_dataset, "engine-traj", SplitSpec(), tmp_path, n_boot=0, cfg=EngineConfig())
+    rec = _report(tmp_path)["meta"]["detector_config"]["cfg"]
+    assert rec["authority"] is True and rec["sessions"] is True and rec["br_mode"] == "modulate"

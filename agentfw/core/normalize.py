@@ -1,20 +1,45 @@
-"""Normalizer (spec 6.1): flatten args, derive fields, attach causal session context."""
+"""Normalizer (spec 6.1): flatten args, derive fields, attach causal session context.
+
+Session context per ``session_id`` (``SessionTracker``): the last ``k`` tools, the ids seen
+(Bloom beyond ``max_ids``), the previous response, the artifact ledger (F1) and the recent-call
+ring of the vital signs (F2): the last ``RECENT_MAX`` completed calls as ``RecentCall`` plus
+their response fingerprints. ``normalize`` copies the ring to ``ActionEnvelope.recent`` and
+computes the call's ``call_fp``; ``observe`` computes the call's ``delta_i`` and appends it. The
+envelope never carries anything derived from its own response (``response_meta`` aside, which
+only ``update`` reads): a proxy scores a call before it has one (T-58).
+"""
 
 from __future__ import annotations
 
 from collections import deque
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Self
 
-from agentfw.core.envelope import ActionEnvelope, IdSnapshot, PrevResponse, RawCall, Scalar
+import numpy as np
+import orjson
+
+from agentfw.core.envelope import (
+    ActionEnvelope,
+    IdSnapshot,
+    PrevResponse,
+    RawCall,
+    RecentCall,
+    Scalar,
+)
+from agentfw.core.fingerprint import arg_tokens, call_fingerprint
+from agentfw.core.ledger import ArtifactLedger
 from agentfw.core.patterns import email_domain, id_prefix, is_id_like, url_host
 from agentfw.core.sketch.bloom import BloomFilter
 
-__all__ = ["SessionTracker", "flatten", "normalize"]
+__all__ = ["RECENT_MAX", "SessionTracker", "flatten", "normalize"]
 
 MAX_DEPTH = 16
 FREETEXT_MIN_LEN = 40
+RECENT_MAX = 32  # recent-call ring per session (F2 bound)
 
+_EMPTY_LEDGER = ArtifactLedger()
 _Out = dict[str, list[Scalar]]
 
 
@@ -73,6 +98,26 @@ class _Session:
     bloom: BloomFilter | None = None
     prev: PrevResponse | None = None
     snap: IdSnapshot | None = None
+    ledger: ArtifactLedger = field(default_factory=ArtifactLedger)
+    recent: deque[RecentCall] = field(default_factory=lambda: deque(maxlen=RECENT_MAX))
+    # Response fingerprints aligned with ``recent`` (None where the call had none).
+    fps: deque[np.ndarray | None] = field(default_factory=lambda: deque(maxlen=RECENT_MAX))
+    recent_t: tuple[RecentCall, ...] | None = None  # cached tuple view of ``recent``
+
+
+def _fp_array(fp: tuple[int, ...] | None) -> np.ndarray | None:
+    return None if fp is None else np.asarray(fp, dtype=np.int64)
+
+
+def _delta_i(fps: deque[np.ndarray | None], fp: tuple[int, ...] | None) -> float | None:
+    """``1 - max`` MinHash-Jaccard of ``fp`` against the ring's fingerprints (1.0 if none)."""
+    if fp is None:
+        return None
+    prior = [f for f in fps if f is not None]
+    if not prior:
+        return 1.0
+    agree = int((np.stack(prior) == np.asarray(fp, dtype=np.int64)).sum(axis=1).max())
+    return 1.0 - agree / len(fp)
 
 
 class SessionTracker:
@@ -91,6 +136,19 @@ class SessionTracker:
             s.snap = IdSnapshot(frozenset(s.ids), s.bloom.copy() if s.bloom else None)
         return tuple(s.tools), s.snap, s.prev
 
+    def ledger(self, session_id: str) -> ArtifactLedger | None:
+        s = self._sessions.get(session_id)
+        return None if s is None else s.ledger
+
+    def recent(self, session_id: str) -> tuple[RecentCall, ...]:
+        """The session's ring of completed calls, oldest first."""
+        s = self._sessions.get(session_id)
+        if s is None:
+            return ()
+        if s.recent_t is None:
+            s.recent_t = tuple(s.recent)
+        return s.recent_t
+
     def _add_id(self, s: _Session, v: str) -> None:
         if v in s.ids or (s.bloom is not None and v in s.bloom):
             return
@@ -105,7 +163,12 @@ class SessionTracker:
     def observe(self, e: ActionEnvelope) -> None:
         s = self._sessions.get(e.session_id)
         if s is None:
-            s = self._sessions[e.session_id] = _Session(tools=deque(maxlen=self.k))
+            s = self._sessions[e.session_id] = _Session(
+                tools=deque(maxlen=self.k),
+                ledger=ArtifactLedger(self.max_ids, e.session_id),
+            )
+        s.ledger.seed_task(e.task_ids)
+        created = s.ledger.record(e)
         s.tools.append(e.tool_id)
         for vals in e.flat_args.values():
             for v in vals:
@@ -116,12 +179,85 @@ class SessionTracker:
             for v in rm.ids:
                 self._add_id(s, v)
         s.prev = PrevResponse(e.tool_id, rm.item_count if rm is not None else None)
+        fp = rm.fp if rm is not None else None
+        s.recent.append(
+            RecentCall(
+                seq_no=e.seq_no,
+                tool_id=e.tool_id,
+                call_fp=call_fingerprint(e.tool_id, e.flat_args),
+                arg_tokens=arg_tokens(e.flat_args) if e.arg_tokens is None else e.arg_tokens,
+                error=rm is not None and rm.error,
+                delta_i=_delta_i(s.fps, fp),
+                new_artifacts=created,
+            )
+        )
+        s.fps.append(_fp_array(fp))
+        s.recent_t = None
+
+    def dump(self, path: str | Path) -> None:
+        """Write one JSON line per session (sorted by session id, sorted keys)."""
+        lines = []
+        for sid in sorted(self._sessions):
+            s = self._sessions[sid]
+            rec: dict[str, Any] = {
+                "session_id": sid,
+                "k": self.k,
+                "max_ids": self.max_ids,
+                "tools": list(s.tools),
+                "ids": sorted(s.ids),
+                "bloom": s.bloom.to_dict() if s.bloom is not None else None,
+                "prev": None if s.prev is None else [s.prev.tool_id, s.prev.item_count],
+                "ledger": s.ledger.to_dict(),
+                "recent": [
+                    [
+                        rc.seq_no,
+                        rc.tool_id,
+                        rc.call_fp,
+                        sorted(rc.arg_tokens),
+                        rc.error,
+                        rc.delta_i,
+                        rc.new_artifacts,
+                    ]
+                    for rc in s.recent
+                ],
+                "fps": [None if f is None else [int(x) for x in f] for f in s.fps],
+            }
+            lines.append(orjson.dumps(rec, option=orjson.OPT_SORT_KEYS))
+        Path(path).write_bytes(b"\n".join(lines) + (b"\n" if lines else b""))
+
+    @classmethod
+    def load(cls, path: str | Path) -> Self:
+        recs = [orjson.loads(ln) for ln in Path(path).read_bytes().splitlines() if ln.strip()]
+        tr = cls(k=recs[0]["k"], max_ids=recs[0]["max_ids"]) if recs else cls()
+        for r in recs:
+            s = _Session(
+                tools=deque(r["tools"], maxlen=tr.k),
+                ids=set(r["ids"]),
+                bloom=BloomFilter.from_dict(r["bloom"]) if r["bloom"] is not None else None,
+                prev=None if r["prev"] is None else PrevResponse(r["prev"][0], r["prev"][1]),
+                ledger=ArtifactLedger.from_dict(r["ledger"]),
+                recent=deque(
+                    (
+                        RecentCall(int(q), str(t), int(c), frozenset(a), bool(er), d, int(n))
+                        for q, t, c, a, er, d, n in r.get("recent", [])
+                    ),
+                    maxlen=RECENT_MAX,
+                ),
+                fps=deque(
+                    (_fp_array(None if f is None else tuple(f)) for f in r.get("fps", [])),
+                    maxlen=RECENT_MAX,
+                ),
+            )
+            tr._sessions[r["session_id"]] = s
+        return tr
 
 
 def normalize(raw: RawCall, tracker: SessionTracker) -> ActionEnvelope:
     """Build an envelope from a raw call. Reads the tracker; never observes."""
     flat, derived = flatten(raw.args)
     prior_tools, ids_seen, prev = tracker.snapshot(raw.session_id)
+    ledger = tracker.ledger(raw.session_id)
+    refs = (_EMPTY_LEDGER if ledger is None else ledger).refs_for(flat, raw.task_ids)
     return ActionEnvelope(
         envelope_id=raw.envelope_id,
         schema_version=raw.schema_version,
@@ -138,4 +274,9 @@ def normalize(raw: RawCall, tracker: SessionTracker) -> ActionEnvelope:
         prior_tools=prior_tools,
         session_ids_seen=ids_seen,
         prev_response=prev,
+        ledger_refs=refs,
+        task_ids=raw.task_ids,
+        call_fp=call_fingerprint(raw.tool_id, flat),
+        recent=tracker.recent(raw.session_id),
+        arg_tokens=arg_tokens(flat),
     )

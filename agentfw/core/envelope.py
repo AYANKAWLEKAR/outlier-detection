@@ -5,12 +5,24 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import TYPE_CHECKING, Literal, Self
+from typing import TYPE_CHECKING, Any, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
 if TYPE_CHECKING:
     from agentfw.core.sketch.bloom import BloomFilter
+    from agentfw.core.trajectory.flags import Flag
+    from agentfw.core.trajectory.gate import GateOutcome
+    from agentfw.core.trajectory.session import SessionVerdict
 
 __all__ = [
     "ActionEnvelope",
@@ -22,16 +34,30 @@ __all__ = [
     "IdSnapshot",
     "JsonValue",
     "Label",
+    "LedgerRef",
+    "Maturity",
+    "Notice",
     "Outcome",
     "PrevResponse",
     "RawCall",
     "Reason",
+    "RecentCall",
+    "Regime",
     "ResponseMeta",
     "Scalar",
+    "TrajectoryInfo",
     "Verdict",
 ]
 
 Scalar = str | int | float | bool | None
+#: What a decision was based on (F3, T-06): per-key history (>= ``mag_cold_n`` observations of the
+#: (agent, tool)) and/or a captured tool schema.
+Regime = Literal["history+schemas", "history_only", "schemas_only", "bare"]
+#: How much evidence a decision rests on (F8, T-14; ``core.trajectory.authority``).
+Maturity = Literal["mature", "warm", "cold", "bare"]
+#: What the authority ceiling leaves of a capped decision (F8, T-14): a notice in the tool result
+#: (``warn``) or an audit entry only (``inform``).
+Notice = Literal["warn", "inform"]
 
 
 class FieldType(StrEnum):
@@ -63,6 +89,23 @@ class ResponseMeta(BaseModel):
     bytes: int | None = None
     error: bool = False
     ids: tuple[str, ...] = Field(default=(), max_length=256)
+    # MinHash signature of the response text (core.fingerprint); omitted while None so existing
+    # traces and manifest hashes keep their bytes.
+    fp: tuple[int, ...] | None = None
+
+    @field_validator("fp")
+    @classmethod
+    def _check_fp(cls, v: tuple[int, ...] | None) -> tuple[int, ...] | None:
+        if v is not None and (len(v) != 64 or any(not 0 <= x < (1 << 61) - 1 for x in v)):
+            raise ValueError("fp must be None or 64 ints in [0, 2**61 - 1)")
+        return v
+
+    @model_serializer(mode="wrap")
+    def _omit_none_fp(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        out: dict[str, Any] = handler(self)
+        if self.fp is None:
+            out.pop("fp", None)
+        return out
 
 
 class RawCall(BaseModel):
@@ -78,12 +121,52 @@ class RawCall(BaseModel):
     tool_id: str = Field(pattern=r"^[a-z0-9_]+\.[a-z0-9_]+$")
     args: dict[str, JsonValue]
     response_meta: ResponseMeta | None = None
+    # Ids the task itself supplied (set on a session's first call). Omitted from serialized
+    # output while empty so existing traces and manifest hashes keep their bytes.
+    task_ids: tuple[str, ...] = Field(default=(), max_length=64)
+
+    @model_serializer(mode="wrap")
+    def _omit_empty_task_ids(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        out: dict[str, Any] = handler(self)
+        if not self.task_ids:
+            out.pop("task_ids", None)
+        return out
+
+
+@dataclass(slots=True, frozen=True)
+class LedgerRef:
+    """An id used in a call's args that the session ledger already knows (see core.ledger)."""
+
+    artifact_id: str
+    path: str
+    producer_seq: int
+    producer_tool: str | None
+    source: Literal["args", "response", "task_input"]
 
 
 @dataclass(slots=True, frozen=True)
 class PrevResponse:
     tool_id: str
     item_count: int | None
+
+
+@dataclass(slots=True, frozen=True)
+class RecentCall:
+    """One completed call in a session's recent-call ring (vital signs, F2).
+
+    ``delta_i`` is the call's information gain, ``1 - max`` MinHash-Jaccard of its response
+    fingerprint against the earlier fingerprints in the ring (1.0 when there are none), or
+    ``None`` when the call had no fingerprint. ``new_artifacts`` counts the ledger entries the
+    call created.
+    """
+
+    seq_no: int
+    tool_id: str
+    call_fp: int
+    arg_tokens: frozenset[int]
+    error: bool
+    delta_i: float | None
+    new_artifacts: int
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,6 +198,16 @@ class ActionEnvelope:
     session_ids_seen: IdSnapshot
     prev_response: PrevResponse | None
     blast_radius: float | None = None
+    ledger_refs: tuple[LedgerRef, ...] = ()
+    task_ids: tuple[str, ...] = ()
+    # Vital signs (F2): this call's fingerprint and the session's completed calls before it
+    # (oldest first, at most 32). Nothing derived from this call's own response (T-58).
+    call_fp: int = 0
+    recent: tuple[RecentCall, ...] = ()
+    # ``fingerprint.arg_tokens(flat_args)``, computed once by ``normalize`` (Task 4.1, latency):
+    # the loop near-duplicate check and ``SessionTracker.observe`` read it. ``None`` (an
+    # envelope built without ``normalize``): both compute it from ``flat_args``, same value.
+    arg_tokens: frozenset[int] | None = None
 
 
 class Label(BaseModel):
@@ -164,6 +257,51 @@ class Reason:
     blast_radius: float | None
     prereq_missing: str | None
     prior_used: bool = False
+    #: The call's maturity and regime (F8, T-44): set by the engine on every reason it emits.
+    maturity: Maturity | None = None
+    regime: Regime | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class TrajectoryInfo:
+    """Trajectory facts the engine attaches to every result (F3; later tasks append fields with
+    defaults). ``blast_radius`` is ``None`` while ``br_mode="off"``; ``threshold_eff`` is the
+    threshold the decision used (the agent's own unless ``br_mode="modulate"``)."""
+
+    regime: Regime
+    blast_radius: float | None
+    irreversible: bool
+    threshold_eff: float
+    #: This call's flags (``core.trajectory.flags``) and its session's flag density including
+    #: this call (T-09; ``None`` while the session gate is shut, i.e. none of
+    #: ``EngineConfig.sessions`` / ``provisional`` / ``session_enforce`` is on: T-34).
+    flags: frozenset[Flag] = frozenset()
+    density: float | None = None
+    #: The pre-execution gate's outcome (F4): set only when ``EngineConfig.gate`` is on and the
+    #: call is irreversible.
+    gate: GateOutcome | None = None
+    #: Two-tier escalation (F5): ``escalated`` is True when the escalation stage ran on this call
+    #: (``EngineConfig.escalate``, T-42); then ``fast_score`` is the fused score of the fast path
+    #: and ``escalated_score`` the fresh re-score the decision rests on (both ``None`` otherwise).
+    escalated: bool = False
+    fast_score: float | None = None
+    escalated_score: float | None = None
+    #: Session verdict (F7, Task 3.3, T-43) of this call on ``density`` (sticky ``HALT``) and the
+    #: session's fused mass including this call -- the aggregate, reported and never
+    #: thresholded. Both ``None`` while the session gate is shut (like ``density``).
+    session_verdict: SessionVerdict | None = None
+    session_mass: float | None = None
+    #: Verdict authority (F8, Task 3.4, T-14 / T-44): the call's evidence ``maturity`` (set by
+    #: the engine on every call, ``None`` only on a hand-built info); with ``authority`` on, the
+    #: decision before the ceiling when the ceiling lowered it (``capped_from``) and the notice
+    #: the capped call carries (``warn`` from a cold maturity, ``inform`` from a bare one).
+    maturity: Maturity | None = None
+    capped_from: Decision | None = None
+    notice: Notice | None = None
+    #: The evidence count that set ``maturity`` (``authority.Grade.n``; T-48) and whether F4's
+    #: prerequisite block was kept above the ceiling that would otherwise have capped it (T-44).
+    maturity_n: int | None = None
+    ceiling_exempt: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -175,6 +313,7 @@ class DetectorResult:
     threshold: float | None = None
     decision: Decision | None = None
     field_types: Mapping[str, FieldType] = field(default_factory=dict)
+    trajectory: TrajectoryInfo | None = None  # always set by the engine
 
 
 @dataclass(slots=True, frozen=True)

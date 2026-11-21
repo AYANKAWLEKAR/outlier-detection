@@ -90,6 +90,74 @@ A1_DEFAULTS: dict[str, object] = {
 }
 
 
+# Trajectory switches (T-03): off by default. Task 1.4: flow_ledger; Task 1.7: blast radius
+# (br_k and irreversible_b are the §6.9 / F3 constants, read only when br_mode is not "off").
+TRAJECTORY_SWITCH_DEFAULTS: dict[str, object] = {
+    "flow_ledger": False,
+    "br_mode": "off",
+    "br_k": 0.6,
+    "irreversible_b": 0.6,
+}
+
+# Task 1.5 vital-signs constants (feature spec F2; the detector itself is opt-in via ``enabled``).
+VITAL_DEFAULTS: dict[str, object] = {
+    "vital_w_loop": 8,
+    "vital_w_loop_polling": 32,
+    "vital_r_max": 3,
+    "vital_jaccard": 0.9,
+    "vital_w_spin": 4,
+    "vital_spin_di": 0.1,
+    "vital_w_stall": 6,
+    "vital_stall_di": 0.3,
+}
+
+# Task 2.1 session flag window (feature spec F7; T-09, T-15). ``sessions`` gates recording (T-34).
+SESSION_DEFAULTS: dict[str, object] = {
+    "sessions": False,
+    "session_window": 6,
+    "flag_min": 0.5,
+    "sess_idle_ms": 1_800_000,
+    "sess_sweep_every": 4096,
+    "prov_unresolved_weight": 0.125,
+}
+
+# Task 2.2 provisional flags (feature spec F6). ``provisional`` also opens the session gate (T-34).
+PROVISIONAL_DEFAULTS: dict[str, object] = {
+    "provisional": False,
+    "prov_ttl": 3,
+    "prov_budget": 0.25,
+    "prov_min_calls": 8,
+}
+
+# Task 2.3 age discount for transition surprise (feature spec F6).
+AGE_DEFAULTS: dict[str, object] = {"seq_age_discount": False, "age_h": 3}
+
+# Task 3.1 pre-execution gate for irreversible calls (feature spec F4; T-11, T-41).
+PREEXEC_GATE_DEFAULTS: dict[str, object] = {"gate": False, "gate_flow_rate": 0.90}
+
+# Task 3.2 two-tier escalation with an optional judge in the approval band (feature spec F5).
+ESCALATION_DEFAULTS: dict[str, object] = {
+    "escalate": False,
+    "judge_block": 0.8,
+    "judge_allow": 0.2,
+}
+
+# Task 3.3 session verdicts (feature spec F7; T-43). ``session_enforce`` also opens the session
+# gate (T-34).
+SESSION_VERDICT_DEFAULTS: dict[str, object] = {
+    "theta_warn": 0.33,
+    "theta_halt": 0.6,
+    "session_enforce": False,
+}
+
+# Task 3.4 verdict authority scaled by evidence maturity (feature spec F8; T-14, T-44).
+AUTHORITY_DEFAULTS: dict[str, object] = {
+    "authority": False,
+    "mat_warm_n": 30,
+    "mat_mature_n": 300,
+}
+
+
 def test_engine_config_defaults_match_global_constraints() -> None:
     expected = (
         GLOBAL_CONSTRAINT_VALUES
@@ -98,6 +166,15 @@ def test_engine_config_defaults_match_global_constraints() -> None:
         | DECISION_OVERRIDES
         | USER_DECISION_DEFAULTS
         | A1_DEFAULTS
+        | TRAJECTORY_SWITCH_DEFAULTS
+        | VITAL_DEFAULTS
+        | SESSION_DEFAULTS
+        | PROVISIONAL_DEFAULTS
+        | AGE_DEFAULTS
+        | PREEXEC_GATE_DEFAULTS
+        | ESCALATION_DEFAULTS
+        | SESSION_VERDICT_DEFAULTS
+        | AUTHORITY_DEFAULTS
     )
     assert dataclasses.asdict(EngineConfig()) == expected
 

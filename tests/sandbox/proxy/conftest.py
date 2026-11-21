@@ -12,7 +12,7 @@ from mcp import Client
 from mcp.types import CallToolResult, ListToolsResult
 
 from agentfw.bench.protocol import Detector
-from agentfw.core.envelope import DetectorResult, Label, RawCall
+from agentfw.core.envelope import DetectorResult, JsonValue, Label, RawCall
 from agentfw.sandbox.proxy_py import ActionMutator, FirewallProxy, SessionInfo
 from agentfw.sandbox.seed.company import build_company
 from agentfw.sandbox.tools import stripe_server, zendesk_server
@@ -32,6 +32,7 @@ class MemorySink:
     calls: list[RawCall] = field(default_factory=list)
     labels: list[Label] = field(default_factory=list)
     verdicts: list[tuple[str, DetectorResult]] = field(default_factory=list)
+    schemas: list[dict[str, JsonValue]] = field(default_factory=list)
     events: list[str] = field(default_factory=list)
 
     def write_call(self, raw: RawCall) -> None:
@@ -44,6 +45,9 @@ class MemorySink:
     def write_verdict(self, envelope_id: str, result: DetectorResult) -> None:
         self.verdicts.append((envelope_id, result))
         self.events.append(f"verdict:{envelope_id}")
+
+    def write_schema(self, row: dict[str, JsonValue]) -> None:
+        self.schemas.append(row)
 
 
 class SpyDownstream:
@@ -78,6 +82,7 @@ async def make_proxy(
     shadow: Detector | None = None,
     timeout_s: float = 30.0,
     sink: Any = None,
+    session: SessionInfo = SESSION,
 ) -> AsyncIterator[tuple[FirewallProxy, Any, Mapping[str, SpyDownstream]]]:
     """A proxy over fake zendesk + stripe + flaky servers, each behind a spying client."""
     servers = {
@@ -93,7 +98,7 @@ async def make_proxy(
         }
         proxy = FirewallProxy(
             spies,
-            SESSION,
+            session,
             sink,
             mutator=mutator,
             shadow=shadow,

@@ -1,5 +1,6 @@
 zendesk.get_ticket:
   kind: read
+  annotations: {read_only: true, destructive: false, idempotent: true, open_world: false}  # no side effect
   args:
     ticket_id: {type: id, prefix: "tk_", source: external}
   produces: [ticket.id, ticket.charge_id, ticket.customer_email, ticket.status]
@@ -12,6 +13,7 @@ zendesk.get_ticket:
     produces_ids: [ticket.id, ticket.charge_id]
 zendesk.list_tickets:
   kind: read
+  annotations: {read_only: true, destructive: false, idempotent: true, open_world: false}  # no side effect
   args:
     status: {type: categorical, vocab: [open, pending, solved]}
     limit: {type: numeric, shape: count, dist: {family: constant, value: 25}}
@@ -23,6 +25,7 @@ zendesk.list_tickets:
     produces_ids: [ticket.ids]
 zendesk.add_comment:
   kind: write
+  annotations: {read_only: false, destructive: false, idempotent: false, open_world: true}  # additive; a public comment emails the requester
   args:
     ticket_id: {type: id, prefix: "tk_", source: zendesk.get_ticket.id}
     body: {type: freetext, len_dist: {family: lognormal, mu: 4.0, sigma: 0.6, min: 5}}
@@ -34,6 +37,7 @@ zendesk.add_comment:
     produces_ids: [comment.id]
 zendesk.update_status:
   kind: write
+  annotations: {read_only: false, destructive: true, idempotent: true, open_world: false}  # overwrites the ticket status
   args:
     ticket_id: {type: id, prefix: "tk_", source: zendesk.get_ticket.id}
     status: {type: categorical, vocab: [open, pending, solved]}

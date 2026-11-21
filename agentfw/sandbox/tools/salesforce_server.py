@@ -15,7 +15,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from agentfw.sandbox.config import ApiBudget, BudgetExceeded, SandboxConfig, UnsafeConfigError
 from agentfw.sandbox.seed.company import Company
-from agentfw.sandbox.tools.common import mark_fake, ok, tool_error
+from agentfw.sandbox.tools.common import ADD_CLOSED, OVERWRITE, READ, mark_fake, ok, tool_error
 
 SOQL_MAX_LIMIT = 2000
 COLLECTION_CHUNK = 200  # sObject Collections accept at most 200 records per request
@@ -354,23 +354,23 @@ class LiveSalesforceBackend:
 def build_server(backend: SalesforceBackend) -> MCPServer:
     server = MCPServer("salesforce")
 
-    @server.tool()
+    @server.tool(annotations=READ)
     def run_soql(query: str) -> dict[str, Any]:
         """Run a SOQL SELECT query (LIMIT <= 2000; DML is rejected)."""
         return ok(backend.run_soql(validate_soql(query)))
 
-    @server.tool()
+    @server.tool(annotations=READ)
     def get_record(object: str, record_id: str) -> dict[str, Any]:
         """Retrieve one record by id."""
         return ok(backend.get_record(object, check_record_id(record_id)))
 
-    @server.tool()
+    @server.tool(annotations=OVERWRITE)
     def update_record(object: str, record_id: str, fields: dict[str, Any]) -> dict[str, Any]:
         """Update fields on one record."""
         check_fields(fields, "fields")
         return ok(backend.update_record(object, check_record_id(record_id), fields))
 
-    @server.tool()
+    @server.tool(annotations=OVERWRITE)
     def mass_update(
         object: str, record_ids: list[str], field_updates: dict[str, Any]
     ) -> dict[str, Any]:
@@ -394,7 +394,7 @@ def build_server(backend: SalesforceBackend) -> MCPServer:
         failed = [r for r in results if not r.get("success")]
         return {"updated": len(results) - len(failed), "failed": failed, "batches": batches}
 
-    @server.tool()
+    @server.tool(annotations=ADD_CLOSED)
     def create_task(what_id: str, subject: str) -> dict[str, Any]:
         """Create a Task related to a record."""
         return ok(backend.create_task(check_record_id(what_id), subject))

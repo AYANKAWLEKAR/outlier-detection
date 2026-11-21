@@ -77,7 +77,7 @@ def test_manifest_hashes_and_counts(tmp_path: Path) -> None:
     m = generate(cfg(), tmp_path)
     for name, digest in m.files.items():
         assert hashlib.sha256((tmp_path / name).read_bytes()).hexdigest() == digest
-    assert set(m.files) == {"traces.jsonl", "labels.jsonl"}
+    assert set(m.files) == {"traces.jsonl", "labels.jsonl", "schemas.jsonl"}  # F3 (Task 1.7)
     traces = _read(tmp_path / "traces.jsonl")
     assert m.counts["envelopes"] == len(traces) > 0
     assert m.counts["sessions"] == len({t["session_id"] for t in traces})
@@ -175,10 +175,24 @@ ALL_FAMILIES = [
 ]
 SPIKE = "magnitude_spike"
 # sha256 of the mode-"own" dataset of ``small_cfg()``, taken at 827cd34 (before magnitude_mode).
+# ``labels.jsonl`` re-taken when uniform draws stopped depending on the platform (``dists.uniform``:
+# the macOS-only fused multiply-add moved ``strength`` by one ulp); ``traces.jsonl`` did not move.
 SMALL_OWN_FILES = {
     "traces.jsonl": "dbdef7b8ec5a6b46129eca21e22e92605d5d8885b3489cf133e721d6e0e84ec1",
-    "labels.jsonl": "db4e21b005e6ad3bf712d0900ba289e93d2bc49dbf9f9182f56a3ea7ef6dacdc",
+    "labels.jsonl": "61b91dafe656b5300ef8a4f346c8472d5c38aa2126267c6e673a03858ed0c20c",
 }
+
+
+def _strip_trace_fields(lines: list[bytes]) -> str:
+    """sha256 of the trace lines minus ``task_ids`` and ``response_meta.fp``, as written."""
+    out = bytearray()
+    for ln in lines:
+        row = orjson.loads(ln)
+        row.pop("task_ids", None)
+        if row.get("response_meta"):
+            row["response_meta"].pop("fp", None)
+        out += orjson.dumps(row, option=orjson.OPT_SORT_KEYS) + b"\n"
+    return hashlib.sha256(bytes(out)).hexdigest()
 
 
 def small_cfg(**kw: object) -> GenerateConfig:
@@ -404,7 +418,14 @@ def test_default_generator_is_unchanged(trio: Trio, tmp_path: Path) -> None:
     assert c.magnitude_mode == "own" and c.magnitude_far_mult == CONTROL_P99_MULT == 5.0
     m = trio.own.manifest
     assert set(m.counts) == {"sessions", "envelopes", "attacks"}
-    assert m.files == SMALL_OWN_FILES
+    # Task 1.3 added ``task_ids`` (a session's first call) and ``response_meta.fp`` to traces.
+    # Stripped of those two fields and re-serialized as the generator writes them, mode "own"
+    # still reproduces the pre-A1 bytes; the real file differs, so the fields cannot silently go.
+    assert m.files["labels.jsonl"] == SMALL_OWN_FILES["labels.jsonl"]
+    assert _strip_trace_fields(trio.own.trace_lines) == SMALL_OWN_FILES["traces.jsonl"]
+    assert m.files["traces.jsonl"] != SMALL_OWN_FILES["traces.jsonl"]
+    assert any(b'"task_ids"' in ln for ln in trio.own.trace_lines)
+    assert any(b'"fp"' in ln for ln in trio.own.trace_lines)
     # mode "own" never reads the multiple
     tiny = {"days": 5, "attack_rate": 0.5, "families": [SPIKE, "benign_unusual"]}
     a = generate(cfg(**tiny), tmp_path / "a")
@@ -498,9 +519,10 @@ CENSUS_KEYS = {
     "magnitude_strength_ge_10",
 }
 # sha256 of ``small_cfg(magnitude_mode="far")``, taken at 335354f (Task 1.19, before the top-up).
+# ``labels.jsonl`` re-taken with ``dists.uniform`` (platform-independent rounding), as above.
 SMALL_FAR_FILES = {
     "traces.jsonl": "1c4ed3825e25b2e31082837602648dab7cf1b1911d2f69c5d59f64048eb6bddf",
-    "labels.jsonl": "55ad0117e741f2170529231de47cd1a2e12df5c66d3e10f1e518cd8ce65c7313",
+    "labels.jsonl": "23f455958d6cdca23cb43a5593b3e5537bcf3c5540721fe945cf215b6d8b1f3f",
 }
 Cand = tuple[str, str, int | float]  # (tool, arg, the call's own value)
 
@@ -769,7 +791,11 @@ def test_topup_is_deterministic_and_uses_its_own_stream(
         assert hashlib.sha256((tmp_path / name).read_bytes()).hexdigest() == digest
     # rate 0: no top-up id, and the bytes of Task 1.19's far dataset
     assert topup_cfg(0.0) == small_cfg(magnitude_mode="far") == trio.far.manifest.config
-    assert trio.far.manifest.files == SMALL_FAR_FILES != again.manifest.files
+    # T-24: the trajectory branch adds ``task_ids`` / ``response_meta.fp``; with them stripped
+    # the far traces are still byte-identical to the pinned digest.
+    assert trio.far.manifest.files["labels.jsonl"] == SMALL_FAR_FILES["labels.jsonl"]
+    assert _strip_trace_fields(trio.far.trace_lines) == SMALL_FAR_FILES["traces.jsonl"]
+    assert trio.far.manifest.files != again.manifest.files
     assert not _topups(trio.far) and trio.far.manifest.counts["magnitude_topup"] == 0
     # the third stream (A1.4): its own, a function of the seed
     want = np.random.default_rng([0, stable_hash("attacks:magnitude_topup")])
@@ -923,3 +949,23 @@ def test_cli_topup_rate_default_is_the_config_default(
     assert main(["--days", "1", "--max-sessions", "3", "--out", str(tmp_path)]) == 0
     m = orjson.loads((tmp_path / "manifest.json").read_bytes())
     assert m["config"]["magnitude_topup_rate"] == 0.25
+
+
+def test_only_a_sessions_first_call_carries_task_ids_with_attacks(tmp_path: Path) -> None:
+    """Attack copies (burst duplicates, runaway repeats) are never a session's first call (T-33)."""
+    from agentfw.synth.attacks import RUNAWAY_FAMILIES
+
+    fams = [*ALL_FAMILIES, *sorted(RUNAWAY_FAMILIES)]
+    d = gen(tmp_path / "x", small_cfg(families=fams))
+    got = {lab["attack_family"] for lab in d.labels if lab["label"] == "attack"}
+    assert set(RUNAWAY_FAMILIES) <= got  # the runaway repeats are exercised
+    seen: set[object] = set()
+    first = 0
+    for row in sorted(d.traces, key=lambda r: (str(r["session_id"]), int(r["seq_no"]))):  # type: ignore[call-overload]
+        sid = row["session_id"]
+        if sid not in seen:
+            seen.add(sid)
+            first += bool(row.get("task_ids"))
+        else:
+            assert "task_ids" not in row, row["envelope_id"]
+    assert first > 0

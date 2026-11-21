@@ -21,8 +21,10 @@ from agentfw.bench.metrics import (
     STRENGTH_BUCKETS,
     among_reasons_share,
     auprc,
+    auroc,
     benign_fpr,
     bootstrap_ci,
+    calibration_rows,
     cold_start_curve,
     compute_all,
     control_fpr,
@@ -31,6 +33,7 @@ from agentfw.bench.metrics import (
     gate_preview,
     latency_summary,
     per_agent_fpr_at_recall,
+    precision_at,
     recall_by_family,
     top_reason_share,
 )
@@ -764,3 +767,75 @@ def test_metrics_and_report_carry_the_dropped_counts() -> None:
     h = _headline(m, warm_only=False)
     assert h["auprc_ci_n_dropped"] == m.auprc_ci_n_dropped
     assert h["fpr95_per_agent_ci_n_dropped"] == m.fpr95_per_agent_ci_n_dropped
+
+
+def _cal_fixture() -> tuple[list[ScoreRow], list[ScoreRow]]:
+    rows = [
+        *[_row(split="train", fused_score=v) for v in np.linspace(0.0, 0.5, 50)],
+        *[_row(fused_score=v) for v in np.linspace(0.0, 0.5, 30)],
+        _atk(0.9),
+        _atk(0.8),
+    ]
+    cal = [
+        _row(split="calibration", agent_id="C", fused_score=0.99),
+        _atk(1.0, split="calibration", agent_id="C"),
+        _row(split="calibration", agent_id="C", fused_score=0.0, is_warm=False),
+    ]
+    return rows, cal
+
+
+def test_compute_all_ignores_calibration_rows() -> None:
+    rows, cal = _cal_fixture()
+    for warm_only in (False, True):
+        assert compute_all(rows + cal, warm_only=warm_only, n_boot=0) == compute_all(
+            rows, warm_only=warm_only, n_boot=0
+        )
+
+
+def test_calibration_rows_helper_selects_only_calibration() -> None:
+    rows, cal = _cal_fixture()
+    assert calibration_rows(rows + cal) == cal
+    assert calibration_rows(rows) == []
+
+
+def test_precision_at_base_rate() -> None:
+    assert precision_at(0.9, 0.01, 0.015) == pytest.approx(
+        0.9 * 0.015 / (0.9 * 0.015 + 0.01 * 0.985)
+    )
+    assert math.isnan(precision_at(0.0, 0.0, 0.015))
+    assert math.isnan(precision_at(math.nan, 0.01, 0.015))
+
+
+def test_auroc_perfect_and_random() -> None:
+    assert auroc(np.array([0.1, 0.2, 0.8, 0.9]), np.array([False, False, True, True])) == 1.0
+    assert auroc(np.array([0.5] * 4), np.array([False, True] * 2)) == 0.5
+    assert auroc(np.array([0.9, 0.8, 0.2, 0.1]), np.array([False, False, True, True])) == 0.0
+    assert math.isnan(auroc(np.array([0.1, 0.2]), np.array([False, False])))
+    assert math.isnan(auroc(np.array([0.1, 0.2]), np.array([True, True])))
+
+
+def test_auroc_matches_sklearn_with_ties_and_nan() -> None:
+    from sklearn.metrics import roc_auc_score
+
+    rng = np.random.default_rng(3)
+    s = np.round(rng.normal(size=300), 1)
+    y = rng.random(300) < 0.2
+    assert auroc(s, y) == pytest.approx(roc_auc_score(y, s))
+    s2 = np.r_[s, np.nan]
+    y2 = np.r_[y, True]
+    assert auroc(s2, y2) == pytest.approx(roc_auc_score(y, s))
+
+
+def test_compute_all_precision_global_and_base_rate() -> None:
+    rows = [
+        _row(label="attack", fused_score=0.9),
+        _row(label="attack", fused_score=0.8),
+        _row(fused_score=0.7),
+        _row(fused_score=0.1),
+        _row(fused_score=0.05, split="train"),
+    ]
+    m = compute_all(rows, warm_only=False, n_boot=0)
+    assert m.attack_base_rate == pytest.approx(0.5)
+    assert m.precision_global == pytest.approx(
+        precision_at(m.recall_at_global_thr, m.fpr95_global, 0.5)
+    )

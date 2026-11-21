@@ -17,7 +17,7 @@ from pathlib import Path
 from agentfw.bench.dataset import load_dir
 from agentfw.bench.metrics import compute_all
 from agentfw.bench.protocol import Detector
-from agentfw.bench.registry import DETECTORS, make_detector
+from agentfw.bench.registry import DETECTORS, make_bench_detector
 from agentfw.bench.replay import OutcomeMode, ScoreRow, SplitSpec, replay
 from agentfw.core.config import EngineConfig
 from agentfw.core.envelope import Label, RawCall
@@ -50,14 +50,14 @@ def replay_detector(
 ) -> tuple[list[ScoreRow], Detector]:
     """Replay one registry detector (an engine variant gets ``cfg``; ``None``: its default config)
     over a dataset directory. ``outcomes`` is :func:`agentfw.bench.replay.replay`'s outcome mode,
-    always stated by the caller (the benchmark protocol is ``BENCH_OUTCOMES``, decision 008)."""
+    always stated by the caller (the benchmark protocol is ``BENCH_OUTCOMES``, decision 008).
+    An engine variant gets the dataset's ``schemas.jsonl`` as hints (``make_bench_detector``)."""
     if detector not in DETECTORS:
         raise KeyError(f"unknown detector {detector!r}; available: {sorted(DETECTORS)}")
     raws, labels = _load(str(traces_dir))
     engine = detector == "engine" or detector.startswith("engine-")
-    det = (
-        make_detector(detector, cfg=cfg) if cfg is not None and engine else make_detector(detector)
-    )
+    kw = {"cfg": cfg} if cfg is not None and engine else {}
+    det = make_bench_detector(detector, traces_dir, **kw)
     return replay(raws, labels, det, split, outcomes=outcomes), det
 
 

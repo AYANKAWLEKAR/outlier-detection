@@ -12,7 +12,8 @@ categorical Dirichlet weights are drawn once per persona, not per session.
 A walk may return no calls (abandon on a non-emitted first step). Such draws are dropped: no empty
 session is emitted, but the draw still happened, so the attempted session count per day keeps the
 configured rate (the emitted count is slightly below it). ``max_sessions`` counts emitted sessions
-and truncates in time order.
+and truncates in time order. A session's first call carries ``task_ids``: the externally sourced
+id values of all its calls, deduplicated in order and cut to 64 (no RNG draw).
 
 Quarter-end scheduling: a persona with ``quarter_end_days`` and a ``quarter_end_mass_update`` entry
 in its task list (weight 0, so it is never drawn from the regular mix) runs that task in a session
@@ -137,6 +138,7 @@ def sample_persona_tagged(
             session_id = new_ulid(int(st), rng)
             ts = int(st)
             calls: list[RawCall] = []
+            task_ids = tuple(dict.fromkeys(x for pc in planned for x in pc.external_ids))[:64]
             for i, pc in enumerate(planned):
                 ts += round(pc.gap_s * 1000)
                 calls.append(
@@ -150,6 +152,7 @@ def sample_persona_tagged(
                         tool_id=pc.tool_id,
                         args=pc.args,
                         response_meta=pc.response_meta,
+                        task_ids=task_ids if i == 0 else (),
                     )
                 )
             sessions.append(calls)

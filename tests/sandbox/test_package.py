@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
@@ -16,10 +18,14 @@ from pydantic import SecretStr
 from agentfw.bench.dataset import load_dir, load_labels, load_traces
 from agentfw.bench.registry import make_detector
 from agentfw.bench.replay import SplitSpec, replay
-from agentfw.core.envelope import Label, RawCall, ResponseMeta
+from agentfw.core.envelope import JsonValue, Label, RawCall, ResponseMeta
+from agentfw.core.hints import ToolAnnotations
 from agentfw.core.normalize import SessionTracker, normalize
+from agentfw.core.patterns import is_id_like
+from agentfw.core.schemas import ToolSchema, load_schemas
 from agentfw.sandbox.config import SandboxConfig
 from agentfw.sandbox.package import (
+    START_MS,
     DatasetManifest,
     main,
     package,
@@ -822,3 +828,278 @@ def test_unexpected_manifest_entry_is_reported_without_its_name(mini: Path) -> N
     man.write_bytes(orjson.dumps(raw))
     rep = validate_dataset(mini, **LOW)
     assert any(x == "labels.jsonl: sha256 does not match manifest.json" for x in rep.problems)
+
+
+# -- tool schemas (F3, Task 1.8) ------------------------------------------------------------------
+
+
+def _schema_row(
+    tool: str, props: dict[str, JsonValue], at: int, **ann: bool
+) -> dict[str, JsonValue]:
+    return ToolSchema.capture(
+        tool,
+        {"type": "object", "properties": props},
+        ToolAnnotations(**ann),
+        at,
+    ).to_row()
+
+
+def _write_schemas(run: Path, rows: Sequence[dict[str, JsonValue]]) -> None:
+    (run / "schemas.jsonl").write_bytes(b"".join(orjson.dumps(r) + b"\n" for r in rows))
+
+
+def _schema_run(tmp_path: Path, name: str = "run") -> Path:
+    run = tmp_path / name
+    sessions = {f"{name}s{i}": (AGENT_IDS[i % 2], [2000, 3000, 1000]) for i in range(2)}
+    _write_run(run, sessions)
+    return run
+
+
+def test_package_includes_and_validates_schemas(tmp_path: Path) -> None:
+    run_a, run_b = _schema_run(tmp_path, "a"), _schema_run(tmp_path, "b")
+    get = _schema_row("zendesk.get_ticket", {"ticket_id": {"type": "string"}}, 50)
+    drift = _schema_row("zendesk.get_ticket", {"ticket_id": {"type": "integer"}}, 90)
+    other = _schema_row("stripe.create_refund", {"amount": {"type": "number"}}, 60, read_only=False)
+    _write_schemas(run_a, [get, other])
+    _write_schemas(run_b, [dict(get, captured_at=70), drift])  # a duplicate and a drifted row
+    out = tmp_path / "ds"
+    man = package([run_a, run_b], out, seed=0)
+    assert "schemas.jsonl" in man.files
+    rows = _jsonl(out / "schemas.jsonl")
+    assert [(r["tool_id"], r["hash"]) for r in rows] == [
+        (get["tool_id"], get["hash"]),
+        (other["tool_id"], other["hash"]),
+        (drift["tool_id"], drift["hash"]),
+    ]  # each (tool, hash) once, in capture order
+    assert {r["captured_at"] for r in rows} == {START_MS}
+    assert load_schemas(out / "schemas.jsonl")["zendesk.get_ticket"].hash == drift["hash"]
+    rep = validate_dataset(out, **LOW)
+    assert rep.ok, rep.problems
+
+
+def test_package_without_schemas_is_unchanged_and_valid(mini: Path) -> None:
+    assert not (mini / "schemas.jsonl").exists()
+    man = DatasetManifest.model_validate_json((mini / "manifest.json").read_bytes())
+    assert "schemas.jsonl" not in man.files
+    assert validate_dataset(mini, **LOW).ok  # optional: an older package stays valid
+
+
+def _with_schemas(tmp_path: Path) -> Path:
+    run = _schema_run(tmp_path)
+    _write_schemas(run, [_schema_row("zendesk.get_ticket", {"a": {"type": "string"}}, 5)])
+    out = tmp_path / "ds"
+    package([run], out, seed=0)
+    return out
+
+
+def test_validate_flags_tampered_and_malformed_schemas(tmp_path: Path) -> None:
+    out = _with_schemas(tmp_path)
+    p = out / "schemas.jsonl"
+    good = p.read_bytes()
+    man_path = out / "manifest.json"
+    man = orjson.loads(man_path.read_bytes())
+
+    def rehash(data: bytes) -> None:
+        p.write_bytes(data)
+        man["files"]["schemas.jsonl"] = hashlib.sha256(data).hexdigest()
+        man_path.write_bytes(orjson.dumps(man))
+
+    rehash(good.replace(b'"string"', b'"integer"'))  # contents no longer match their hash
+    assert any("hash does not match" in x for x in validate_dataset(out, **LOW).problems)
+    rehash(b'{"tool_id": "x"}\n')
+    rep = validate_dataset(out, **LOW)
+    assert any("schemas.jsonl line 1: invalid schema row" in x for x in rep.problems)
+    rehash(b"not json\n[1]\n")
+    assert sum("invalid schema row" in x for x in validate_dataset(out, **LOW).problems) == 2
+
+
+def test_validate_schemas_manifest_agreement_and_no_echo(tmp_path: Path) -> None:
+    out = _with_schemas(tmp_path)
+    man_path = out / "manifest.json"
+    man = orjson.loads(man_path.read_bytes())
+    p = out / "schemas.jsonl"
+    p.write_bytes(p.read_bytes() + b"\n")  # sha256 no longer matches
+    assert any("schemas.jsonl: sha256" in x for x in validate_dataset(out, **LOW).problems)
+    del man["files"]["schemas.jsonl"]
+    man_path.write_bytes(orjson.dumps(man))
+    assert any("does not list schemas.jsonl" in x for x in validate_dataset(out, **LOW).problems)
+    man["files"]["schemas.jsonl"] = "0" * 64
+    man_path.write_bytes(orjson.dumps(man))
+    p.unlink()
+    assert any(
+        "listed in manifest.json but missing" in x for x in validate_dataset(out, **LOW).problems
+    )
+    # a bad row never leaks its content into the report
+    p.write_bytes(b'{"tool_id": "sk_live_abcdefgh12345678", "annotations": 3}\n')
+    probs = " ".join(validate_dataset(out, **LOW).problems)
+    assert "sk_live_abcdefgh12345678" not in probs
+
+
+def test_package_refuses_a_secret_in_schemas(tmp_path: Path) -> None:
+    run = _schema_run(tmp_path)
+    _write_schemas(
+        run, [_schema_row("zendesk.get_ticket", {"k": {"default": "sk_live_abcdefgh12345678"}}, 5)]
+    )
+    with pytest.raises(ValueError, match=r"schemas\.jsonl.*secret-like") as ei:
+        package([run], tmp_path / "ds", seed=0)
+    assert "sk_live_abcdefgh12345678" not in str(ei.value)
+
+
+def test_package_rejects_malformed_schema_row_without_echo(tmp_path: Path) -> None:
+    run = _schema_run(tmp_path)
+    (run / "schemas.jsonl").write_bytes(b'{"tool_id": "password=hunter2hunter2"}\n')
+    with pytest.raises(ValueError, match=r"schemas\.jsonl line 1") as ei:
+        package([run], tmp_path / "ds", seed=0)
+    assert "hunter2" not in str(ei.value)
+
+
+def test_fake_run_writes_schemas_and_task_ids(tmp_path: Path) -> None:
+    run = tmp_path / "run"
+    assert run_main(["--sessions", "6", "--seed", "0", "--out", str(run), "--fake"]) == 0
+    schemas = load_schemas(run / "schemas.jsonl")
+    assert "stripe.create_refund" in schemas
+    assert schemas["stripe.create_refund"].annotations.destructive is True
+    rows = (run / "schemas.jsonl").read_bytes().splitlines()
+    assert len(rows) == len(schemas)  # one row per (tool, hash) across all sessions
+    firsts = []
+    for f in sorted((run / "raw").glob("*.jsonl")):
+        calls = [RawCall.model_validate_json(x) for x in f.read_bytes().splitlines()]
+        assert all(is_id_like(x) for x in calls[0].task_ids)
+        assert all(c.task_ids == () for c in calls[1:])
+        firsts.append(calls[0].task_ids)
+    assert any(firsts)  # a prompt with no id discloses none (T-73)
+
+
+def test_merge_schemas_logs_drift_across_sessions(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from agentfw.sandbox.run import _Runner
+
+    out = tmp_path / "out"
+    out.mkdir()
+    r = cast(Any, SimpleNamespace(out_dir=out, schema_loaded=False, schema_last={}))
+
+    def session(name: str, *rows: dict[str, JsonValue]) -> Path:
+        w = tmp_path / name
+        w.mkdir()
+        _write_schemas(w, rows)
+        return w
+
+    v1 = _schema_row("zendesk.get_ticket", {"a": {"type": "string"}}, 1)
+    v2 = _schema_row("zendesk.get_ticket", {"a": {"type": "integer"}}, 2)
+    with caplog.at_level(logging.WARNING, logger="agentfw.sandbox.run"):
+        _Runner.merge_schemas(r, session("s1", v1))
+        _Runner.merge_schemas(r, session("s2", v1))  # same schema again: silent
+        assert not [x for x in caplog.records if "drift" in x.getMessage()]
+        _Runner.merge_schemas(r, session("s3", v2))
+    assert [x.getMessage() for x in caplog.records if "drift" in x.getMessage()] == [
+        "tool-definition drift: zendesk.get_ticket"
+    ]
+    assert len((out / "schemas.jsonl").read_bytes().splitlines()) == 2
+    # a resumed run (fresh runner state) also notices a drift against the file
+    r2 = cast(Any, SimpleNamespace(out_dir=out, schema_loaded=False, schema_last={}))
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="agentfw.sandbox.run"):
+        _Runner.merge_schemas(r2, session("s4", _schema_row("zendesk.get_ticket", {}, 3)))
+    assert any("drift" in x.getMessage() for x in caplog.records)
+
+
+def test_merge_schemas_keeps_a_rollback_and_survives_a_corrupt_file(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from agentfw.sandbox.run import _Runner
+
+    out = tmp_path / "out"
+    out.mkdir()
+    r = cast(Any, SimpleNamespace(out_dir=out, schema_loaded=False, schema_last={}))
+    a = _schema_row("zendesk.get_ticket", {"a": {"type": "string"}}, 1)
+    b = _schema_row("zendesk.get_ticket", {"a": {"type": "integer"}}, 2)
+    for i, row in enumerate([a, b, a]):
+        w = tmp_path / f"s{i}"
+        w.mkdir()
+        _write_schemas(w, [row])
+        _Runner.merge_schemas(r, w)
+    assert load_schemas(out / "schemas.jsonl")["zendesk.get_ticket"].hash == a["hash"]
+    assert len((out / "schemas.jsonl").read_bytes().splitlines()) == 3
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    (bad / "schemas.jsonl").write_bytes(b"{not json\n")
+    r2 = cast(Any, SimpleNamespace(out_dir=out, schema_loaded=False, schema_last={}))
+    with caplog.at_level(logging.WARNING, logger="agentfw.sandbox.run"):
+        _Runner.merge_schemas(r2, bad)  # never raises: capture must not fail a session
+    assert any("schema" in x.getMessage() for x in caplog.records)
+
+
+def test_package_keeps_the_latest_definition_after_a_rollback(tmp_path: Path) -> None:
+    run_a, run_b = _schema_run(tmp_path, "a"), _schema_run(tmp_path, "b")
+    a = _schema_row("zendesk.get_ticket", {"ticket_id": {"type": "string"}}, 50)
+    b = _schema_row("zendesk.get_ticket", {"ticket_id": {"type": "integer"}}, 60)
+    _write_schemas(run_a, [a, b])
+    _write_schemas(run_b, [dict(a, captured_at=70)])
+    out = tmp_path / "ds"
+    package([run_a, run_b], out, seed=0)
+    rows = _jsonl(out / "schemas.jsonl")
+    assert [r["hash"] for r in rows] == [a["hash"], b["hash"], a["hash"]]
+    assert load_schemas(out / "schemas.jsonl")["zendesk.get_ticket"].hash == a["hash"]
+
+
+def test_task_ids_are_only_the_ids_the_prompt_discloses() -> None:
+    """A resolved slot the prompt does not show (a ticket's charge id when the template names
+    only the ticket) was never handed to the agent, so it is no task input (T-73)."""
+    from agentfw.sandbox.run import task_ids
+    from agentfw.sandbox.tasks.schema import RenderedSession, RenderedTask
+
+    slots = {"ticket": {"id": "TCK-104233", "charge_id": "ch_3NxQ8vK2eZvKYlo2C0a1b2c3"}}
+    t = RenderedTask("refund", "Resolve ticket TCK-104233.", slots, [], [])
+    s = RenderedSession("a1", t.prompt, [t], [], [], 25)
+    assert task_ids(s) == ("TCK-104233",)
+
+
+def test_resume_repairs_a_torn_schemas_tail(tmp_path: Path) -> None:
+    """A crash mid-append leaves ``schemas.jsonl`` with a torn last line; a resumed run cuts it
+    off like the ledger's, so the merge and packaging can read the file (T-74)."""
+    run = tmp_path / "run"
+    assert run_main(["--sessions", "2", "--seed", "0", "--out", str(run), "--fake"]) == 0
+    with (run / "schemas.jsonl").open("ab") as f:
+        f.write(b'{"tool_id": "zendesk.get_ti')
+    assert run_main(["--sessions", "3", "--seed", "0", "--out", str(run), "--fake"]) == 0
+    data = (run / "schemas.jsonl").read_bytes()
+    assert data.endswith(b"\n") and b'zendesk.get_ti"' not in data
+    assert load_schemas(run / "schemas.jsonl")
+
+
+def test_merge_schemas_commits_hashes_only_after_the_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed append leaves the runner's latest hashes as they were, so the next session
+    retries the row instead of skipping it as already recorded (T-74)."""
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from agentfw.sandbox.run import _Runner
+
+    out = tmp_path / "out"
+    out.mkdir()
+    r = cast(Any, SimpleNamespace(out_dir=out, schema_loaded=False, schema_last={}))
+    w = tmp_path / "s"
+    w.mkdir()
+    _write_schemas(w, [_schema_row("zendesk.get_ticket", {"a": {"type": "string"}}, 1)])
+    real_open = Path.open
+
+    def failing_open(self: Path, mode: str = "r", *a: Any, **kw: Any) -> Any:
+        if self.name == "schemas.jsonl" and mode == "ab":
+            raise OSError("disk full")
+        return real_open(self, mode, *a, **kw)
+
+    monkeypatch.setattr(Path, "open", failing_open)
+    _Runner.merge_schemas(r, w)  # logged and skipped
+    assert r.schema_last == {}
+    monkeypatch.setattr(Path, "open", real_open)
+    _Runner.merge_schemas(r, w)
+    assert list(load_schemas(out / "schemas.jsonl")) == ["zendesk.get_ticket"]

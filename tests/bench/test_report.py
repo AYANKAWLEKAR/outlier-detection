@@ -243,3 +243,23 @@ def test_run_report_ends_the_gate_section_with_the_amended_line(out_dir: Path) -
     label = PROTOCOL_LABELS["review"]  # run's default protocol (BENCH_OUTCOMES)
     assert end in {SECTION_END.format(label=label, verdict=v) for v in ("PASS", "FAIL")}
     assert "gate PASS" not in md
+
+
+def test_report_shows_calibration_counts_only_when_present(
+    tiny_dataset: Path, tmp_path: Path, out_dir: Path
+) -> None:
+    default = orjson.loads((out_dir / "report.json").read_bytes())
+    assert "calibration" not in default["extras"]
+    assert "Calibration partition" not in (out_dir / "report.md").read_text()
+
+    run(
+        tiny_dataset,
+        "static_threshold",
+        SplitSpec(kind="agent", calibration_frac=0.25),
+        tmp_path,
+        n_boot=5,
+    )
+    rep = orjson.loads((tmp_path / "report.json").read_bytes())
+    cal = rep["extras"]["calibration"]
+    assert cal["n_calibration_rows"] > 0 and cal["calibration_agents"]
+    assert "Calibration partition" in (tmp_path / "report.md").read_text()

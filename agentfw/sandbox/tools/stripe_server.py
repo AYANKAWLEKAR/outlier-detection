@@ -13,7 +13,7 @@ from mcp.server.mcpserver import MCPServer
 
 from agentfw.sandbox.config import SandboxConfig, UnsafeConfigError
 from agentfw.sandbox.seed.company import Company
-from agentfw.sandbox.tools.common import mark_fake, ok, tool_error
+from agentfw.sandbox.tools.common import DESTRUCTIVE_OPEN, READ, mark_fake, ok, tool_error
 
 _STRIPE_REASONS = frozenset({"duplicate", "fraudulent", "requested_by_customer"})
 
@@ -253,27 +253,27 @@ class LiveStripeBackend:
 def build_server(backend: StripeBackend) -> MCPServer:
     server = MCPServer("stripe")
 
-    @server.tool()
+    @server.tool(annotations=READ)
     def retrieve_charge(charge_id: str) -> dict[str, Any]:
         """Retrieve a charge (amounts in dollars)."""
         return ok(backend.retrieve_charge(charge_id))
 
-    @server.tool()
+    @server.tool(annotations=READ)
     def list_charges(customer_id: str | None = None, limit: int = 20) -> dict[str, Any]:
         """List charges, optionally for one customer."""
         return ok(backend.list_charges(customer_id, limit))
 
-    @server.tool()
+    @server.tool(annotations=DESTRUCTIVE_OPEN)
     def create_refund(charge_id: str, amount: float, reason: str) -> dict[str, Any]:
         """Refund `amount` dollars of a charge."""
         return ok(backend.create_refund(charge_id, amount, reason))
 
-    @server.tool()
+    @server.tool(annotations=READ)
     def retrieve_customer(customer_id: str) -> dict[str, Any]:
         """Retrieve a customer."""
         return ok(backend.retrieve_customer(customer_id))
 
-    @server.tool()
+    @server.tool(annotations=DESTRUCTIVE_OPEN)
     def create_payout(
         amount: float, destination: str | None = None, currency: str = "usd"
     ) -> dict[str, Any]:

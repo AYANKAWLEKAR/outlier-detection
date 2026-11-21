@@ -1,19 +1,31 @@
 from __future__ import annotations
 
+import dataclasses
 import itertools
 import math
 from collections.abc import Sequence
+from pathlib import Path
 
 import orjson
 import pytest
 
+from agentfw.bench.ci_regress import ci_dataset
+from agentfw.bench.replay import SplitSpec, replay
 from agentfw.core.config import EngineConfig
-from agentfw.core.detectors.sequence import PrereqRecord, SequenceDetector, TransRecord
-from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType
+from agentfw.core.detectors.sequence import (
+    PrereqRecord,
+    SequenceDetector,
+    TransRecord,
+    ValidatedRecord,
+)
+from agentfw.core.engine import KNOWN_DETECTORS, Engine
+from agentfw.core.envelope import ActionEnvelope, DetectorScore, FieldType, LedgerRef
 from agentfw.core.normalize import SessionTracker
 from agentfw.core.schema_infer import TypeInference, TypeView
-from agentfw.core.state import DictStore, key_prereq, key_trans
+from agentfw.core.state import DictStore, key_prereq, key_trans, key_validated
+from tests.core.test_provisional import DELETE, DOCS, call, novel_then_benign, warm_engine
 from tests.factories import make_env
+from tests.factories import run_session as run_engine_session
 
 AGENT = "a1"
 _sid = itertools.count()
@@ -232,3 +244,151 @@ def test_records_roundtrip_and_deterministic(seq: SequenceDetector, tmp_path: ob
     assert PrereqRecord.from_dict(p.to_dict()).to_dict() == p.to_dict()
     assert orjson.dumps(p.to_dict()) == orjson.dumps(PrereqRecord.from_dict(p.to_dict()).to_dict())
     assert t.tools == {tid("X"), tid("Y")}
+
+
+# -- age discount (F6, Task 2.3) ----------------------------------------------------------------
+
+AGE = EngineConfig(seq_age_discount=True)
+
+
+def pair() -> tuple[SequenceDetector, SequenceDetector]:
+    """(plain, discounted) detectors, trained identically by ``feed``."""
+    return SequenceDetector(DictStore(), EngineConfig()), SequenceDetector(DictStore(), AGE)
+
+
+def feed(dets: tuple[SequenceDetector, ...], tools: Sequence[str]) -> None:
+    for d in dets:
+        run_session(d, tools)
+
+
+def trained() -> tuple[SequenceDetector, SequenceDetector]:
+    plain, disc = pair()
+    for _ in range(100):
+        feed((plain, disc), ["A", "B", "C"])
+    return plain, disc
+
+
+def test_first_use_of_a_new_tool_has_zero_transition_weight() -> None:
+    plain, disc = trained()
+    e = probe(disc, ["A"], "N")
+    s_plain, _ = plain._s_trans(probe(plain, ["A"], "N"))
+    s_disc, ev = disc._s_trans(e)
+    assert s_plain > 0.5
+    assert s_disc == 0.0 and ev["age_weight"] == 0.0
+
+
+def test_ramp_over_three_calls() -> None:
+    plain, disc = trained()
+    for k, omega in enumerate([0.0, 1 / 3, 2 / 3, 1.0]):
+        sp, _ = plain._s_trans(probe(plain, ["A"], "N"))
+        sd, ev = disc._s_trans(probe(disc, ["A"], "N"))
+        assert ev["age_weight"] == pytest.approx(omega), k
+        assert sd == pytest.approx(omega * sp)
+        feed((plain, disc), ["A", "N"])
+    assert disc._s_trans(probe(disc, ["A"], "N"))[1]["age_weight"] == 1.0  # stays 1
+
+
+def irreversible_consumer(det: SequenceDetector, producer: str | None, **kw: bool) -> None:
+    e = probe(det, ["A"], "W")
+    tool = None if producer is None else tid(producer)
+    ref = LedgerRef("doc_xxxxxxxx", "doc_id", 0, tool, "args")
+    det.update(dataclasses.replace(e, ledger_refs=(ref,)), TYPES, **kw)
+
+
+def test_consumed_by_irreversible_lifts_discount_early() -> None:
+    _, disc = trained()
+    irreversible_consumer(disc, "N", irreversible=True)
+    s, ev = disc._s_trans(probe(disc, ["A"], "N"))
+    assert ev["age_weight"] == 1.0 and s > 0.5
+    rec = disc._store.get(key_validated(AGENT))
+    assert isinstance(rec, ValidatedRecord) and rec.tools == {tid("N")}
+
+
+@pytest.mark.parametrize(
+    ("producer", "irreversible"), [("N", False), (None, True)], ids=["reversible", "task-input"]
+)
+def test_validation_needs_an_irreversible_call_and_a_producer_tool(
+    producer: str | None, irreversible: bool
+) -> None:
+    _, disc = trained()
+    irreversible_consumer(disc, producer, irreversible=irreversible)
+    assert disc._s_trans(probe(disc, ["A"], "N"))[1]["age_weight"] == 0.0
+    assert disc._store.get(key_validated(AGENT)) is None
+
+
+def test_validated_record_round_trips(tmp_path: Path) -> None:
+    _, disc = trained()
+    irreversible_consumer(disc, "N", irreversible=True)
+    assert key_validated("a:b") == "s:a%3Ab:validated"
+    f = tmp_path / "state.jsonl"
+    disc._store.dump(f)
+    store = DictStore()
+    store.load(f)
+    rec = store.get(key_validated(AGENT))
+    assert isinstance(rec, ValidatedRecord) and rec.tools == {tid("N")}
+
+
+def test_discount_never_touches_prereq_or_flow() -> None:
+    # age_h above Y's 60 observations, so the age weight is < 1 and the test is not vacuous
+    plain = SequenceDetector(DictStore(), EngineConfig())
+    disc = SequenceDetector(DictStore(), dataclasses.replace(AGE, age_h=1000))
+    for _ in range(60):
+        feed((plain, disc), ["X", "Y"])
+    _, ev = disc._s_trans(probe(disc, [], "Y"))
+    assert float(str(ev["age_weight"])) < 1.0
+
+    def parts(d: SequenceDetector) -> dict[str, tuple[float, dict[str, object]]]:
+        return {n: (s, ev) for n, s, ev in d._parts(probe(d, [], "Y"), TYPES)}  # X is missing
+
+    p_plain, p_disc = parts(plain), parts(disc)
+    assert p_plain["prereq"][0] > 0.0
+    for part in ("prereq", "flow"):
+        assert p_disc[part] == p_plain[part]
+    one_disc = one(disc, probe(disc, [], "Y"))
+    assert one_disc.score > 0.0 and one_disc.evidence["fired"] == "prereq"
+    assert one_disc.evidence["prereq_missing"] == tid("X")
+
+
+def test_off_is_byte_identical_and_emits_nothing(tmp_path: Path) -> None:
+    off = SequenceDetector(DictStore(), EngineConfig())
+    for _ in range(3):
+        run_session(off, ["A", "B"])
+    ev = one(off, probe(off, ["A"], "N")).evidence
+    assert "age_weight" not in ev
+    irreversible_consumer(off, "N", irreversible=True)
+    assert off._store.get(key_validated(AGENT)) is None
+
+
+def test_magnitude_and_novelty_unaffected() -> None:
+    def results(cfg: EngineConfig) -> list[list[tuple[str, str | None, float]]]:
+        eng, tr, clock = warm_engine(cfg)
+        raws = novel_then_benign(clock, 3)
+        return [
+            [(s.detector, s.field, s.score) for s in r.per_detector if s.detector != "sequence"]
+            for r in run_engine_session(eng, raws, tr)
+        ]
+
+    on, off = results(EngineConfig(seq_age_discount=True)), results(EngineConfig())
+    assert on == off
+    assert max(s for d, _, s in on[0] if d == "novelty") == 1.0
+
+
+def test_engine_passes_irreversibility_under_br_mode_off() -> None:
+    eng, tr, clock = warm_engine(AGE, tool=DELETE, item_count=None)
+    assert eng.cfg.br_mode == "off"
+    produced = "doc_prod77bb"
+    raws = [
+        call(clock, "t", 0, DOCS[0], tool="kb.get_doc", ids=(produced,)),
+        call(clock, "t", 1, produced, tool=DELETE, item_count=None),
+    ]
+    run_engine_session(eng, raws, tr)
+    rec = eng.store.get(key_validated("a1"))
+    # (the warm-up repeats of delete_doc also join)
+    assert isinstance(rec, ValidatedRecord) and "kb.get_doc" in rec.tools
+
+
+def test_strict_replay_of_ci_dataset_with_age_discount() -> None:
+    raws, labels = ci_dataset()
+    eng = Engine(AGE, enabled=KNOWN_DETECTORS)
+    rows = replay(raws, labels, eng, SplitSpec(), strict=True, outcomes="review")  # no LeakError
+    assert len(rows) == len(raws)

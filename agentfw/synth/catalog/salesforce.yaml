@@ -1,5 +1,6 @@
 salesforce.run_soql:
   kind: read
+  annotations: {read_only: true, destructive: false, idempotent: true, open_world: false}  # no side effect
   args:
     query:
       type: categorical
@@ -15,6 +16,7 @@ salesforce.run_soql:
     produces_ids: [record.ids]
 salesforce.get_record:
   kind: read
+  annotations: {read_only: true, destructive: false, idempotent: true, open_world: false}  # no side effect
   args:
     object: {type: categorical, vocab: [Opportunity, Contact, Account]}
     record_id: {type: id, prefix: "006", source: external}
@@ -28,6 +30,7 @@ salesforce.get_record:
     produces_ids: [record.id, record.owner]
 salesforce.update_record:
   kind: write
+  annotations: {read_only: false, destructive: true, idempotent: true, open_world: false}  # overwrites a field value
   args:
     object: {type: categorical, vocab: [Opportunity, Contact, Account]}
     record_id: {type: id, prefix: "006", source: salesforce.get_record.id}
@@ -43,6 +46,7 @@ salesforce.update_record:
     produces_ids: [record.id]
 salesforce.mass_update:
   kind: write
+  annotations: {read_only: false, destructive: true, idempotent: true, open_world: false}  # overwrites a field on many records
   args:
     object: {type: categorical, vocab: [Opportunity, Contact, Account]}
     record_ids: {type: list_of_id, prefix: "006", source: salesforce.run_soql.ids}
@@ -54,6 +58,7 @@ salesforce.mass_update:
     produces_ids: [job.id]
 salesforce.create_task:
   kind: write
+  annotations: {read_only: false, destructive: false, idempotent: false, open_world: false}  # additive: a new task per call
   args:
     record_id: {type: id, prefix: "006", source: salesforce.get_record.id}
     subject: {type: freetext, len_dist: {family: lognormal, mu: 4.0, sigma: 0.6, min: 5}}

@@ -86,6 +86,18 @@ real LLM and sandbox accounts), so the Tier-2 numbers are not published yet;
 `tests/acceptance/test_tier2_exit.py` skips until it exists. The SW1 leaderboard is a synthetic
 stand-in, not the exit.
 
+**Trajectory monitoring status (waiting on the user).** The trajectory features (F1–F8 and F10
+of [docs/feature-spec-trajectory-monitoring.md](docs/feature-spec-trajectory-monitoring.md)) are
+built behind `EngineConfig` switches that are all off by default, so the default engine and every
+number above are unchanged. `python -m agentfw.bench.trajectory` measures each switch on two seeds
+of SW1 extended by the runaway and splice families; the rendered report is
+[docs/trajectory-benchmark.md](docs/trajectory-benchmark.md). Under both spec §5.2 allow-all and
+the oracle-reviewer approval loop (labels act as a perfect human reviewer → optimistic),
+`br_mode="modulate"` and `provisional` are net-negative as built, and all switches together raise
+the decision benign FPR from about 1% to about 11% (spec §5.2 allow-all).
+[Decision 010](docs/decisions/010-trajectory-defaults.md) proposes defaults per switch and lists
+the open user decisions (T-30, T-38, T-47, T-51). No default changes until the user decides.
+
 ## License
 
 No license has been chosen yet. A license must be chosen before this repository or the dataset is

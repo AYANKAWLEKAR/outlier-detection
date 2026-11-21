@@ -1,10 +1,12 @@
 """The engine (spec §6): every sub-detector composed behind the harness ``Detector`` protocol.
 
 ``score(e)`` (pure): look up the type of every flat and derived path once (``TypeView`` as of
-*before* this envelope), run the enabled sub-detectors, fuse (§6.7), and read the agent's
-calibrated threshold and decision band (§6.8). The result carries ``field_types`` for every
-path. The engine remembers ``(envelope_id, fused)`` of the last score; that cache is not
-detector state (it is not in the store and never counted by ``state_bytes``).
+*before* this envelope), run the enabled sub-detectors, fuse (§6.7), read the agent's calibrated
+threshold and decide (``core.trajectory.decide``: the §6.8 band, then the trajectory stages; with
+every switch off exactly ``Calibrator.decide``). The result carries ``field_types`` for every
+path. The engine remembers the fused score, threshold, trajectory and scores of the last score
+(keyed by ``envelope_id``); that cache is not detector state (it is not in the store and never
+counted by ``state_bytes``).
 
 ``update(e, outcome)``: nothing moves unless the outcome is ``ALLOWED`` / ``APPROVED`` (a blocked
 or denied action never moves a baseline; two exceptions (Task 1.15): with the opt-in
@@ -31,50 +33,149 @@ moves a baseline distribution). Otherwise, in order:
 
 Freetext never reaches state: the normalizer already replaced strings of ``freetext_min_len``+
 characters by a derived ``__strlen__`` length.
+
+Vital signs (F2, Task 1.5) are opt-in: ``enabled`` defaults to the v1 four (``ALL_DETECTORS``)
+and accepts ``"vital"`` too (``KNOWN_DETECTORS``). Vital scores are never fused (T-07): fusion
+runs over the v1 scores only, then the vital scores are appended to ``per_detector`` and their
+reasons (score > ``reason_min``, highest first) after the v1 reasons. So the fused score, the
+decision and every piece of state are the same with and without ``"vital"``.
+
+Trajectory (F3, Task 1.7): every result carries a ``TrajectoryInfo``: the regime (T-06: per-key
+history = the sequence detector's unigram count of the (agent, tool) >= ``mag_cold_n``; schemas =
+the tool's hint ``has_schema``), the blast radius ``b`` (``core.blast``; ``None`` while
+``br_mode="off"``), irreversibility and the threshold the decision used. ``br_mode="score"`` also
+sets ``Reason.blast_radius = b`` on every reason; ``"modulate"`` decides against
+``θ_eff = θ · (1 − br_k · b)``. ``DetectorResult.threshold``, the calibrator and every piece of
+state keep the agent's own θ, so modulation moves decisions only. ``b`` reads the sequence
+detector's kind records (write kind, item counts) and never writes, so ``score`` stays pure.
+
+Session flags (F7 substrate, Task 2.1): ``score`` also derives the call's flags
+(``core.trajectory.flags``) into ``TrajectoryInfo.flags`` and caches them with the fused score.
+Everything else about sessions sits behind one gate, ``Engine._book`` (T-34, ruling R15): a
+``SessionBook`` when ``sessions``, ``provisional`` or ``session_enforce`` -- any feature that
+needs session records -- is on, else None (no ``sess:`` record is ever written, ``density`` is
+None and the session settings are not validated). With it, ``score`` reads the session's flag
+window into ``TrajectoryInfo.density`` (T-09; pure, ``SessionBook.peek``), and ``update`` first
+records the call's flags in that window -- for **every** outcome, before the early return
+above, since a blocked call is still a step of the session -- with the cached flags when they
+are ``e``'s, else a fresh pure evaluation computed before anything moves (its fused score and
+threshold then serve step 1). Session records are never read by a detector, so scores,
+decisions and every other record are the same with and without the gate -- except the decisions
+``session_enforce`` makes.
+
+Provisional flags (F6, Task 2.2; ``core.trajectory.provisional``): with ``provisional``, ``decide``
+allows a reversible call the band would block, with flag ``PROVISIONAL``, and irreversibility
+always uses the blast radius (T-35; also whenever the session gate is open or ``br_mode``,
+``gate`` or ``escalate`` is on, so the derived flags never depend on an unrelated switch: T-61).
+``score`` runs the lifecycle step (``advance``) on a *copy*
+of the session record, so its ``UNRESOLVED`` / ``OFF_TRACK`` flags and density are what ``update``
+then records; ``update`` runs the same step on the stored record, opens the call's ``ProvEntry``
+when it was provisional and executed (outcome ``ALLOWED`` / ``APPROVED``; a call refused outside
+the engine opens none but keeps its flags in the window), and records the flags (T-36).
+
+Pre-execution gate (F4, Task 3.1; ``core.trajectory.gate``): with ``gate``, ``decide`` runs the
+gate on every irreversible call (irreversibility again from the blast radius whatever
+``br_mode``, T-35 / T-41) with the call's envelope, its pinned types and the sequence detector,
+which the gate reads at call time (no snapshot is kept; ``score`` stays pure). Its outcome is
+``TrajectoryInfo.gate``; with ``escalate`` off a gate block is the only way the engine blocks
+with ``gate`` on, since an escalation is ``REQUIRE_APPROVAL`` and a reversible call is capped
+there (or provisional).
+
+Escalation (F5, Task 3.2; ``core.trajectory.escalate``; T-12, T-42, T-60): with ``escalate``,
+``decide`` escalates an irreversible call it would block or hold for approval (not a gate block)
+and the injected ``judge`` (``Engine(judge=...)``, default none) may break a tie inside the
+approval band, shown the envelope and the result's reasons only. The escalation's "fresh
+re-score" is the fused score this evaluation just computed: within one pure ``score`` the store
+and the envelope are the same, and the Python fast path skips nothing (T-12), so recomputing it
+could only return the same number (T-60; the Go port, whose fast path takes shortcuts, keeps a
+real re-score). A re-score that confirms a gate escalation blocks again. ``update`` on an
+envelope it did not just score evaluates it afresh, so the escalation (and the judge) runs again
+there.
+
+Session verdicts (F7, Task 3.3; ``core.trajectory.session``, T-43): behind the session gate,
+``_evaluate`` runs, in order: ``decide``; the call's flags from that decision; the provisional
+step on a copy; the density including this call; the verdict (``ladder``: ``HALT`` also when the
+session was halted before this call) and the session's fused mass; last, the session overlay
+(``session_overlay``) on the halted state read *before* this call -- with ``session_enforce`` a
+call of an already halted session is ``BLOCK``ed and its reasons start with ``HALT_REASON``. The
+flags, density and verdict never see the overlay. ``update`` records the same flags and stores
+the same verdict (sticky ``halted``) and mass (``SessionBook.record``), so what ``score`` reports
+is what the record holds; ``release_session`` clears a halt. The mass is reported, never
+thresholded.
+
+Verdict authority (F8, Task 3.4; ``core.trajectory.authority``, T-14, T-44 - T-50): every call's
+``TrajectoryInfo.maturity`` (and the count that set it, ``maturity_n``) is graded from the scores
+its decision rests on (``grade``; the contributor floor drops to ``θ_eff - cal_delta`` when that
+is under 0.3, so θ_eff is computed first: T-50), and every reason the engine emits carries that
+maturity and the regime (``fusion.annotate``), whatever ``authority`` says. With ``authority``,
+``decide``'s ceiling caps the decision by it (before the session overlay, which it does not cap,
+T-47); the flags are derived from the decision before the cap (``TrajectoryInfo.capped_from``),
+so given the same outcomes the session window, densities and verdicts do not depend on the
+switch. Off: decisions are unchanged.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Mapping
 from time import perf_counter_ns
 from types import MappingProxyType
 
+from agentfw.core.blast import blast_radius, irreversible, regime_of
 from agentfw.core.calibration import Calibrator
-from agentfw.core.config import CAL_CENSOR_MODES, EngineConfig
+from agentfw.core.config import BR_MODES, CAL_CENSOR_MODES, EngineConfig
 from agentfw.core.detectors.base import SubDetector, signed_log1p, value_key
 from agentfw.core.detectors.magnitude import RESP_FIELD, MagnitudeDetector
 from agentfw.core.detectors.novelty import NoveltyDetector
 from agentfw.core.detectors.sequence import SequenceDetector
 from agentfw.core.detectors.velocity import VelocityDetector
+from agentfw.core.detectors.vital import VitalDetector
 from agentfw.core.envelope import (
     ActionEnvelope,
+    Decision,
     DetectorResult,
     DetectorScore,
     FieldType,
     Outcome,
+    Reason,
+    TrajectoryInfo,
 )
-from agentfw.core.fusion import FusionResult, fuse
+from agentfw.core.fusion import FusionResult, annotate, fuse
 from agentfw.core.hints import ToolHint
+from agentfw.core.normalize import RECENT_MAX
 from agentfw.core.patterns import try_number
 from agentfw.core.priors import PooledPriors
 from agentfw.core.schema_infer import TypeInference, TypeView
 from agentfw.core.state import DictStore, StateStore
+from agentfw.core.trajectory import provisional
+from agentfw.core.trajectory.authority import grade
+from agentfw.core.trajectory.decide import HALT_REASON, decide, session_overlay
+from agentfw.core.trajectory.escalate import Judge
+from agentfw.core.trajectory.flags import Flag, derive_flags
+from agentfw.core.trajectory.session import SessionBook, SessionRecord, ladder
 
-__all__ = ["ALL_DETECTORS", "DETECTOR_ORDER", "Engine"]
+__all__ = ["ALL_DETECTORS", "DETECTOR_ORDER", "KNOWN_DETECTORS", "VITAL", "Engine"]
 
-DETECTOR_ORDER = ("magnitude", "novelty", "velocity", "sequence")
+DETECTOR_ORDER = ("magnitude", "novelty", "velocity", "sequence")  # the fused (v1) detectors
 ALL_DETECTORS = frozenset(DETECTOR_ORDER)
+VITAL = "vital"
+KNOWN_DETECTORS = ALL_DETECTORS | {VITAL}
 
 _LEARN = frozenset({Outcome.ALLOWED, Outcome.APPROVED})
 _CATEGORICAL = frozenset({FieldType.CATEGORICAL, FieldType.ID})
 _NO_HINTS: Mapping[str, ToolHint] = MappingProxyType({})
+#: Flags the provisional lifecycle raises on a later call (``provisional.advance``).
+_LIFECYCLE = frozenset({Flag.UNRESOLVED, Flag.OFF_TRACK})
 
 
 def _finite_y(v: object) -> float | None:
     """``signed_log1p(x)`` of a finite numeric value, else ``None`` (NaN/±inf/non-numbers)."""
     x = try_number(v)
     return signed_log1p(x) if x is not None and math.isfinite(x) else None
+
+
+_Scored = tuple[str, float, float, TrajectoryInfo, tuple[DetectorScore, ...]]
 
 
 class _CallTypes(TypeView):
@@ -98,16 +199,49 @@ class Engine:
         store: StateStore | None = None,
         enabled: frozenset[str] = ALL_DETECTORS,
         hints: Mapping[str, ToolHint] = _NO_HINTS,
+        judge: Judge | None = None,
     ) -> None:
-        unknown = set(enabled) - ALL_DETECTORS
+        unknown = set(enabled) - KNOWN_DETECTORS
         if unknown:
-            raise ValueError(f"unknown detectors {sorted(unknown)}; known: {DETECTOR_ORDER}")
+            known = (*DETECTOR_ORDER, VITAL)
+            raise ValueError(f"unknown detectors {sorted(unknown)}; known: {known}")
         if cfg.cal_censor not in CAL_CENSOR_MODES:
             raise ValueError(f"unknown cal_censor {cfg.cal_censor!r}; known: {CAL_CENSOR_MODES}")
+        if cfg.br_mode not in BR_MODES:
+            raise ValueError(f"unknown br_mode {cfg.br_mode!r}; known: {BR_MODES}")
+        if not 0.0 <= cfg.br_k <= 1.0:  # keeps θ_eff >= 0
+            raise ValueError(f"br_k must be in [0, 1], got {cfg.br_k}")
+        if cfg.provisional:
+            provisional.check_config(cfg)
+        if cfg.gate and not 0.0 <= cfg.gate_flow_rate <= 1.0:
+            raise ValueError(f"gate_flow_rate must be in [0, 1], got {cfg.gate_flow_rate}")
+        if cfg.escalate and not 0.0 <= cfg.judge_allow < cfg.judge_block <= 1.0:
+            raise ValueError(
+                "need 0 <= judge_allow < judge_block <= 1, got "
+                f"judge_allow={cfg.judge_allow}, judge_block={cfg.judge_block}"
+            )
+        if cfg.authority and not 0 < cfg.mat_warm_n <= cfg.mat_mature_n:
+            raise ValueError(
+                "need 0 < mat_warm_n <= mat_mature_n, got "
+                f"mat_warm_n={cfg.mat_warm_n}, mat_mature_n={cfg.mat_mature_n}"
+            )
+        if cfg.seq_age_discount and cfg.age_h < 1:  # ω divides by age_h
+            raise ValueError(f"age_h must be >= 1 with seq_age_discount, got {cfg.age_h}")
+        if VITAL in enabled:  # a window of 0 would slice the whole history (``[-0:]``)
+            for name in ("vital_w_loop", "vital_w_loop_polling", "vital_w_spin", "vital_w_stall"):
+                if getattr(cfg, name) < 1:
+                    raise ValueError(f"{name} must be >= 1 with vital, got {getattr(cfg, name)}")
+            for name in ("vital_w_spin", "vital_w_stall"):  # need a full window of ``recent``
+                if getattr(cfg, name) > RECENT_MAX:
+                    raise ValueError(
+                        f"{name} must be <= {RECENT_MAX} (the recent-call ring) with vital, "
+                        f"got {getattr(cfg, name)}"
+                    )
         self.cfg = cfg
         self.store: StateStore = DictStore() if store is None else store
         self.enabled = frozenset(enabled)
         self.hints = hints
+        self.judge = judge  # F5's optional tie-breaker; consulted only with ``escalate`` on
         self.inference = TypeInference(self.store, cfg)
         self.priors = PooledPriors(self.store, cfg)
         self.calibrator = Calibrator(self.store, cfg)
@@ -119,50 +253,85 @@ class Engine:
         numeric_ref = (
             magnitude.has_ref if "magnitude" in self.enabled and cfg.mag_bool_numeric else None
         )
+        sequence = SequenceDetector(self.store, cfg, hints)
+        self._sequence = sequence  # kind records and counts for the trajectory (read-only)
         built: dict[str, SubDetector] = {
             "magnitude": magnitude,
             "novelty": NoveltyDetector(self.store, cfg, self.priors, numeric_ref),
             "velocity": VelocityDetector(self.store, cfg, hints),
-            "sequence": SequenceDetector(self.store, cfg, hints),
+            "sequence": sequence,
         }
         self._detectors = tuple(built[n] for n in DETECTOR_ORDER if n in self.enabled)
+        # Reported, never fused (T-07); stateless, so it has no update to run.
+        self._vital = (
+            VitalDetector(cfg, hints, sequence.is_write) if VITAL in self.enabled else None
+        )
         vel = built["velocity"]
         self._velocity = (
             vel if isinstance(vel, VelocityDetector) and "velocity" in self.enabled else None
         )
-        self._cache: tuple[str, float, float] | None = None  # (envelope_id, fused, threshold)
+        # The one session gate (T-34, ruling R15): ``_book`` is None exactly when no feature needs
+        # session records; recording (``update``) and density (``_evaluate``) both test it. A later
+        # feature that needs the window ORs its switch into this expression.
+        sessions_on = cfg.sessions or cfg.provisional or cfg.session_enforce
+        self._book: SessionBook | None = SessionBook(self.store, cfg) if sessions_on else None
+        # Irreversibility from the blast radius (the full F3 rule) whenever a feature reads it
+        # (T-35, T-41, T-42) or the session gate is open (T-61): the flags it feeds
+        # (``NOVEL_READ``, ``ID_FLOW_VIOLATION``) then never depend on an unrelated switch.
+        self._irr_from_b = (
+            cfg.br_mode != "off"
+            or cfg.provisional
+            or cfg.gate
+            or cfg.escalate
+            or self._book is not None
+        )
+        # (envelope_id, fused, threshold, trajectory, scores) of the last score
+        self._cache: _Scored | None = None
 
     # -- Detector protocol ---------------------------------------------------------------------
 
     def reset(self) -> None:
         self.store.clear()
+        if self._book is not None:
+            self._book.reset()
         self._cache = None
 
     def score(self, e: ActionEnvelope) -> DetectorResult:
         t0 = perf_counter_ns()
-        view = self._view(e)
-        per, fr = self._fuse(e, view)
-        agent = e.agent_id
-        theta = self.calibrator.threshold(agent)
-        decision = self.calibrator.decide(agent, fr.fused)
-        self._cache = (e.envelope_id, fr.fused, theta)
+        view, per, fr, theta, traj, decision = self._evaluate(e)
+        self._cache = (e.envelope_id, fr.fused, theta, traj, per)
         return DetectorResult(
             fused_score=fr.fused,
             per_detector=per,
-            reasons=fr.reasons,
+            reasons=annotate(fr.reasons, traj.blast_radius, traj.maturity, traj.regime),
             latency_us=(perf_counter_ns() - t0) / 1000.0,
             threshold=theta,
             decision=decision,
             field_types=view.types,
+            trajectory=traj,
         )
 
     def update(self, e: ActionEnvelope, outcome: Outcome) -> None:
         cached = self._cache
         fused: float | None = None
         theta = math.nan
+        traj: TrajectoryInfo | None = None
+        per: tuple[DetectorScore, ...] = ()
         if cached is not None and cached[0] == e.envelope_id:
             self._cache = None
-            _, fused, theta = cached
+            _, fused, theta, traj, per = cached
+        book = self._book
+        if book is not None:  # first, for every outcome (blocked calls enter the window)
+            if traj is None:  # pure: nothing below has moved yet
+                _, per, fr, theta, traj, _ = self._evaluate(e)
+                fused = fr.fused
+            assert fused is not None
+            flags = traj.flags
+            if self.cfg.provisional:
+                rec = book.ensure(e.session_id)
+                flags = self._advance(rec, e, fused, traj, per, outcome)
+            book.record(e, flags, fused)
+            book.maybe_evict(e.ts_unix_ms)
         censor = self.cfg.cal_censor
         if censor != "none" and self.calibrator.n_scored(e.agent_id) < self.cfg.cal_censor_min_n:
             censor = "none"  # still in shadow: learn like the spec
@@ -180,8 +349,12 @@ class Engine:
         if fused is None:
             fused = self._fuse(e, view)[1].fused  # pure: before any state below moves
             theta = self.calibrator.threshold(e.agent_id)
+        irr = self._irreversible(e) if self.cfg.seq_age_discount else False
         for d in self._detectors:
-            d.update(e, view)
+            if irr and d is self._sequence:
+                self._sequence.update(e, view, irreversible=True)
+            else:
+                d.update(e, view)
         self._observe_priors(e, view)
         if censor == "none" or fused < theta:
             self.calibrator.observe(e.agent_id, fused, outcome)
@@ -194,7 +367,118 @@ class Engine:
     def state_bytes(self) -> int:
         return self.store.nbytes()
 
+    def release_session(self, session_id: str) -> None:
+        """Release a halted session (F7, a human's or a policy's call): clear its halt, its
+        verdict and its flag window (``SessionBook.release``). No-op while the session gate is
+        shut or for a session without a record."""
+        if self._book is not None:
+            self._book.release(session_id)
+
     # -- internals ------------------------------------------------------------------------------
+
+    def _evaluate(
+        self, e: ActionEnvelope
+    ) -> tuple[
+        _CallTypes, tuple[DetectorScore, ...], FusionResult, float, TrajectoryInfo, Decision
+    ]:
+        """Pure: types, scores, fusion, the agent's θ, the trajectory (flags, density, session
+        verdict and mass included) and the decision (``core.trajectory.decide``, then the
+        session overlay, whose reason leads ``FusionResult.reasons`` when it blocks)."""
+        view = self._view(e)
+        per, fr = self._fuse(e, view)
+        theta = self.calibrator.threshold(e.agent_id)
+        traj0 = self._trajectory(e, theta, per)
+        reasons: tuple[Reason, ...] = ()
+        if self.judge is not None:
+            reasons = annotate(fr.reasons, traj0.blast_radius, traj0.maturity, traj0.regime)
+        decision, traj = decide(
+            fr.fused,
+            traj0,
+            self.cfg,
+            e=e,
+            types=view,
+            seq=self._sequence,
+            rescore=lambda: fr.fused,  # T-60: the same computation on the same state
+            judge=self.judge,
+            reasons=reasons,
+        )
+        hint = self.hints.get(e.tool_id)
+        # flags from the decision before the authority ceiling (T-46): the call's own evidence
+        pre_cap = decision if traj.capped_from is None else traj.capped_from
+        flags = traj.flags | derive_flags(per, pre_cap, traj.irreversible, hint, self.cfg)
+        book = self._book
+        if book is None:
+            traj = dataclasses.replace(traj, flags=frozenset(flags))
+            return view, per, fr, theta, traj, decision
+        rec = book.peek(e.session_id)
+        if self.cfg.provisional:  # the lifecycle step on a copy: the stored record stays
+            scratch = SessionRecord() if rec is None else rec.copy()
+            theta_eff = traj.threshold_eff
+            flags |= provisional.advance(scratch, e, fr.fused, theta_eff, per, self.cfg)
+        halted = rec is not None and rec.halted  # before this call (T-43)
+        density = book.density_with(rec, flags)
+        traj = dataclasses.replace(
+            traj,
+            flags=frozenset(flags),
+            density=density,
+            session_verdict=ladder(density, halted, self.cfg),  # = book.verdict_with, computed once
+            session_mass=book.mass_with(rec, fr.fused),
+        )
+        decision, traj = session_overlay(decision, traj, halted, self.cfg)
+        if self.cfg.session_enforce and halted:
+            fr = FusionResult(fr.fused, (HALT_REASON, *fr.reasons))
+        return view, per, fr, theta, traj, decision
+
+    def _advance(
+        self,
+        rec: SessionRecord,
+        e: ActionEnvelope,
+        fused: float,
+        traj: TrajectoryInfo,
+        per: tuple[DetectorScore, ...],
+        outcome: Outcome,
+    ) -> frozenset[Flag]:
+        """``update``'s provisional step on the stored record: the lifecycle flags of ``e`` (the
+        ones ``score`` previewed on a copy, from the same record), then ``e``'s own entry when
+        ``decide`` made it provisional and it executed (``ALLOWED`` / ``APPROVED``: only an
+        executed call can produce an artifact; T-36). Returns the flags to record, which keep
+        ``PROVISIONAL`` either way."""
+        flags = provisional.advance(rec, e, fused, traj.threshold_eff, per, self.cfg)
+        if Flag.PROVISIONAL in traj.flags and outcome in _LEARN:
+            provisional.open_entry(rec, e, fused, per, self.cfg)
+        return (traj.flags - _LIFECYCLE) | flags
+
+    def _irreversible(self, e: ActionEnvelope) -> bool:
+        """Irreversibility of ``e`` from the blast radius whatever ``br_mode`` is (T-35); read
+        before any detector learns ``e``, so it matches what ``score`` saw."""
+        seq, hint = self._sequence, self.hints.get(e.tool_id)
+        is_write = seq.is_write(e.agent_id, e.tool_id)
+        b = blast_radius(e, hint, is_write, seq.has_item_count(e.agent_id, e.tool_id))
+        return irreversible(b, hint, is_write, self.cfg.irreversible_b)
+
+    def _trajectory(
+        self, e: ActionEnvelope, theta: float, per: tuple[DetectorScore, ...]
+    ) -> TrajectoryInfo:
+        cfg, seq = self.cfg, self._sequence
+        agent, tool = e.agent_id, e.tool_id
+        hint = self.hints.get(tool)
+        has_schema = hint is not None and hint.has_schema
+        regime = regime_of(has_schema, seq.n_tool(agent, tool), cfg.mag_cold_n)
+        b: float | None = None
+        theta_eff = theta
+        if not self._irr_from_b:
+            irr = irreversible(None, hint, False)
+        else:
+            is_write = seq.is_write(agent, tool)
+            b_val = blast_radius(e, hint, is_write, seq.has_item_count(agent, tool))
+            irr = irreversible(b_val, hint, is_write, cfg.irreversible_b)
+            if cfg.br_mode != "off":  # else b serves the irreversibility of F4-F6 only (T-35)
+                b = b_val
+            if cfg.br_mode == "modulate":
+                theta_eff = theta * (1.0 - cfg.br_k * b_val)
+        # graded against θ_eff: the contributor floor is where a band can intervene (T-50)
+        g = grade(per, regime, cfg, theta_eff)
+        return TrajectoryInfo(regime, b, irr, theta_eff, maturity=g.maturity, maturity_n=g.n)
 
     def _view(self, e: ActionEnvelope) -> _CallTypes:
         base = TypeView(self.inference, e.agent_id, e.tool_id)
@@ -209,7 +493,12 @@ class Engine:
         per: list[DetectorScore] = []
         for d in self._detectors:
             per.extend(d.score(e, view))
-        return tuple(per), fuse(per, self.cfg)
+        fr = fuse(per, self.cfg)
+        if self._vital is None:
+            return tuple(per), fr
+        vital = self._vital.score(e, view)
+        reasons = fr.reasons + fuse(vital, self.cfg).reasons  # vital reasons only, fused unused
+        return (*per, *vital), FusionResult(fr.fused, reasons)
 
     def _observe_priors(self, e: ActionEnvelope, view: _CallTypes) -> None:
         num, cat = self._feed_numeric_priors, self._feed_categorical_priors

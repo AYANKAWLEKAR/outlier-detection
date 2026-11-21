@@ -68,6 +68,7 @@ from agentfw.synth.attacks import (
     mutate_scale,
     novel_value,
 )
+from agentfw.synth.dists import uniform
 
 __all__ = [
     "ACTION_TARGETS",
@@ -275,7 +276,7 @@ class ActionInjector:
             return None
         m = self.plan.strength
         if m is None:
-            m = float(np.exp(self._rng.uniform(math.log(M_MIN), math.log(M_MAX))))
+            m = float(np.exp(uniform(self._rng, math.log(M_MIN), math.log(M_MAX))))
         new = mutate_scale(raw, name, m)
         return new, float(new.args[name]) / float(old)  # type: ignore[arg-type]  # realized (A2)
 
@@ -300,7 +301,7 @@ class ActionInjector:
             return None
         n = self.plan.strength
         if n is None:
-            n = float(np.exp(self._rng.uniform(math.log(SCOPE_MIN), math.log(SCOPE_MAX))))
+            n = float(np.exp(uniform(self._rng, math.log(SCOPE_MIN), math.log(SCOPE_MAX))))
         total = max(int(round(n)), len(orig) + 1)
         prefix = _id_prefix(orig[0])
         grown = blow_up_list(orig, kind == "id", total, prefix, self._rng)
@@ -314,7 +315,7 @@ class ActionInjector:
             if self.plan.strength is not None
             else int(self._rng.integers(BURST_MIN, BURST_MAX + 1))
         )
-        w_ms = int(round(self._rng.uniform(BURST_W_MIN_S, BURST_W_MAX_S) * 1000))
+        w_ms = int(round(uniform(self._rng, BURST_W_MIN_S, BURST_W_MAX_S) * 1000))
         dups = burst_duplicates(raw, r, w_ms, self._rng)
         self._done = True
         # The original is untouched, so the proxy forwards it; the duplicates are never forwarded.
@@ -333,7 +334,7 @@ class ActionInjector:
                 return None
             v = self.plan.strength
             if v is None:
-                v = float(np.exp(self._rng.uniform(math.log(V_MIN), math.log(V_MAX))))
+                v = float(np.exp(uniform(self._rng, math.log(V_MIN), math.log(V_MAX))))
             counts = [
                 h.response_meta.item_count
                 for h in history

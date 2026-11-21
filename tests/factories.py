@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import itertools
+from collections.abc import Iterable
 from typing import Any
 
-from agentfw.core.envelope import ActionEnvelope, RawCall
+from agentfw.core.engine import Engine
+from agentfw.core.envelope import ActionEnvelope, DetectorResult, Outcome, RawCall
 from agentfw.core.ids import ulid_from
 from agentfw.core.normalize import SessionTracker, normalize
 
@@ -38,3 +40,20 @@ def make_env(
     if raw is None:
         raw = make_raw(**raw_overrides)
     return normalize(raw, tracker if tracker is not None else SessionTracker())
+
+
+def run_session(
+    engine: Engine,
+    raws: Iterable[RawCall],
+    tracker: SessionTracker | None = None,
+    outcome: Outcome = Outcome.ALLOWED,
+) -> list[DetectorResult]:
+    """Per raw call, in order: normalize, score, update with ``outcome``, observe."""
+    tr = SessionTracker() if tracker is None else tracker
+    out: list[DetectorResult] = []
+    for raw in raws:
+        e = normalize(raw, tr)
+        out.append(engine.score(e))
+        engine.update(e, outcome)
+        tr.observe(e)
+    return out

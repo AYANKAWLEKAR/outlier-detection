@@ -2,18 +2,28 @@
 
 A NaN detector score is treated as 0 so the fused score is always finite. Every score above
 ``reason_min`` becomes a :class:`Reason`, ordered by descending score (stable on ties).
+``annotate`` adds the call-level facts the engine attaches to every reason it emits: the blast
+radius (only while ``br_mode`` computes one), the evidence maturity and the regime (F8, T-44).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
 
 from agentfw.core.config import EngineConfig
-from agentfw.core.envelope import BaselineSummary, DetectorScore, Reason, Scalar
+from agentfw.core.envelope import (
+    BaselineSummary,
+    DetectorScore,
+    Maturity,
+    Reason,
+    Regime,
+    Scalar,
+)
 
-__all__ = ["FusionResult", "fuse", "reason_from"]
+__all__ = ["FusionResult", "annotate", "fuse", "reason_from"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -74,3 +84,22 @@ def fuse(scores: Sequence[DetectorScore], cfg: EngineConfig) -> FusionResult:
     fused = min(1.0, max(0.0, fused))
     hits = sorted((c for c in cleaned if c[0] > cfg.reason_min), key=lambda c: -c[0])
     return FusionResult(fused, tuple(reason_from(s) for _, s in hits))
+
+
+def annotate(
+    reasons: Sequence[Reason],
+    blast_radius: float | None,
+    maturity: Maturity | None,
+    regime: Regime,
+) -> tuple[Reason, ...]:
+    """Every reason with the call's ``maturity`` and ``regime``, and with ``blast_radius`` when
+    it is not ``None`` (``br_mode="off"`` leaves each reason's own value)."""
+    return tuple(
+        dataclasses.replace(
+            r,
+            blast_radius=r.blast_radius if blast_radius is None else blast_radius,
+            maturity=maturity,
+            regime=regime,
+        )
+        for r in reasons
+    )

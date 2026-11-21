@@ -17,6 +17,14 @@ Behaviour summary (see ``agentfw.synth.schema`` for the generation rules this im
 * ``gap_s`` is 0 for the first call, then lognormal (median ~2.7 s); packaging retimes (D-015).
 * Categorical Dirichlet weights are cached in ``weights_cache``, a dict the caller owns and should
   keep per persona so repeated walks share weights. Omitted: a fresh dict per walk.
+* ``PlannedCall.external_ids`` holds the id values the task itself supplied: every ``ext:``
+  (pool-drawn) argument plus sampled ``source: external`` ones, never an alias-bound id. The
+  sampler seeds a session's first call with them. ``PlannedCall.sources`` lists
+  ``(flat arg path, index of the producing call)`` for an id bound from an alias whose producer
+  was emitted and returned the field in ``produces_ids`` (an echoed arg keeps its own origin);
+  this is grammar provenance, independent of the ledger's rules.
+  ``response_meta.fp`` is ``resp_fingerprint`` of the payload's sorted-key JSON. None of this
+  draws from the RNG.
 * ``id_flow_rate`` is the probability a bound id value is honoured; otherwise a fabricated id
   (not in the matching pool) is used.
 """
@@ -30,7 +38,9 @@ import numpy as np
 import orjson
 
 from agentfw.core.envelope import JsonValue, ResponseMeta
-from agentfw.synth.dists import IdPool, Sampled, WeightsCache, new_id, sample
+from agentfw.core.fingerprint import resp_fingerprint
+from agentfw.core.normalize import flatten
+from agentfw.synth.dists import IdPool, Sampled, WeightsCache, new_id, sample, uniform
 from agentfw.synth.schema import ArgSpec, Catalog, DistSpec, Persona, TaskSpec, ToolSpec
 
 __all__ = ["PlannedCall", "plan_args", "walk"]
@@ -53,6 +63,8 @@ class PlannedCall:
     args: dict[str, JsonValue]
     response_meta: ResponseMeta | None
     gap_s: float
+    external_ids: tuple[str, ...] = ()
+    sources: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(slots=True)
@@ -186,7 +198,7 @@ def _build_args(
             _, ref, lo, hi = b.split(":")
             base = _resolve(aliases, ref)
             assert isinstance(base, int | float)
-            args[name] = round(float(base) * float(ctx.rng.uniform(float(lo), float(hi))), 2)
+            args[name] = round(float(base) * float(uniform(ctx.rng, float(lo), float(hi))), 2)
         else:
             args[name] = _adapt(ctx, tool, name, a, _resolve(aliases, b))
     return args
@@ -216,8 +228,96 @@ def _meta(spec: ToolSpec, produced: dict[str, JsonValue], item_count: int | None
             ids.append(v)
         elif isinstance(v, list):
             ids.extend(x for x in v if isinstance(x, str))
-    size = _BYTES_HEADER + len(orjson.dumps(produced, option=orjson.OPT_SORT_KEYS))
-    return ResponseMeta(item_count=item_count, bytes=size, error=False, ids=tuple(ids[:_MAX_IDS]))
+    blob = orjson.dumps(produced, option=orjson.OPT_SORT_KEYS)
+    return ResponseMeta(
+        item_count=item_count,
+        bytes=_BYTES_HEADER + len(blob),
+        error=False,
+        ids=tuple(ids[:_MAX_IDS]),
+        fp=resp_fingerprint(blob.decode(), item_count, False),
+    )
+
+
+def _id_strings(v: JsonValue) -> list[str]:
+    if isinstance(v, str):
+        return [v]
+    return [x for x in v if isinstance(x, str)] if isinstance(v, list) else []
+
+
+def _external_ids(
+    spec: ToolSpec, step_args: dict[str, str], args: dict[str, JsonValue]
+) -> tuple[str, ...]:
+    """Ids the task itself supplied: every pool-drawn (``ext:``) id, plus sampled
+    ``source: external`` ids. An id bound from an earlier call's alias has a producer, so it is
+    not a task input."""
+    out: list[str] = []
+    for name, a in spec.args.items():
+        b = step_args.get(name, "sample")
+        if name in args and (b.startswith("ext:") or (b == "sample" and a.source == "external")):
+            out.extend(_id_strings(args[name]))
+    return tuple(out)
+
+
+_Origin = dict[str, dict[str, int | None]]  # alias -> field -> emitted index of its producer
+
+
+def _arg_origins(spec: ToolSpec, step_args: dict[str, str], origin: _Origin) -> dict[str, int]:
+    """Producer index for each alias-bound arg whose bound field came from an emitted call."""
+    out: dict[str, int] = {}
+    for name in spec.args:
+        ref = step_args.get(name, "sample")
+        if ref == "sample" or ref.startswith(("ext:", "frac:")):
+            continue
+        alias, _, fld = ref.partition(".")
+        o = origin[alias][fld]
+        if o is not None:
+            out[name] = o
+    return out
+
+
+def _field_origins(
+    spec: ToolSpec, arg_org: dict[str, int], this: int, emitted: bool
+) -> dict[str, int | None]:
+    """Where each produced field's id comes from: an echoed arg keeps that arg's origin (a task
+    input has none); a new id belongs to this call if it was emitted and returns the field."""
+    out: dict[str, int | None] = {}
+    for key, pa in spec.produced.items():
+        if pa.from_arg is not None:
+            o = arg_org.get(pa.from_arg)
+        else:
+            o = this if emitted and key in spec.response.produces_ids else None
+        out.setdefault(key.split(".", 1)[1], o)
+    return out
+
+
+def _arg_sources(
+    step_args: dict[str, str], args: dict[str, JsonValue],
+    aliases: dict[str, dict[str, JsonValue]], arg_org: dict[str, int],
+) -> tuple[tuple[str, int], ...]:  # fmt: skip
+    """``(flat path, producer index)`` for each kept alias-bound arg that still carries the bound
+    value (a fabricated id from ``id_flow_rate < 1`` does not)."""
+    out: list[tuple[str, int]] = []
+    for name in sorted(arg_org):
+        if name not in args:
+            continue
+        bound = set(_id_strings(_resolve(aliases, step_args[name])))
+        for path, vals in flatten({name: args[name]})[0].items():
+            if any(v in bound for v in vals if isinstance(v, str)):
+                out.append((path, arg_org[name]))
+    return tuple(out)
+
+
+def _carried(
+    arg_org: dict[str, int], step_args: dict[str, str], args: dict[str, JsonValue],
+    aliases: dict[str, dict[str, JsonValue]],
+) -> dict[str, int]:  # fmt: skip
+    """``arg_org`` restricted to args that still carry an id of their bound value."""
+    out: dict[str, int] = {}
+    for name, o in arg_org.items():
+        bound = set(_id_strings(_resolve(aliases, step_args[name])))
+        if name in args and any(v in bound for v in _id_strings(args[name])):
+            out[name] = o
+    return out
 
 
 def _gap(ctx: _Ctx, first: bool) -> float:
@@ -244,6 +344,7 @@ def walk(
     idx = 0
     for _ in range(reps):
         aliases: dict[str, dict[str, JsonValue]] = {}
+        origin: _Origin = {}
         for step in task.steps:
             spec = catalog[step.tool]
             emit = not (step.optional_prob < 1.0 and rng.random() >= step.optional_prob)
@@ -251,11 +352,18 @@ def walk(
                 emit = False
             args = _build_args(ctx, step.tool, spec, step.args, aliases)
             produced, item_count = _produce(ctx, step.tool, spec, args)
+            # an arg ``_adapt`` replaced (a fabricated id) has no producer: not for itself, nor
+            # for a field of this call that echoes it
+            arg_org = _carried(_arg_origins(spec, step.args, origin), step.args, args, aliases)
+            bound_aliases = dict(
+                aliases
+            )  # this step's args bind against the aliases before its own
             if step.as_:
                 by_field: dict[str, JsonValue] = {}
                 for key, val in produced.items():
                     by_field.setdefault(key.split(".", 1)[1], val)
                 aliases[step.as_] = by_field
+                origin[step.as_] = _field_origins(spec, arg_org, len(calls), emit)
             if emit:
                 if noise.arg_dropout > 0:
                     args = {
@@ -264,10 +372,14 @@ def walk(
                         if spec.args[k].type in _ID_TYPES or rng.random() >= noise.arg_dropout
                     }
                 meta = _meta(spec, produced, item_count)
-                calls.append(PlannedCall(step.tool, args, meta, _gap(ctx, not calls)))
+                ext = _external_ids(spec, step.args, args)
+                src = _arg_sources(step.args, args, bound_aliases, arg_org)
+                calls.append(PlannedCall(step.tool, args, meta, _gap(ctx, not calls), ext, src))
                 if noise.retry > 0 and rng.random() < noise.retry:
                     calls.append(
-                        PlannedCall(step.tool, copy.deepcopy(args), meta, _gap(ctx, False))
+                        PlannedCall(
+                            step.tool, copy.deepcopy(args), meta, _gap(ctx, False), ext, src
+                        )
                     )
             if abandon_after == idx:
                 return calls
